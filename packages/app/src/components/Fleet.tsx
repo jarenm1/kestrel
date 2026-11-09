@@ -10,7 +10,7 @@ import {
 import { Either, Schema } from "effect"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
-import { BOX_FORM_ERROR, OnlineBadge } from "@/components/Boxes"
+import { BOX_FORM_ERROR, HealthBadge } from "@/components/Boxes"
 import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
@@ -208,7 +208,7 @@ function FleetBoxRow({ box, activity, now, onSecret }: {
           <div className="flex min-w-0 items-center gap-2">
             <span className="truncate font-medium">{box.name}</span>
             <Badge variant={variant}>{box.state}</Badge>
-            <OnlineBadge online={health.data?.online} />
+            <HealthBadge health={health.data} />
           </div>
           <span className="truncate font-mono text-xs text-muted-foreground">{box.url}</span>
         </div>

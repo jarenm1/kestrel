@@ -128,8 +128,8 @@ export function PairPage() {
             <Paired
               text={
                 conflict
-                  ? "This code was already approved. Your terminal will finish setup."
-                  : "Paired. Your terminal will finish setup."
+                  ? "This code was already approved. Finish setup in your terminal."
+                  : "Paired. Finish setup in your terminal: the install script starts the box itself; after npx kestrel-box login, run npx kestrel-box install."
               }
             />
           )}
@@ -168,7 +168,13 @@ function PairingForm({
 }) {
   const [name, setName] = useState(pending.name ?? "")
   const [url, setUrl] = useState(pending.url ?? DEFAULT_BOX_URL)
-  const [activate, setActivate] = useState(true)
+  // Until the user decides, the box becomes the active one only if it already answers at its URL: pairing usually
+  // happens before the box runs, and an active box that cannot be reached leaves the app with nowhere to send threads.
+  const [activateChoice, setActivate] = useState<boolean | null>(null)
+  const origin = url.trim().replace(/\/+$/, "")
+  const health = useQuery({ ...queries.boxHealth(origin), enabled: /^https?:\/\/[^/]+$/.test(origin) })
+  const reachable = health.data?.state === "online"
+  const activate = activateChoice ?? reachable
   const [invalid, setInvalid] = useState(false)
 
   function submit(e: FormEvent<HTMLFormElement>) {
@@ -197,6 +203,12 @@ function PairingForm({
         <Checkbox checked={activate} onCheckedChange={(checked) => setActivate(checked === true)} />
         Use this box now
       </label>
+      {health.data?.state === "offline" && !activate && (
+        <span className="text-xs text-muted-foreground">
+          The box does not answer at this URL yet, which is expected until it is installed and running. It is added
+          without becoming your active box: pick it in Settings › Boxes once it answers.
+        </span>
+      )}
       <span className="text-xs text-muted-foreground">Code expires {formatTime(pending.expiresAt)}.</span>
       {invalid && <Alert>{BOX_FORM_ERROR}</Alert>}
       {error !== null && error !== undefined && <Alert>{pairingError(error)}</Alert>}

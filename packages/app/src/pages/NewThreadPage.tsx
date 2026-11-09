@@ -5,7 +5,8 @@ import { Schema } from "effect"
 import { GithubRepoSlug, type BoxList, type SendMessageBody, type Task } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries, storeTask } from "@/api/queries"
-import { BoxPicker, KESTREL_BOX, useBoxOnline } from "@/components/BoxPicker"
+import { BoxPicker, KESTREL_BOX, useBoxHealth } from "@/components/BoxPicker"
+import { BoxProblem } from "@/components/Boxes"
 import { Composer } from "@/components/Composer"
 import { BranchPicker, RepoPicker } from "@/components/RepoPicker"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
@@ -38,7 +39,8 @@ export function NewThreadPage() {
   const [storedBox, setStoredBox] = useStoredChoice("kestrel.newThreadBox", Schema.String)
   const boxes = useQuery(queries.boxes())
   const boxId = chosenBox(storedBox, boxes.data)
-  const boxOnline = useBoxOnline(boxId ?? null, boxes.data)
+  const boxHealth = useBoxHealth(boxId ?? null, boxes.data)
+  const boxUrl = boxId ? boxes.data?.boxes.find((box) => box.id === boxId)?.url : undefined
   // The thread created by an earlier attempt and what it was created with; a retry after a failed send reuses it
   // instead of creating another, unless the repository, branch or box was changed since.
   const created = useRef<{
@@ -59,8 +61,10 @@ export function NewThreadPage() {
       let task: Task
       if (previous !== null && previous.repo === repo && previous.branch === branch && previous.boxId === boxId) {
         task = previous.task
-      } else if (boxOnline === false) {
+      } else if (boxHealth?.state === "offline") {
         throw new Error("That box is offline. Pick another box or start it first.")
+      } else if (boxHealth?.state === "outdated" || boxHealth?.state === "rejected") {
+        throw new Error("That box cannot run threads until it is fixed. Pick another box, or see Settings › Boxes.")
       } else {
         const target = repo === undefined ? {} : branch === undefined ? { pickedRepo: repo } : { checkout: { repo, baseBranch: branch } }
         task = await api.createTask({ title, generateTitle: true, ...target }, boxId)
@@ -120,6 +124,9 @@ export function NewThreadPage() {
             />
           )}
         </div>
+        {boxUrl !== undefined && (
+          <BoxProblem health={boxHealth} url={boxUrl} className="mx-4 mt-2 text-xs text-muted-foreground" />
+        )}
       </div>
     </div>
   )

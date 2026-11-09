@@ -29,7 +29,7 @@ export const keys = {
   /** The user's boxes and which one is active. */
   boxes: ["boxes"] as const,
   /** Own health of one of the user's boxes, by its URL. */
-  boxHealth: (url: string) => ["box-health", url] as const,
+  boxHealth: (url: string, ownBoxId?: string) => ["box-health", url, ownBoxId ?? null] as const,
   /** Status of the box the apps talk to. */
   box: ["box"] as const,
   /** Status of Kestrel's box, read whichever box is active (the new-thread box picker). */
@@ -289,8 +289,13 @@ export const queries = {
   fleetToolFailures: () => queryOptions({ queryKey: keys.fleetToolFailures, queryFn: api.fleetToolFailures }),
   nestHosts: () => queryOptions({ queryKey: keys.nestHosts, queryFn: api.nestHosts }),
   pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
-  boxHealth: (url: string) =>
-    queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url), refetchInterval: BOX_POLL_MS }),
+  /** A box's own health; `ownBoxId` names a box of the user's own, which is also checked for its version and token. */
+  boxHealth: (url: string, ownBoxId?: string) =>
+    queryOptions({
+      queryKey: keys.boxHealth(url, ownBoxId),
+      queryFn: () => api.checkBox(url, ownBoxId),
+      refetchInterval: BOX_POLL_MS,
+    }),
   box: () => queryOptions({ queryKey: keys.box, queryFn: api.boxStatus, refetchInterval: BOX_POLL_MS }),
   kestrelBox: () =>
     queryOptions({ queryKey: keys.kestrelBox, queryFn: api.kestrelBoxStatus, refetchInterval: BOX_POLL_MS }),

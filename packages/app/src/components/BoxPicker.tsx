@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query"
 import type { BoxList } from "@cloudagents/protocol"
 import { ChevronDown, Server } from "lucide-react"
+import type { BoxHealth } from "@/api/client"
 import { queries } from "@/api/queries"
+import { HEALTH_LABEL } from "@/components/Boxes"
 import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
@@ -18,24 +20,35 @@ import { cn } from "@/lib/utils"
 export const KESTREL_BOX = "kestrel"
 
 /**
- * Whether `boxId` (`null`: Kestrel's box) answers: a user box's or the managed box's own health, else the relayed
- * status. `undefined` until known, and while the box list has not loaded.
+ * How `boxId` (`null`: Kestrel's box) is doing: a user box's or the managed box's own health, else the relayed status.
+ * `undefined` until known, and while the box list has not loaded.
  */
-export function useBoxOnline(boxId: string | null, list: BoxList | undefined): boolean | undefined {
-  const url = boxId === null ? list?.managedBox?.url : list?.boxes.find((box) => box.id === boxId)?.url
-  const health = useQuery({ ...queries.boxHealth(url ?? ""), enabled: url !== undefined })
+export function useBoxHealth(boxId: string | null, list: BoxList | undefined): BoxHealth | undefined {
+  const own = boxId === null ? undefined : list?.boxes.find((box) => box.id === boxId)
+  const url = boxId === null ? list?.managedBox?.url : own?.url
+  // A Nest box is Kestrel-run and updates itself, like the managed box: only a box the user runs is checked further.
+  const ownBoxId = own === undefined || own.nest ? undefined : own.id
+  const health = useQuery({ ...queries.boxHealth(url ?? "", ownBoxId), enabled: url !== undefined })
   const relayed = useQuery({ ...queries.kestrelBox(), enabled: list !== undefined && boxId === null && url === undefined })
-  return (url === undefined ? relayed : health).data?.online
+  if (url !== undefined) return health.data
+  if (relayed.data === undefined) return undefined
+  return { state: relayed.data.online ? "online" : "offline", version: relayed.data.boxVersion }
 }
 
 export function OnlineDot({ boxId, list }: { boxId: string | null; list: BoxList }) {
-  const online = useBoxOnline(boxId, list)
+  const health = useBoxHealth(boxId, list)
   return (
     <span
-      aria-label={online === undefined ? "checking" : online ? "online" : "offline"}
+      aria-label={health === undefined ? "checking" : HEALTH_LABEL[health.state]}
       className={cn(
         "size-1.5 shrink-0 rounded-full",
-        online === undefined ? "bg-muted-foreground/40" : online ? "bg-success" : "bg-destructive",
+        health === undefined
+          ? "bg-muted-foreground/40"
+          : health.state === "online"
+            ? "bg-success"
+            : health.state === "offline"
+              ? "bg-destructive"
+              : "bg-warning",
       )}
     />
   )

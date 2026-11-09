@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ControlPaths, CreateBoxBody, MAX_USER_BOXES, type BoxList, type CreatedBox, type NestBoxStatus, type UserBox } from "@cloudagents/protocol"
 import { Either, Schema } from "effect"
 import { Link } from "react-router-dom"
-import { api } from "@/api/client"
+import { api, type BoxHealth } from "@/api/client"
 import { applyBoxList, keys, queries } from "@/api/queries"
 import { useBox, useBoxCapabilities } from "@/components/BoxStatus"
 import { Alert } from "@cloudagents/ui/alert"
@@ -18,7 +18,51 @@ import { errorText, formatSize } from "@/util"
 /** Kestrel's managed box: its own health, reached directly (Kestrel's box is the relay's only while none is assigned). */
 function ManagedOnline({ url }: { url: string }) {
   const health = useQuery(queries.boxHealth(url))
-  return <OnlineBadge online={health.data?.online} />
+  return <HealthBadge health={health.data} />
+}
+
+export const HEALTH_LABEL: Record<BoxHealth["state"], string> = {
+  online: "online",
+  offline: "offline",
+  outdated: "update needed",
+  rejected: "secret mismatch",
+}
+
+/** Installs or updates kestrel-box on Linux, macOS or WSL and restarts it, keeping its pairing. */
+export const UPDATE_BOX_COMMAND =
+  "curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh | sh -s -- --no-login"
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"])
+
+/** Why a user box that is not online cannot be used from here, and what fixes it; nothing while online or unknown. */
+export function BoxProblem({ health, url, className }: { health: BoxHealth | undefined; url: string; className?: string }) {
+  if (health === undefined || health.state === "online") return null
+  if (health.state === "outdated") {
+    return (
+      <span className={className}>
+        This box runs kestrel-box {health.version}, which is too old for this app. Update it on that machine:{" "}
+        <code className="break-all font-mono">{UPDATE_BOX_COMMAND}</code>
+      </span>
+    )
+  }
+  if (health.state === "rejected") {
+    return (
+      <span className={className}>
+        This box refuses Kestrel&apos;s credentials, usually because its secret was regenerated. Regenerate the secret
+        and give the new one to the box.
+      </span>
+    )
+  }
+  const loopback = LOOPBACK_HOSTS.has(new URL(url).hostname)
+  return (
+    <span className={className}>
+      Not reachable from this device. Check that the box is running (
+      <code className="font-mono">kestrel-box status</code> on that machine)
+      {loopback
+        ? ". A localhost URL only reaches a box on this same device: to use it from anywhere else, make the box reachable, for example with Tailscale Serve, and edit its URL."
+        : ` and that this device can reach ${new URL(url).host}.`}
+    </span>
+  )
 }
 
 export const BOX_FORM_ERROR =
@@ -77,7 +121,13 @@ export function Boxes() {
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate font-medium">Kestrel&apos;s box</span>
                   {activeBoxId === null && <Badge variant="success">active</Badge>}
-                  {managed === null ? <OnlineBadge online={kestrel?.online} /> : <ManagedOnline url={managed.url} />}
+                  {managed === null ? (
+                    <HealthBadge
+                      health={kestrel === null ? undefined : { state: kestrel.online ? "online" : "offline", version: kestrel.boxVersion }}
+                    />
+                  ) : (
+                    <ManagedOnline url={managed.url} />
+                  )}
                 </div>
                 <span className="text-xs text-muted-foreground">Hosted by Kestrel. Used when no box of your own is active.</span>
               </div>
@@ -131,9 +181,10 @@ export function Boxes() {
   )
 }
 
-export function OnlineBadge({ online }: { online: boolean | undefined }) {
-  if (online === undefined) return <Badge variant="neutral">checking</Badge>
-  return online ? <Badge variant="success">online</Badge> : <Badge variant="neutral">offline</Badge>
+export function HealthBadge({ health }: { health: BoxHealth | undefined }) {
+  if (health === undefined) return <Badge variant="neutral">checking</Badge>
+  const variant = health.state === "online" ? "success" : health.state === "offline" ? "neutral" : "warning"
+  return <Badge variant={variant}>{HEALTH_LABEL[health.state]}</Badge>
 }
 
 /** What the active box adds beyond its agents: a GPU on request and suspend when idle. Empty while unknown. */
@@ -155,15 +206,16 @@ export function ActiveBoxFeatures() {
 function PairHint() {
   return (
     <p className="text-muted-foreground">
-      Easiest: run <code className="font-mono text-xs">npx kestrel-box login</code> on the machine, or{" "}
+      Easiest: on the machine, run{" "}
       <code className="break-all font-mono text-xs">
         curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh | sh
-      </code>
-      , then approve its code on the{" "}
+      </code>{" "}
+      (or <code className="font-mono text-xs">npx kestrel-box login</code>, then{" "}
+      <code className="font-mono text-xs">npx kestrel-box install</code>) and approve its code on the{" "}
       <Link to={ControlPaths.pairPage} className="text-foreground underline underline-offset-4">
         pairing page
       </Link>
-      .
+      . To use the box from other devices, make it reachable, for example with Tailscale Serve, and set its URL here.
     </p>
   )
 }
@@ -182,7 +234,7 @@ function UserBoxRow({
   onSecret: (created: CreatedBox) => void
 }) {
   const queryClient = useQueryClient()
-  const health = useQuery(queries.boxHealth(box.url))
+  const health = useQuery(queries.boxHealth(box.url, box.id))
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(box.name)
   const [url, setUrl] = useState(box.url)
@@ -227,9 +279,10 @@ function UserBoxRow({
           <div className="flex min-w-0 items-center gap-2">
             <span className="truncate font-medium">{box.name}</span>
             {active && <Badge variant="success">active</Badge>}
-            <OnlineBadge online={health.data?.online} />
+            <HealthBadge health={health.data} />
           </div>
           <span className="truncate font-mono text-xs text-muted-foreground">{box.url}</span>
+          <BoxProblem health={health.data} url={box.url} className="text-xs text-muted-foreground" />
         </div>
         {!active && (
           <Button variant="soft" size="sm" disabled={busy || pending} onClick={() => onUse(box.id)}>
@@ -478,12 +531,20 @@ function SecretCard({ created, onDismiss }: { created: CreatedBox; onDismiss: ()
       <CardContent className="flex flex-col gap-3 px-5 py-5">
         <span className="font-medium">Secret for {box.name}</span>
         <p className="text-muted-foreground">
-          Shown once. In a Kestrel checkout, start the box with this command. It listens on 127.0.0.1:8787
-          (CLOUDAGENTS_PORT changes it); make that reachable at {box.url}, for example with Tailscale Serve or a
-          Cloudflare Tunnel, or add the box as http://localhost:8787 to use it from the same machine.
+          Shown once. A box installed with kestrel-box: set <code className="font-mono text-xs">boxSecret</code> to this
+          secret in its config file (<code className="font-mono text-xs">kestrel-box config</code> shows where), then run{" "}
+          <code className="font-mono text-xs">kestrel-box install</code> to restart it.
+        </p>
+        <code className="break-all rounded-lg bg-white/[0.06] p-3 font-mono text-xs">{secret}</code>
+        <p className="text-muted-foreground">
+          A box run from a Kestrel checkout: start it with this command, and make its port (8787, or{" "}
+          <code className="font-mono text-xs">CLOUDAGENTS_PORT</code>) reachable at {box.url}.
         </p>
         <code className="break-all rounded-lg bg-white/[0.06] p-3 font-mono text-xs">{command}</code>
         <div className="flex gap-2">
+          <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(secret)}>
+            Copy secret
+          </Button>
           <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(command)}>
             Copy command
           </Button>

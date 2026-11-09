@@ -4,6 +4,7 @@ import {
   ApprovePairingBody,
   Attachment,
   Automation,
+  BOX_API,
   BOX_TOKEN_QUERY,
   BoxCapabilities,
   BoxList,
@@ -556,26 +557,60 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message = "The box did 
   return Promise.race([promise, expired]).finally(() => window.clearTimeout(timer))
 }
 
-const OFFLINE: BoxStatus = { online: false, connectedAt: null, boxVersion: null }
+/**
+ * A box as this browser finds it: `online`; `offline` (it does not answer here); `outdated` (it answers but runs a
+ * kestrel-box too old for this app); `rejected` (it answers but refuses the app's token, as after its secret was
+ * regenerated). `version` is the box's kestrel-box version when it answered.
+ */
+export interface BoxHealth {
+  readonly state: "online" | "offline" | "outdated" | "rejected"
+  readonly version: string | null
+}
+
+const OFFLINE: BoxHealth = { state: "offline", version: null }
 
 /**
- * A user box's status from its own `Paths.health`, read without credentials: any failure to answer means offline.
- * The box has no relay connection, so `connectedAt` stays null.
+ * Whether a box takes the app's token for it. Only a 401 is a refusal; failing to mint or send the token (control or
+ * the network blipping) is not, so it does not mark a working box as rejected.
  */
-async function checkBox(url: string): Promise<BoxStatus> {
+async function acceptsToken(url: string, boxId: string): Promise<boolean> {
   try {
-    const res = await fetch(url + Paths.health)
-    if (!res.ok) return OFFLINE
-    const health = Schema.decodeUnknownSync(Health)(await res.json())
-    return { online: true, connectedAt: null, boxVersion: health.version }
+    const res = await fetch(url + Paths.capabilities, { headers: { authorization: `Bearer ${await boxToken(boxId)}` } })
+    return res.status !== 401
   } catch {
-    return OFFLINE
+    return true
   }
 }
 
-/** A box's status: the relayed status for Kestrel's relayed box, else the box's own health. */
-function statusOf(target: Target): Promise<BoxStatus> {
-  return target === null ? run(request(BoxStatus, "GET", ControlPaths.box)) : checkBox(target.url)
+/**
+ * A box's health from its own `Paths.health`, read without credentials: any failure to answer means offline. For one
+ * of the user's own boxes (`ownBoxId`), which they run and update themselves, it also checks that the box serves the
+ * API this app needs (`BOX_API`) and accepts the app's token. Kestrel's managed, fleet and Nest boxes update themselves,
+ * so they are only asked whether they answer.
+ */
+async function checkBox(url: string, ownBoxId?: string): Promise<BoxHealth> {
+  let health: Health
+  try {
+    const res = await fetch(url + Paths.health)
+    if (!res.ok) return OFFLINE
+    health = Schema.decodeUnknownSync(Health)(await res.json())
+  } catch {
+    return OFFLINE
+  }
+  if (ownBoxId === undefined) return { state: "online", version: health.version }
+  if ((health.api ?? 0) < BOX_API) return { state: "outdated", version: health.version }
+  const accepted = await acceptsToken(url, ownBoxId)
+  return { state: accepted ? "online" : "rejected", version: health.version }
+}
+
+/**
+ * A box's status: the relayed status for Kestrel's relayed box, else the box's own health (`own`: a box of the user's
+ * own). A direct box has no relay connection, so `connectedAt` stays null.
+ */
+async function statusOf(target: Target, own: boolean): Promise<BoxStatus> {
+  if (target === null) return run(request(BoxStatus, "GET", ControlPaths.box))
+  const health = await checkBox(target.url, own ? target.boxId : undefined)
+  return { online: health.state === "online", connectedAt: null, boxVersion: health.version }
 }
 
 /**
@@ -730,9 +765,13 @@ export const api = {
   checkBox,
   forgetBox,
   /** Status of the box the apps talk to: Kestrel's box (its managed box's own health, or the relayed status), or the active user box's own health. */
-  boxStatus: async (): Promise<BoxStatus> => statusOf(await activeTarget()),
+  boxStatus: async (): Promise<BoxStatus> => {
+    const target = await activeTarget()
+    const active = known?.boxes.find((box) => box.id === known?.activeBoxId)
+    return statusOf(target, active !== undefined && !active.nest)
+  },
   /** Status of Kestrel's box, whichever box is active. */
-  kestrelBoxStatus: (): Promise<BoxStatus> => statusOf(kestrelTarget()),
+  kestrelBoxStatus: (): Promise<BoxStatus> => statusOf(kestrelTarget(), false),
 
   // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
   cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals)),
