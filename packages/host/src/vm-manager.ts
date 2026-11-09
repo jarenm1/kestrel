@@ -214,6 +214,25 @@ const createNewRecord = (fields: {
   lastError: null,
 })
 
+/** Removes a lazy restore destination that never became the VM's volume. */
+const clearLazyDestination = (p: VmPathSet): void => {
+  rmSync(p.volume, { force: true })
+  rmSync(`${p.volume}.bitmap`, { force: true })
+  rmSync(`${p.volume}.lock`, { force: true })
+}
+
+/**
+ * Rolls back a volume replacement interrupted after the local copy was moved to `volume.raw.previous`: the local copy
+ * is put back over a destination that never became the VM's volume. Returns whether a local copy is at `volume` now.
+ */
+const restorePreviousVolume = (p: VmPathSet): boolean => {
+  const previous = `${p.volume}.previous`
+  if (!existsSync(previous)) return existsSync(p.volume)
+  clearLazyDestination(p)
+  renameSync(previous, p.volume)
+  return true
+}
+
 /** A command that ran (or was answered from the store), with the box's report after it. */
 export interface ExecutedCommand {
   readonly outcome: CommandOutcome
@@ -933,15 +952,15 @@ export class VmManager {
   private async resumeParked(vm: VmRecord, enrollToken: string | null): Promise<void> {
     const p = this.paths(vm.boxId)
     let cur = this.begin(vm, "resume", "parked")
+    // A crash may have left the only local copy at `volume.raw.previous`; put it back before deciding what is usable.
+    const hadLocal = restorePreviousVolume(p)
     // Unbacked local changes make the local volume the only copy. Otherwise it is usable only when it matches the backup this command restores.
-    const usableLocal = existsSync(p.volume) && (cur.localDirty || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
+    const usableLocal = hadLocal && (cur.localDirty || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
     if (!usableLocal) {
       if (cur.volumeRef === null) throw new HostError("no local volume and no backup to restore it from")
       // Keep the only local copy until the lazy restore has opened its source: a manifest can be missing or unreadable,
       // and the restore fails before it serves a byte. Only a successful open makes the backup authoritative.
       const previous = `${p.volume}.previous`
-      const hadLocal = existsSync(p.volume)
-      rmSync(previous, { recursive: true, force: true })
       rmSync(`${p.volume}.bitmap`, { force: true })
       rmSync(`${p.volume}.lock`, { force: true })
       if (hadLocal) renameSync(p.volume, previous)
@@ -952,9 +971,7 @@ export class VmManager {
       ).catch((error: unknown) => {
         // The restore never opened the backup (for example its manifest is gone). Revert the destination and put the
         // local copy back: it is still the only data.
-        rmSync(p.volume, { force: true })
-        rmSync(`${p.volume}.bitmap`, { force: true })
-        rmSync(`${p.volume}.lock`, { force: true })
+        clearLazyDestination(p)
         if (hadLocal) renameSync(previous, p.volume)
         throw error
       })
@@ -1637,6 +1654,9 @@ export class VmManager {
   /** Decides what survives a restart. Live VMMs are re-adopted; anything else rolls back to a resumable state. */
   private async recover(record: VmRecord): Promise<void> {
     const p = this.paths(record.boxId)
+    // A crash during a volume replacement can leave the only local copy at `volume.raw.previous` and a destination
+    // the restore never committed. Roll that back before the record is interpreted.
+    restorePreviousVolume(p)
     // A snapshot still under its staging name was never complete, so it is not a memory image.
     if (existsSync(p.dir)) for (const name of readdirSync(p.dir)) if (/^snapshot\.\d+\.tmp$/.test(name)) rmSync(join(p.dir, name), { recursive: true, force: true })
     const plan = recoverPlan(record, {

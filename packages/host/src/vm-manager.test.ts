@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { NEST_LAPSE_REFUSAL, type NestHostCommand } from "@cloudagents/protocol"
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { VmRecord } from "./schema"
 import { stateLayout, vmPaths } from "./state-store"
@@ -323,5 +323,38 @@ describe("recovery and volume safety", () => {
     expect(readFileSync(p.volume, "utf8")).toBe("the only copy")
     expect(existsSync(`${p.volume}.previous`)).toBe(false)
     expect(internalsOf.records.get(parked.boxId)).toMatchObject({ state: "parked", ownerEpoch: 2 })
+  })
+
+  test("a crash after moving the local volume aside is rolled back on recovery", async () => {
+    const { manager, stateDir } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    const internalsOf = internals(manager)
+    const parked = recordOf({
+      state: "parked",
+      ownerEpoch: 1,
+      localDirty: false,
+      volumeRef: "vol-missing",
+      operation: { kind: "resume", from: "parked", startedAt: 1 },
+    })
+    internalsOf.records.set(parked.boxId, parked)
+    const p = vmPaths(stateLayout(stateDir), parked.boxId)
+    mkdirSync(p.dir, { recursive: true })
+    writeFileSync(p.volume, "the only copy")
+    // The crash window: the local copy was moved aside, and the lazy restore had not opened its source yet.
+    renameSync(p.volume, `${p.volume}.previous`)
+
+    await internalsOf.recover(parked)
+
+    expect(readFileSync(p.volume, "utf8")).toBe("the only copy")
+    expect(existsSync(`${p.volume}.previous`)).toBe(false)
+
+    // The retry hits the same unreadable manifest, and must still leave the restored local copy in place.
+    const tool = join(dirname(stateDir), "volume-tool-that-cannot-restore")
+    writeFileSync(tool, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    internalsOf.volume.tool = tool
+    await expect(internalsOf.resumeCommand(resumeCommand(2, "vol-missing"))).rejects.toThrow()
+
+    expect(readFileSync(p.volume, "utf8")).toBe("the only copy")
+    expect(existsSync(`${p.volume}.previous`)).toBe(false)
   })
 })
