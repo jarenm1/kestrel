@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect, TestClock, TestContext } from "effect"
 import { GpuReconciler, type GpuSnapshot } from "./gpu-state"
 
-const fake = (attachingDeadlineMs = 1_000) => {
+const fake = (attachingDeadlineMs = 1_000, now: () => number = () => 1_000) => {
   const calls: string[] = []
   const warnings: string[] = []
   const snapshots: GpuSnapshot[] = []
@@ -15,7 +15,7 @@ const fake = (attachingDeadlineMs = 1_000) => {
     }),
     warn: (message) => warnings.push(message),
     onSnapshot: (snapshot) => snapshots.push(snapshot),
-    now: () => 1_000,
+    now,
     attachingDeadlineMs,
   })
   return { calls, warnings, snapshots, reconciler }
@@ -73,6 +73,44 @@ describe("GpuReconciler", () => {
         attaching: false,
         attachingSince: 1_000,
       })
+    } finally {
+      reconciler.close()
+    }
+  })
+
+  test("a reconnect keeps the original attaching deadline instead of extending it", async () => {
+    let clock = 1_000
+    const { calls, reconciler } = fake(120_000, () => clock)
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* reconciler.observe("attaching")
+          yield* TestClock.adjust("100 seconds")
+          clock += 100_000
+          // The guest reports its snapshot again on every box connection: replay plus a fresh `attaching`.
+          yield* reconciler.replay()
+          yield* reconciler.observe("attaching")
+          expect(reconciler.snapshot().attachingSince).toBe(1_000)
+          expect(reconciler.snapshot().attaching).toBe(true)
+
+          yield* TestClock.adjust("19 seconds")
+          clock += 19_000
+          yield* Effect.yieldNow()
+          expect(reconciler.snapshot().attaching).toBe(true)
+          expect(calls).toEqual([])
+
+          yield* TestClock.adjust("1 second")
+          clock += 1_000
+          yield* Effect.yieldNow()
+          expect(reconciler.snapshot()).toEqual({
+            state: "attaching",
+            renderer: "pixman",
+            attaching: false,
+            attachingSince: 1_000,
+          })
+        }).pipe(Effect.provide(TestContext.TestContext)),
+      )
+      expect(calls).toEqual(["release"])
     } finally {
       reconciler.close()
     }

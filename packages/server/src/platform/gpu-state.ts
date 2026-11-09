@@ -73,8 +73,9 @@ export class GpuReconciler {
           yield* this.reconcile("pixman")
           break
         case "attaching":
-          this.attachingSince = (this.deps.now ?? Date.now)()
-          this.expired = false
+          // The guest reports its current snapshot on every box connection, so a repeated `attaching` is the same
+          // attempt: keep the original timestamp or reconnects would push the deadline out forever.
+          this.attachingSince ??= (this.deps.now ?? Date.now)()
           // The last truth still holds while the host attaches; only bound how long it may say so.
           yield* this.armDeadline()
           break
@@ -116,8 +117,17 @@ export class GpuReconciler {
   private armDeadline = (): Effect.Effect<void> =>
     Effect.gen(this, function* () {
       yield* this.clearDeadline()
+      if (this.attachingSince === null) return
+      // Arm only the time left in this attaching period: a replay after 100 s must expire at 120 s, not at 220 s.
+      const remaining = this.attachingSince +
+        (this.deps.attachingDeadlineMs ?? GPU_ATTACH_STATE_DEADLINE_MS) -
+        (this.deps.now ?? Date.now)()
+      if (remaining <= 0) {
+        yield* this.expire()
+        return
+      }
       this.deadline = yield* Effect.forkDaemon(
-        Effect.sleep(this.deps.attachingDeadlineMs ?? GPU_ATTACH_STATE_DEADLINE_MS).pipe(Effect.zipRight(Effect.suspend(() => this.expire()))),
+        Effect.sleep(remaining).pipe(Effect.zipRight(Effect.suspend(() => this.expire()))),
       )
     })
 
