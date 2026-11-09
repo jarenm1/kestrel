@@ -599,4 +599,31 @@ describe("restart reconciliation", () => {
     expect(state.pendingAsks).toEqual([{ taskId: "asking", runId: "r1", messageId: "q" }])
     expect(state.runs[0]).toMatchObject({ status: "failed", interruptedByRestart: true })
   })
+
+  test("needs_input without a question and without a run is normalized to idle", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("stale"), status: "needs_input" }],
+      messages: [], runs: [], pendingAsks: [], uploads: [], runSessions: [],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.tasks[0]?.status).toBe("idle")
+    expect(state.pendingAsks).toEqual([])
+  })
+
+  test("needs_input without a question but with a live run is failed with that run", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("stale-live"), status: "needs_input" }],
+      messages: [], pendingAsks: [], uploads: [], runSessions: [],
+      runs: [runningRun("r1", "stale-live")],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.tasks[0]?.status).toBe("failed")
+    expect(state.runs[0]).toMatchObject({ status: "failed", interruptedByRestart: true })
+  })
 })

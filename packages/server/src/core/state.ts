@@ -300,6 +300,11 @@ const reconcile = (state: StoreState): void => {
   // failed thread, keeping a question that survived the restart.
   for (const task of state.tasks) {
     applyTaskEvent(state, task, { _tag: "restartReconcile" })
+    // `needs_input` without a question is not a real phase (D2). A live run was already turned into a failed thread
+    // by the transition above; with no run left the thread has nothing to wait for.
+    if (task.status === "needs_input" && !state.pendingAsks.some((ask) => ask.taskId === task.id)) {
+      task.status = "idle"
+    }
     // A thread persisted `running` with no live run behind it has nothing left to finish, even when the transition
     // had nothing to change.
     if (task.status === "running" && !state.runs.some((run) => run.taskId === task.id && run.status === "running")) {
