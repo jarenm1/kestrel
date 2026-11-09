@@ -122,7 +122,7 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   if (row.kind === "login") {
     if (!isAllowedLogin(env, account.login)) return htmlPage(403, "Forbidden: this account is not allowed to use Kestrel.")
     // A second callback that raced this one finds the state already consumed and creates nothing.
-    if ((await hub(env).consumeOAuthState(state)) === null) {
+    if ((await hub(env).consumeOAuthState(state, row.revision)) === null) {
       return htmlPage(400, "This sign-in link has expired or was already used. Please try again.")
     }
     const stub = hub(env)
@@ -139,7 +139,7 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   if (account.login.toLowerCase() !== login.toLowerCase()) {
     return htmlPage(403, "Connect the GitHub account you are signed in with.")
   }
-  if ((await hub(env).consumeOAuthState(state)) === null) {
+  if ((await hub(env).consumeOAuthState(state, row.revision)) === null) {
     return htmlPage(400, "This sign-in link has expired or was already used. Please try again.")
   }
   await hub(env).putConnection(login, provider.id, token, account.login)

@@ -67,10 +67,12 @@ const boxIdentity = async (request: Request, env: Env): Promise<string | null> =
   if (env.BOX_TOKEN !== undefined && env.BOX_TOKEN !== "" && (await safeEqual(secret, env.BOX_TOKEN))) return "relay"
   const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
   if (boxId === "") return null
-  if (await hub(env).managedBoxVerify(boxId, secret)) return `managed:${boxId}`
+  // The identity includes the Hub's durable generation, so rotating a secret or deleting the box misses the Worker's
+  // cache. It is read from the Hub per request rather than inferred from an in-isolate map.
+  const managed = await hub(env).managedBoxTurnIdentity(boxId, secret)
+  if (managed !== null) return managed
   // A user's own box proves itself the way `/box/self` does, but gets no owner credentials from this check.
-  if (await hub(env).boxVerify(boxId, secret)) return `box:${boxId}`
-  return null
+  return hub(env).boxTurnIdentity(boxId, secret)
 }
 
 /** Accept only usable provider ICE lists containing authenticated TURN over TLS on port 443. */
@@ -122,22 +124,6 @@ const fetchProviderCredentials = async (config: TurnProviderConfig, now: number)
 
 const credentialsCache = new Map<string, BoxTurnCredentials>()
 const pendingCalls = new Map<string, Promise<BoxTurnCredentials>>()
-/**
- * A generation per box identity. Forgetting a box bumps its generation, so credentials minted under an older
- * generation are neither served nor stored once an in-flight provider call finishes.
- */
-const cacheGenerations = new Map<string, number>()
-
-/**
- * Forgets a box's cached credentials. Called when its secret rotates or the box goes away: the next request asks the
- * provider again instead of handing out credentials issued for the old identity.
- */
-export const invalidateTurnCredentials = (identity: string): void => {
-  cacheGenerations.set(identity, (cacheGenerations.get(identity) ?? 0) + 1)
-  const prefix = `${identity}\u0000`
-  for (const key of [...credentialsCache.keys()]) if (key.startsWith(prefix)) credentialsCache.delete(key)
-  for (const key of [...pendingCalls.keys()]) if (key.startsWith(prefix)) pendingCalls.delete(key)
-}
 
 /** Stores `credentials`, dropping expired entries and then the oldest, so the cache stays bounded. */
 const remember = (key: string, credentials: BoxTurnCredentials, now: number): void => {
@@ -159,17 +145,16 @@ const credentialsFor = (
   config: TurnProviderConfig,
   now: number,
 ): Promise<BoxTurnCredentials> => {
-  // The key id is in the key, so rotating the provider key does not serve credentials minted under the old one.
-  // The generation makes an invalidation (secret rotation or deletion) miss the cache and an in-flight call.
-  const key = `${identity}\u0000${cacheGenerations.get(identity) ?? 0}\u0000${config.keyId}`
+  // The key id is in the key, so rotating the provider key does not serve credentials minted under the old one. The
+  // identity itself carries the Hub's durable TURN generation, so rotation/deletion misses in every isolate.
+  const key = `${identity}\u0000${config.keyId}`
   const cached = credentialsCache.get(key)
   if (cached !== undefined && cached.expiresAt - now > TURN_CREDENTIAL_REFRESH_MS) return Promise.resolve(cached)
   const pending = pendingCalls.get(key)
   if (pending !== undefined) return pending
   const call = fetchProviderCredentials(config, now)
     .then((credentials) => {
-      // An invalidation while the provider answered must not re-populate the entry it removed.
-      if (key === `${identity}\u0000${cacheGenerations.get(identity) ?? 0}\u0000${config.keyId}`) remember(key, credentials, now)
+      remember(key, credentials, now)
       return credentials
     })
     .finally(() => pendingCalls.delete(key))

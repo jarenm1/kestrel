@@ -125,7 +125,7 @@ import { deleteBoxActivity, ensureBoxActivityTable, fleetActivity, recordBoxActi
 import { NestFleet, type NestOutcome } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
 import { NEST_STANDARD_LIMITS, newSecret, nestLimitsError, publicUrlFor } from "./nest-control"
-import { invalidateTurnCredentials } from "./turn"
+import { bumpTurnGeneration, ensureTurnGenerationsTable, turnGeneration } from "./turn-generations"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -304,7 +304,7 @@ export type UserRecord = { login: string; name: string | null; avatarUrl: string
 /** `dev`: the session came from `/auth/dev-login`. */
 export type SessionRecord = { login: string; dev: boolean }
 
-export type OAuthStateRecord = { kind: OAuthKind; provider: string; returnTo: string }
+export type OAuthStateRecord = { kind: OAuthKind; provider: string; returnTo: string; revision: string }
 
 type PendingHttp = { resolve: (res: Response) => void; timer: number }
 
@@ -355,6 +355,7 @@ export class Hub extends DurableObject<Env> {
         sql.exec("ALTER TABLE users ADD COLUMN active_box_id TEXT")
       }
       ensureFleetTable(sql)
+      ensureTurnGenerationsTable(sql)
       ensureMeterTables(sql)
       ensureNestTables(sql)
       ensureToolFailuresTable(sql)
@@ -408,8 +409,14 @@ export class Hub extends DurableObject<Env> {
         kind TEXT NOT NULL,
         provider TEXT NOT NULL,
         return_to TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        revision TEXT NOT NULL
       )`)
+      // States created before the revision get one here; a consume with an older revision then reads as already used.
+      const stateColumns = sql.exec<{ name: string }>("PRAGMA table_info(oauth_states)").toArray()
+      if (!stateColumns.some((c) => c.name === "revision")) {
+        sql.exec("ALTER TABLE oauth_states ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
+      }
       ctx.storage.transactionSync(() => ensureAutomationsTable(sql))
       ensureAutomationFiresTable(sql)
       sql.exec(`CREATE TABLE IF NOT EXISTS automation_runs (
@@ -439,6 +446,8 @@ export class Hub extends DurableObject<Env> {
       ensureWaitlistTable(sql)
       ensureFileTokensTable(sql)
       ensureDesktopTokensTable(sql)
+      // A cold start must schedule any fire leases left by a restart before a request or alarm arrives.
+      await this.rearmStorage(ctx.storage)
     })
   }
 
@@ -719,6 +728,8 @@ export class Hub extends DurableObject<Env> {
     const sql = this.ctx.storage.sql
     sql.exec("UPDATE users SET active_box_id = NULL WHERE login = ? AND active_box_id = ?", session.login, id)
     sql.exec("DELETE FROM user_boxes WHERE id = ? AND login = ?", id, session.login)
+    // A warm Worker must not keep serving TURN credentials for the deleted identity.
+    bumpTurnGeneration(sql, `box:${id}`)
     return { ok: true, value: null }
   }
 
@@ -729,6 +740,7 @@ export class Hub extends DurableObject<Env> {
     if (!owned) return NO_SUCH_BOX
     const secret = newSecret()
     this.ctx.storage.sql.exec("UPDATE user_boxes SET secret = ? WHERE id = ? AND login = ?", secret, id, session.login)
+    bumpTurnGeneration(this.ctx.storage.sql, `box:${id}`)
     return { ok: true, value: { box: owned.box, secret } }
   }
 
@@ -875,6 +887,15 @@ export class Hub extends DurableObject<Env> {
     return row !== undefined && (await safeEqual(secret, row.secret))
   }
 
+  /**
+   * The user box's TURN identity, including its durable generation, or null when the secret is wrong. The Worker uses
+   * the generation in its cache key, so a rot ation or deletion misses credentials cached in another isolate.
+   */
+  async boxTurnIdentity(boxId: string, secret: string): Promise<string | null> {
+    if (!(await this.boxVerify(boxId, secret))) return null
+    return `box:${boxId}:${turnGeneration(this.ctx.storage.sql, `box:${boxId}`)}`
+  }
+
   private boxList(login: string): BoxList {
     const sql = this.ctx.storage.sql
     const boxes = sql
@@ -959,8 +980,8 @@ export class Hub extends DurableObject<Env> {
     const removed = deleteFleetBox(this.ctx.storage.sql, id)
     if (!removed) return false
     deleteBoxActivity(this.ctx.storage.sql, id)
-    // The identity is gone: cached TURN credentials must not outlive it.
-    invalidateTurnCredentials(`managed:${id}`)
+    // The identity is gone; a tombstoned generation keeps a warm Worker from serving its cached credentials.
+    bumpTurnGeneration(this.ctx.storage.sql, `managed:${id}`)
     return true
   }
 
@@ -970,7 +991,7 @@ export class Hub extends DurableObject<Env> {
     const secret = newSecret()
     if (!rotateFleetBoxSecret(sql, id, secret)) return null
     // Credentials issued under the old secret must not be served for the new identity.
-    invalidateTurnCredentials(`managed:${id}`)
+    bumpTurnGeneration(sql, `managed:${id}`)
     const box = fleetBox(sql, id)
     return box === null ? null : { box, secret }
   }
@@ -978,6 +999,15 @@ export class Hub extends DurableObject<Env> {
   /** Whether `secret` is the managed box's own, for calls that act for no user. */
   async managedBoxVerify(boxId: string, secret: string): Promise<boolean> {
     return managedBoxSecretValid(this.ctx.storage.sql, boxId, secret)
+  }
+
+  /**
+   * The managed box's TURN identity, including its durable generation, or null when the secret is wrong. Rotation and
+   * deletion bump the generation, so the Worker's cache key misses in every isolate.
+   */
+  async managedBoxTurnIdentity(boxId: string, secret: string): Promise<string | null> {
+    if (!(await this.managedBoxVerify(boxId, secret))) return null
+    return `managed:${boxId}:${turnGeneration(this.ctx.storage.sql, `managed:${boxId}`)}`
   }
 
   // -------------------------------------------------------------------------
@@ -1083,10 +1113,10 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
-   * Pending, or the approved box with its current secret. The first approved poll claims the pairing (`used_at`) and
-   * returns the box; a poll inside the short grace after that repeats the same answer for a CLI that lost the response.
-   * After the grace, and after the pairing's original expiry, the answer is null. Null too when unknown, expired, or
-   * the box was deleted since.
+   * Pending, or the approved box with its current secret. D3: the first approved poll claims the pairing (`used_at`)
+   * and returns the box; the same `pairingId` may repeat that answer during a 60 s grace for a CLI that lost the
+   * response. Approval does not extend the original expiry. After the grace, or after expiry, the answer is null; null
+   * too when the pairing is unknown or its box was deleted since.
    */
   pollPairing(pairingId: string): PairingPoll | null {
     const now = Date.now()
@@ -1121,6 +1151,10 @@ export class Hub extends DurableObject<Env> {
     if (!this.session(sessionId)) return UNAUTHENTICATED
     const row = this.livePairing("code", code)
     if (!row || row.expiresAt <= Date.now()) return NO_SUCH_PAIRING
+    // The app's approval poll treats 409 as the terminal "approved elsewhere" answer.
+    if (row.boxId !== null) {
+      return { ok: false, status: 409, tag: "Conflict", message: "pairing code already approved" }
+    }
     return {
       ok: true,
       value: {
@@ -1181,45 +1215,54 @@ export class Hub extends DurableObject<Env> {
     sql.exec("DELETE FROM oauth_states WHERE expires_at <= ?", Date.now())
     if (sql.exec("SELECT 1 FROM oauth_states WHERE state = ?", state).toArray().length > 0) return false
     sql.exec(
-      "INSERT INTO oauth_states (state, kind, provider, return_to, expires_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO oauth_states (state, kind, provider, return_to, expires_at, revision) VALUES (?, ?, ?, ?, ?, ?)",
       state,
       kind,
       provider,
       returnTo,
       expiresAt,
+      crypto.randomUUID(),
     )
     return true
   }
 
-  /** The state row if it exists and has not expired; reading does not consume it. */
+  /**
+   * The state row if it exists and has not expired; reading does not consume it. `revision` identifies this particular
+   * issuance, so a consume cannot delete a newer row that reuses the same caller-supplied state.
+   */
   readOAuthState(state: string): OAuthStateRecord | null {
     const row = this.ctx.storage.sql
-      .exec<{ kind: OAuthKind; provider: string; returnTo: string; expiresAt: number }>(
-        "SELECT kind, provider, return_to AS returnTo, expires_at AS expiresAt FROM oauth_states WHERE state = ?",
+      .exec<{ kind: OAuthKind; provider: string; returnTo: string; expiresAt: number; revision: string }>(
+        "SELECT kind, provider, return_to AS returnTo, expires_at AS expiresAt, revision FROM oauth_states WHERE state = ?",
         state,
       )
       .toArray()[0]
     if (!row) return null
     if (row.expiresAt <= Date.now()) {
-      this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE state = ?", state)
+      this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE state = ? AND revision = ?", state, row.revision)
       return null
     }
-    return { kind: row.kind, provider: row.provider, returnTo: row.returnTo }
+    return { kind: row.kind, provider: row.provider, returnTo: row.returnTo, revision: row.revision }
   }
 
-  /** Deletes an already-validated state row and returns it; null when it is gone or expired. */
-  consumeOAuthState(state: string): OAuthStateRecord | null {
+  /**
+   * Deletes exactly the issuance the caller validated and returns it. A newer row reusing the same state has a different
+   * revision, so this reads as already used instead of consuming the new row (ABA). Null when gone, expired or stale.
+   */
+  consumeOAuthState(state: string, revision: string): OAuthStateRecord | null {
     const sql = this.ctx.storage.sql
     const row = sql
-      .exec<{ kind: OAuthKind; provider: string; returnTo: string; expiresAt: number }>(
-        "SELECT kind, provider, return_to AS returnTo, expires_at AS expiresAt FROM oauth_states WHERE state = ?",
+      .exec<{ kind: OAuthKind; provider: string; returnTo: string; expiresAt: number; revision: string }>(
+        `SELECT kind, provider, return_to AS returnTo, expires_at AS expiresAt, revision
+         FROM oauth_states WHERE state = ? AND revision = ?`,
         state,
+        revision,
       )
       .toArray()[0]
     if (!row) return null
-    sql.exec("DELETE FROM oauth_states WHERE state = ?", state)
+    sql.exec("DELETE FROM oauth_states WHERE state = ? AND revision = ?", state, revision)
     if (row.expiresAt <= Date.now()) return null
-    return { kind: row.kind, provider: row.provider, returnTo: row.returnTo }
+    return { kind: row.kind, provider: row.provider, returnTo: row.returnTo, revision: row.revision }
   }
 
   // -------------------------------------------------------------------------
@@ -1456,6 +1499,8 @@ export class Hub extends DurableObject<Env> {
     const row = this.automationRow(login, id)
     if (row === null) return null
     const fireId = this.claimFire(row, `manual:${crypto.randomUUID()}`, reason, pr)
+    // Durable claim first, then its lease alarm, then the external effect.
+    await this.rearm()
     const run = await this.runFire(fireId)
     await this.rearm()
     return run
@@ -1611,6 +1656,8 @@ export class Hub extends DurableObject<Env> {
         )
         return id
       })
+      // Schedule the claim's lease before the box call: a restart inside `runFire` must still find the deadline.
+      await this.rearm()
       await this.runFire(fireId)
     }
     await this.drainFires(now)
@@ -1673,12 +1720,22 @@ export class Hub extends DurableObject<Env> {
    * pending. A fire that is already running is revisited at its lease deadline, so a crashed start is bounded.
    */
   private async rearm(): Promise<void> {
-    const row = this.ctx.storage.sql
+    await this.rearmStorage(this.ctx.storage)
+  }
+
+  /**
+   * The constructor runs before `this.ctx` exists in tests, so the cold-start pass receives storage explicitly. A
+   * missing alarm API (a bare fake storage) opts out rather than failing the constructor.
+   */
+  private async rearmStorage(storage: DurableObjectState["storage"]): Promise<void> {
+    if (typeof storage.setAlarm !== "function") return
+    const row = storage.sql
       .exec<{ at: number | null }>("SELECT MIN(next_run_at) AS at FROM automations WHERE enabled = 1")
       .toArray()[0]
-    const activityAt = this.ctx.storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM pr_activity_queue").toArray()[0]?.at ?? null
+    const activityAt =
+      storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM pr_activity_queue").toArray()[0]?.at ?? null
     const fireAt =
-      this.ctx.storage.sql
+      storage.sql
         .exec<{ at: number | null }>(
           `SELECT MIN(CASE WHEN started_at IS NULL THEN claimed_at ELSE started_at + ? END) AS at
            FROM automation_fires WHERE outcome IS NULL`,
@@ -1687,8 +1744,8 @@ export class Hub extends DurableObject<Env> {
         .toArray()[0]?.at ?? null
     const scheduleAt = row?.at ?? null
     const deadlines = [scheduleAt, activityAt, fireAt, this.nest.nextDeadline()].filter((at): at is number => at !== null)
-    if (deadlines.length === 0) await this.ctx.storage.deleteAlarm()
-    else await this.ctx.storage.setAlarm(Math.min(...deadlines))
+    if (deadlines.length === 0) await storage.deleteAlarm()
+    else await storage.setAlarm(Math.min(...deadlines))
   }
 
   /** Writes a fire intent under its stable key, or returns the existing intent's id when it was already claimed. */

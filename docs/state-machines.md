@@ -49,7 +49,7 @@ different answers. Change one here first, then in the code.
 |---|---|---|
 | D1 | A thread's phase has one authority | A live run's outcome wins. `task_report` is advisory until the run settles; a terminal report mid-run does not move the status. |
 | D2 | `needs_input` always has a question | Only `task_ask` enters it. `report("needs_input")` without a pending ask is illegal; the MCP `working` word maps to `running`. |
-| D3 | Pairing is single-use | The approved box secret is collected once, with `used_at` or an equivalent claim. Recovery after a lost response uses an idempotent collect token with a short grace, not a replay of the secret. |
+| D3 | Pairing is single-use with a bounded same-id replay | The approved box secret is collected once and the row marked `used_at`. A poll with the same `pairingId` may repeat the same box and secret for a 60 s grace after the first collection (the CLI sends no separate collect token); the grace never extends the pairing's original `expires_at`, so the collectable window is the documented TTL plus that grace. Later polls, other ids and expiry return nothing. |
 | D4 | Automation fires are idempotent | Persist the fire intent with a stable key (`automation_id` + scheduled instant, or the webhook delivery id). Repeating it returns the existing run. `next_run_at` advances only after the intent is durable. |
 | D5 | Desktop `running` means lifecycle alive | Encoder presence is a separate `streaming` fact. `failed` means no live processes and no display users may attach to. |
 | D6 | GPU state is level-triggered | The box stores the last host `GpuState`, reconciles it on reconnect, and gives `attaching` a deadline. A wish is intent; `GpuState` is truth. |
