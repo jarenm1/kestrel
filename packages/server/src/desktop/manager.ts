@@ -22,6 +22,7 @@ import { profileFor, profileRestartNeeded } from "./profile"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
 import { isWsl } from "./platform"
+import { applyDesktopEvent } from "./desktop-state"
 import { desktopStatus, HEIGHT, WIDTH, type DesktopStatusSource } from "./status"
 import {
   ENCODER_STABLE_MS,
@@ -629,11 +630,10 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     }
 
     const failSession = (s: Session, message: string) => {
-      if (s.state !== "starting" && s.state !== "running") return
       const tail = s.stderrTail.trim().slice(-500)
       const full = tail ? `${message}: ${tail}` : message
-      s.state = "failed"
-      s.error = full
+      const transition = applyDesktopEvent(s, { _tag: "failed", message: full })
+      if (transition._tag === "illegal") return
       detachEncoder(s)
       Deferred.unsafeDone(s.ready, Effect.fail(new DesktopError({ message: full })))
       publish(s)
