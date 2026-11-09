@@ -264,6 +264,9 @@ operation that removes the control-plane row.
 lease alarm is armed before the external call and rearmed on cold start, and a webhook delivery is written with its
 fires. The PR queue has capped backoff and a terminal drop after five failures, and unwatch clears the box mark.
 
+**Wave 2 status:** fire start/terminal, the webhook ledger and PR activity claim/retry/drop go through
+`applyDeliveryEvent`/`transitionWebhook`/`transitionPrActivity`. PR watch remains a registry operation.
+
 **Remaining gaps:** a crash between the box call and the recorded outcome can duplicate an external task start; the fire
 is then failed after its lease instead of re-fired. Closing that fully needs an idempotency key on the box's
 task-creation route.
