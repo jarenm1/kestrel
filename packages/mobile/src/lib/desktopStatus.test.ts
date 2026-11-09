@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { DesktopStatus } from "@cloudagents/protocol";
-import { applyDesktopStatus } from "./desktopStatus";
+import { applyDesktopStatus } from "@cloudagents/protocol";
 
 const status = (state: DesktopStatus["state"]): DesktopStatus => ({
   taskId: "task-1",

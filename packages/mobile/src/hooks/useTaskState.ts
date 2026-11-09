@@ -5,7 +5,7 @@ import { openTaskEvents } from "@/api/events";
 import { createQueries, boxKeys, invalidateRunItems, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { threadErrors } from "@/hooks/threadErrors";
-import { applyDesktopStatus, type DesktopStatusValue } from "@/lib/desktopStatus";
+import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol";
 
 const MAX_LOG_LINES = 2000;
 const RECONNECT_MS = 2000;
