@@ -18,7 +18,7 @@ export function useApiClient(): { api: ApiClient } {
 
 /** The client for one box (`null` is Kestrel's relayed box). A new client is built when the session, server or box changes. */
 export function useBoxClient(box: ActiveBox | null): ApiClient {
-  const { serverUrl, sessionCookie } = useAuth();
+  const { serverUrl, sessionCookie, sessionEpoch } = useAuth();
   const boxId = box?.id ?? null;
   const boxUrl = box?.url ?? null;
   return useMemo(
@@ -26,9 +26,10 @@ export function useBoxClient(box: ActiveBox | null): ApiClient {
       createApiClient(
         serverUrl ?? "",
         sessionCookie,
-        boxId === null || boxUrl === null ? null : { id: boxId, url: boxUrl }
+        boxId === null || boxUrl === null ? null : { id: boxId, url: boxUrl },
+        sessionEpoch
       ),
-    [serverUrl, sessionCookie, boxId, boxUrl]
+    [serverUrl, sessionCookie, boxId, boxUrl, sessionEpoch]
   );
 }
 

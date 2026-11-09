@@ -83,12 +83,14 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 /** The desktop viewer page on the app host. Its ws URL and task id travel in the fragment, which the server never sees. */
 const DESKTOP_EMBED_PATH = "/embed/desktop";
 
-type UnauthorizedListener = () => void;
+type UnauthorizedListener = (sessionEpoch: number) => void;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
 
 /**
  * Fires whenever a control-plane call (including a relayed box call) is rejected with 401: the session is missing or
- * expired. A direct box refusing a box token is not a session expiry and never fires this.
+ * expired. The listener receives the epoch of the session the client was created under, so a late 401 from a session
+ * that has already been replaced cannot expire the newer one. A direct box refusing a box token is not a session
+ * expiry and never fires this.
  */
 export function onUnauthorized(listener: UnauthorizedListener): () => void {
   unauthorizedListeners.add(listener);
@@ -220,12 +222,18 @@ async function send<A, I>(
   }
 }
 
-/** Creates an API client bound to one server URL, session cookie and active box (`null` for the relayed Kestrel box). */
+/**
+ * Creates an API client bound to one server URL, session cookie and active box (`null` for the relayed Kestrel box).
+ * `sessionEpoch` identifies the session the caller is on; a 401 reports it so the owner can ignore a late answer from
+ * a session it has already replaced.
+ */
 export function createApiClient(
   serverUrl: string,
   sessionCookie: string | null,
-  activeBox: ActiveBox | null
+  activeBox: ActiveBox | null,
+  sessionEpoch = 0
 ): ApiClient {
+  const epoch = sessionEpoch;
   const cookieHeaders: Record<string, string> = sessionCookie ? { Cookie: `session=${sessionCookie}` } : {};
 
   // Tokens are cached per key and invalidated as a unit below: a mint that was already running when a token was
@@ -273,7 +281,7 @@ export function createApiClient(
     return send(schema, method, `${serverUrl}${path}`, cookieHeaders, body).catch((error: unknown) => {
       if (error instanceof ApiError && error.status === 401) {
         invalidateTokens();
-        unauthorizedListeners.forEach((listener) => listener());
+        unauthorizedListeners.forEach((listener) => listener(epoch));
       }
       throw error;
     });

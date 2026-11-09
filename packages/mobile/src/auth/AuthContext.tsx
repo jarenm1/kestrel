@@ -5,18 +5,12 @@ import { storage } from "@/lib/storage";
 import type { BoxList, ManagedBox, Me, UserBox } from "@cloudagents/protocol";
 import { createApiClient, onUnauthorized, type ActiveBox } from "@/api/client";
 import { fetchCredentials, hostOrigin } from "@/auth/session";
+import { initialAuthState, launched, boxesLoaded, noSession, signedIn, type AuthState } from "@/auth/sessionState";
 import {
-  boxesLoaded,
-  checkFailed,
-  checking,
-  expired,
-  initialAuthState,
-  launched,
-  noSession,
-  signedIn,
-  signedOut,
-  type AuthState,
-} from "@/auth/sessionState";
+  createSessionMachine,
+  type CheckOutcome,
+  type CheckSessionOptions,
+} from "@/auth/sessionMachine";
 
 const SERVER_URL_KEY = "kestrel_server_url";
 const SESSION_COOKIE_KEY = "kestrel_session";
@@ -27,14 +21,6 @@ const browserSession = hostOrigin !== null;
 function sessionHeaders(sessionCookie: string | null): Record<string, string> {
   return sessionCookie ? { Cookie: `session=${sessionCookie}` } : {};
 }
-
-export type CheckSessionOptions = {
-  /** Refresh without replacing the workspace with the loading screen (used on foreground). */
-  readonly quiet?: boolean;
-  /** The URL and cookie the check must use; defaults to the current state. */
-  readonly serverUrl?: string | null;
-  readonly sessionCookie?: string | null;
-};
 
 interface AuthActions {
   setServerUrl: (url: string) => Promise<void>;
@@ -53,11 +39,41 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>(initialAuthState);
   const queryClient = useQueryClient();
-  // The current state for the stable callbacks below, and the attempt that may still write the session. A later
-  // expiry or sign-out bumps the attempt, so a check that was already in flight cannot sign the user back in.
+  // The machine reads the latest state through this ref, so its callbacks stay stable while the state moves.
   const stateRef = useRef(state);
   stateRef.current = state;
-  const attempt = useRef(0);
+
+  // The machine owns the check attempt counter and the session generation; a check, expiry or sign-out supersedes
+  // whatever was in flight, and a 401 only expires the generation that reported it.
+  const session = useMemo(
+    () =>
+      createSessionMachine({
+        state: () => stateRef.current,
+        update: (change) => setState(change),
+        browserSession,
+        check: checkSessionWithApi,
+        logout: async (serverUrl, sessionCookie) => {
+          await fetch(`${serverUrl}/auth/logout`, {
+            method: "POST",
+            // Native: the explicit session header is authoritative; RN otherwise merges in WebView cookies.
+            credentials: fetchCredentials,
+            headers: sessionHeaders(sessionCookie),
+          });
+        },
+        removeStoredSession: async () => {
+          try {
+            await storage.deleteItem(SESSION_COOKIE_KEY);
+          } catch {
+            // A failed delete must not leave the app claiming a live session; the server has already refused it.
+          }
+        },
+        resetQueries: async () => {
+          await queryClient.cancelQueries();
+          queryClient.clear();
+        },
+      }),
+    [queryClient]
+  );
 
   const activeBox = useMemo(
     () => resolveActiveBox(state.boxes, state.activeBoxId, state.managedBox),
@@ -66,51 +82,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const applyBoxList = useCallback((list: BoxList) => {
     setState((s) => boxesLoaded(s, list));
   }, []);
-
-  /**
-   * The control plane rejected the session. This is terminal until the user signs in again: the stored cookie is
-   * gone, requests stop, and the app shows sign-in instead of a loading or empty workspace.
-   */
-  const expire = useCallback(async () => {
-    attempt.current += 1;
-    try {
-      await storage.deleteItem(SESSION_COOKIE_KEY);
-    } catch {
-      // A failed delete must not leave the app claiming a live session; the server has already refused it.
-    }
-    await queryClient.cancelQueries();
-    queryClient.clear();
-    setState(expired);
-  }, [queryClient]);
-
-  const checkSession = useCallback(
-    async (options: CheckSessionOptions = {}) => {
-      const serverUrl = options.serverUrl !== undefined ? options.serverUrl : stateRef.current.serverUrl;
-      const sessionCookie = options.sessionCookie !== undefined ? options.sessionCookie : stateRef.current.sessionCookie;
-      if (serverUrl === null) {
-        // Nothing can be checked, and a spinner would never end. A device without a session is simply signed out.
-        setState(noSession);
-        return;
-      }
-      if (sessionCookie === null && !browserSession) {
-        // Nothing to check. Keep the expiry notice until the user signs in again; a plain launch starts signed out.
-        if (!stateRef.current.expired) setState(noSession);
-        return;
-      }
-      if (options.quiet !== true) setState((s) => checking(s, sessionCookie));
-      const checked = ++attempt.current;
-      await fetchMe({
-        serverUrl,
-        sessionCookie,
-        wasSignedIn: stateRef.current.user !== null || stateRef.current.expired,
-        setState,
-        applyBoxList,
-        expire,
-        isCurrent: () => attempt.current === checked,
-      });
-    },
-    [applyBoxList, expire]
-  );
 
   // Load the saved server URL and session on mount, then check it: a stored session that the server has forgotten is
   // an expiry, not a signed-in app with failing requests.
@@ -123,7 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const urlToUse = savedUrl || DEFAULT_SERVER_URL;
         if (!active) return;
         setState((s) => launched(s, urlToUse, savedCookie));
-        await checkSession({ serverUrl: urlToUse, sessionCookie: savedCookie });
+        await session.check({ serverUrl: urlToUse, sessionCookie: savedCookie });
       } catch {
         if (active) setState(noSession);
       }
@@ -131,18 +102,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       active = false;
     };
-  }, [checkSession]);
+  }, [session]);
 
   // Any control-plane call rejected with 401 means the session is expired, wherever the user is in the app.
-  useEffect(() => onUnauthorized(() => void expire()), [expire]);
+  useEffect(() => onUnauthorized((epoch) => void session.expire(epoch)), [session]);
 
   // A resumed app rechecks the session: it may have expired while the app was in the background.
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
-      if (next === "active") void checkSession({ quiet: true });
+      if (next === "active") void session.check({ quiet: true });
     });
     return () => subscription.remove();
-  }, [checkSession]);
+  }, [session]);
 
   const setServerUrl = useCallback(async (url: string) => {
     const cleaned = url.replace(/\/+$/, "");
@@ -153,44 +124,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const setSessionCookie = useCallback(
     async (cookie: string) => {
       await storage.setItem(SESSION_COOKIE_KEY, cookie);
-      setState((s) => checking(s, cookie));
-      await checkSession({ sessionCookie: cookie });
+      await session.startSession(stateRef.current.serverUrl, cookie);
     },
-    [checkSession]
+    [session]
   );
 
   const setUser = useCallback((user: Me) => {
     setState((s) => signedIn(s, user));
   }, []);
 
-  const signOut = useCallback(async () => {
-    if (stateRef.current.serverUrl !== null && (stateRef.current.sessionCookie !== null || browserSession)) {
-      try {
-        await fetch(`${stateRef.current.serverUrl}/auth/logout`, {
-          method: "POST",
-          // Native: the explicit session header is authoritative; RN otherwise merges in WebView cookies.
-          credentials: fetchCredentials,
-          headers: sessionHeaders(stateRef.current.sessionCookie),
-        });
-      } catch {
-        // Ignore logout errors
-      }
-    }
-    attempt.current += 1;
-    await storage.deleteItem(SESSION_COOKIE_KEY);
-    await queryClient.cancelQueries();
-    queryClient.clear();
-    setState(signedOut);
-  }, [queryClient]);
-
   const setActiveBox = useCallback(
     async (boxId: string | null) => {
       const { serverUrl, sessionCookie } = stateRef.current;
       if (serverUrl === null) throw new Error("Server URL is not set");
-      const list = await createApiClient(serverUrl, sessionCookie, null).setActiveBox(boxId);
+      const list = await createApiClient(
+        serverUrl,
+        sessionCookie,
+        null,
+        session.sessionEpoch()
+      ).setActiveBox(boxId);
       applyBoxList(list);
     },
-    [applyBoxList]
+    [applyBoxList, session]
   );
 
   return (
@@ -200,8 +155,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setServerUrl,
         setSessionCookie,
         setUser,
-        signOut,
-        checkSession,
+        signOut: session.signOut,
+        checkSession: session.check,
         setActiveBox,
         activeBox,
       }}
@@ -217,58 +172,31 @@ export function useAuth(): AuthContextValue {
   return ctx;
 }
 
-interface FetchMeOptions {
-  readonly serverUrl: string;
-  readonly sessionCookie: string | null;
-  /** The app believed the user was signed in: a 401 is an expiry, not a first visit with no cookie. */
-  readonly wasSignedIn: boolean;
-  readonly setState: React.Dispatch<React.SetStateAction<AuthState>>;
-  readonly applyBoxList: (list: BoxList) => void;
-  readonly expire: () => Promise<void>;
-  /** False once a later expiry or sign-out superseded this check; its result must not restore the session. */
-  readonly isCurrent: () => boolean;
-}
-
-async function fetchMe({
-  serverUrl,
-  sessionCookie,
-  wasSignedIn,
-  setState,
-  applyBoxList,
-  expire,
-  isCurrent,
-}: FetchMeOptions) {
+/** One `/api/me` exchange; the machine decides which generation may apply the answer. */
+async function checkSessionWithApi(
+  serverUrl: string,
+  sessionCookie: string | null,
+  sessionEpoch: number
+): Promise<CheckOutcome> {
   try {
     const res = await fetch(`${serverUrl}/api/me`, {
       headers: sessionHeaders(sessionCookie),
       // Native: do not combine the secure-store session with the native/WebView cookie jar.
       credentials: fetchCredentials,
     });
-    if (!isCurrent()) return;
-    if (res.status === 401) {
-      // A stored cookie or a user the app already had makes this an expiry; a first visit with no session does not.
-      if (sessionCookie !== null || wasSignedIn) await expire();
-      else setState(noSession);
-      return;
-    }
-    if (!res.ok) {
-      setState((s) => checkFailed(s, `Server returned ${res.status}`));
-      return;
-    }
+    if (res.status === 401) return { _tag: "expired" };
+    if (!res.ok) return { _tag: "failed", error: `Server returned ${res.status}` };
     const user: Me = await res.json();
-    if (!isCurrent()) return;
     // Signing in never depends on the box list: when it cannot be read, the box state already held stays.
-    const boxes = await createApiClient(serverUrl, sessionCookie, null)
+    const boxes = await createApiClient(serverUrl, sessionCookie, null, sessionEpoch)
       .boxes()
       .catch(() => null);
-    if (!isCurrent()) return;
-    if (boxes !== null) applyBoxList(boxes);
-    setState((s) => signedIn(s, user));
+    return { _tag: "signed-in", user, boxes };
   } catch (e) {
-    if (!isCurrent()) return;
-    setState((s) =>
-      checkFailed(s, `Cannot reach server: ${e instanceof Error ? e.message : String(e)}`)
-    );
+    return {
+      _tag: "failed",
+      error: `Cannot reach server: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
 

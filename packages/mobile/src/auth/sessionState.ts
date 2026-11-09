@@ -22,6 +22,11 @@ export interface AuthState {
   loading: boolean;
   /** The control plane rejected the session: the app shows sign-in, not a spinner or an empty workspace. */
   expired: boolean;
+  /**
+   * Which session the app is on. Clients capture it when they are created, and a 401 reports the generation it was
+   * created under, so a late 401 from a replaced session cannot expire the newer one.
+   */
+  sessionEpoch: number;
   /** Last auth error */
   error: string | null;
 }
@@ -34,6 +39,7 @@ export const initialAuthState: AuthState = {
   loading: true,
   error: null,
   expired: false,
+  sessionEpoch: 0,
   boxes: [],
   activeBoxId: null,
   managedBox: null,
@@ -58,16 +64,25 @@ export const signedIn = (state: AuthState, user: Me): AuthState => ({
 });
 
 /**
- * The control plane answered 401: the session is expired. The stored cookie is gone (the caller clears it) and so is
- * everything cached under it. `expired` stays set so the app can explain why the sign-in screen came back.
+ * The generation a 401 may expire: only the one the app is on. `null` means the report is late — a newer session has
+ * replaced the one that made the request, so expiring would sign the new user out.
  */
-export const expired = (state: AuthState): AuthState => ({
+export const expiringEpoch = (reported: number, current: number): number | null =>
+  reported === current ? current + 1 : null;
+
+/**
+ * The control plane answered 401: the session is expired. The stored cookie is gone (the caller clears it) and so is
+ * everything cached under it. `expired` stays set so the app can explain why the sign-in screen came back. The epoch
+ * advances, so clients and reports of the expired session are stale from here on.
+ */
+export const expired = (state: AuthState, sessionEpoch: number): AuthState => ({
   ...state,
   sessionCookie: null,
   user: null,
   loading: false,
   error: null,
   expired: true,
+  sessionEpoch,
   boxes: [],
   activeBoxId: null,
   managedBox: null,
@@ -98,6 +113,27 @@ export const checking = (state: AuthState, sessionCookie: string | null): AuthSt
   expired: false,
 });
 
+/**
+ * A new credential was captured: it starts a new session generation, so 401s from the previous session's clients are
+ * stale. The old user and boxes cannot carry over to whoever this session belongs to.
+ */
+export const startedSession = (
+  state: AuthState,
+  sessionCookie: string,
+  sessionEpoch: number
+): AuthState => ({
+  ...state,
+  sessionCookie,
+  sessionEpoch,
+  user: null,
+  loading: true,
+  error: null,
+  expired: false,
+  boxes: [],
+  activeBoxId: null,
+  managedBox: null,
+});
+
 /** The box list arrived beside a successful `/api/me`. */
 export const boxesLoaded = (state: AuthState, list: BoxList): AuthState => ({
   ...state,
@@ -107,13 +143,14 @@ export const boxesLoaded = (state: AuthState, list: BoxList): AuthState => ({
 });
 
 /** The user signed out deliberately (or the app is starting from zero): no user, no cached boxes, not an expiry. */
-export const signedOut = (state: AuthState): AuthState => ({
+export const signedOut = (state: AuthState, sessionEpoch: number): AuthState => ({
   ...state,
   sessionCookie: null,
   user: null,
   loading: false,
   error: null,
   expired: false,
+  sessionEpoch,
   boxes: [],
   activeBoxId: null,
   managedBox: null,
