@@ -539,3 +539,91 @@ describe("directory sync failure after the rename", () => {
     expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "landed", "after"])
   })
 })
+
+describe("restart reconciliation", () => {
+  let root: string
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "kestrel-state-reconcile-"))
+  })
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const runningRun = (id: string, taskId: string): Record<string, unknown> => ({
+    ...run(id, taskId, {}),
+    status: "running",
+    endedAt: null,
+    exitCode: null,
+  })
+
+  test("a run that was live is a restart interruption and its thread failed", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("live"), status: "running" }],
+      messages: [], pendingAsks: [], uploads: [], runSessions: [],
+      runs: [runningRun("r1", "live")],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.tasks[0]?.status).toBe("failed")
+    expect(state.runs[0]).toMatchObject({ status: "failed", interruptedByRestart: true })
+    expect(state.runs[0]?.endedAt).not.toBeNull()
+  })
+
+  test("a thread still marked running with no run behind it is failed", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("orphan"), status: "running" }],
+      messages: [], runs: [], pendingAsks: [], uploads: [], runSessions: [],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.tasks[0]?.status).toBe("failed")
+  })
+
+  test("a question that survived the restart keeps its thread in needs_input", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("asking"), status: "needs_input" }],
+      messages: [message("q", "asking", "r1", "agent", "Which option?")],
+      pendingAsks: [{ taskId: "asking", runId: "r1", messageId: "q" }],
+      uploads: [], runSessions: [],
+      runs: [runningRun("r1", "asking")],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.tasks[0]?.status).toBe("needs_input")
+    expect(state.pendingAsks).toEqual([{ taskId: "asking", runId: "r1", messageId: "q" }])
+    expect(state.runs[0]).toMatchObject({ status: "failed", interruptedByRestart: true })
+  })
+
+  test("needs_input without a question and without a run is normalized to idle", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("stale"), status: "needs_input" }],
+      messages: [], runs: [], pendingAsks: [], uploads: [], runSessions: [],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.tasks[0]?.status).toBe("idle")
+    expect(state.pendingAsks).toEqual([])
+  })
+
+  test("needs_input without a question but with a live run is failed with that run", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("stale-live"), status: "needs_input" }],
+      messages: [], pendingAsks: [], uploads: [], runSessions: [],
+      runs: [runningRun("r1", "stale-live")],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.tasks[0]?.status).toBe("failed")
+    expect(state.runs[0]).toMatchObject({ status: "failed", interruptedByRestart: true })
+  })
+})

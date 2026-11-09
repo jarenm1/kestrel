@@ -68,7 +68,7 @@ import { formatHandoff, HANDOFF_HISTORY_LIMIT } from "./handoff"
 import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
-import { newId, nowIso, StateStore, type RunSession, type StoreState } from "./state"
+import { newId, nowIso, StateStore, applyTaskEvent, type RunSession, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName, uploadOperationId } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
@@ -281,7 +281,9 @@ const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): bool
     if (d.cancelledAt === undefined && state.pendingAsks.some((ask) => ask.taskId === child.id)) return true
     const run = state.runs.find((r) => r.id === d.runId)
     if (d.cancelledAt === undefined && (run === undefined ? child.status !== "failed" : run.status === "running" || resumesAtReset(child, run) || (run.status !== "cancelled" && hasPendingDelegations(state, run.id)))) return true
-    if (d.resultAcknowledged) return false
+    // Delivery, not acknowledgement, is the fact that ends the wait: the result message must exist and belong to this
+    // run (or to a continuation of it that has itself settled). An early acknowledgement must not let an ancestor's
+    // result overtake the automatic continuation that carries the descendant's answer.
     const notification = [...state.messages].reverse().find((m) => m.taskId === d.parentTaskId && isDelegationResult(m.id, child.id))
     if (!notification) return true
     if (notification.runId === null || notification.runId === runId) return false
@@ -1118,8 +1120,19 @@ export const CoreLive = Layer.effect(
         if (updated.message) publishMessage(updated.message)
       })
 
-    /** Live `task_ask` calls by run, each waiting for the user's answer. A question persists in `pendingAsks` regardless. */
-    const liveAsks = new Map<string, Deferred.Deferred<AskOutcome>>()
+    /**
+     * Live `task_ask` calls by the question message they posted, each waiting for the user's answer. Keying by the
+     * question id (not the run) routes an answer only to the call waiting for that exact question, so a stale
+     * question's answer can never resolve another question's waiter.
+     */
+    const liveAsks = new Map<string, { readonly runId: string; readonly answer: Deferred.Deferred<AskOutcome> }>()
+    /** Runs with an ask call between entry and the committed question; a second concurrent ask for the run is refused. */
+    const askInFlight = new Map<string, object>()
+    /** The call waiting on a run's question, if any. At most one question per task is pending. */
+    const liveAskOfRun = (runId: string): { readonly messageId: string; readonly answer: Deferred.Deferred<AskOutcome> } | null => {
+      for (const [messageId, waiter] of liveAsks) if (waiter.runId === runId) return { messageId, answer: waiter.answer }
+      return null
+    }
     /** User messages each run has taken, from its inbox or as an answer. Forgotten once the run ends. */
     const seenByRun = new Map<string, Set<string>>()
     const seenFor = (runId: string): Set<string> => {
@@ -1658,7 +1671,7 @@ export const CoreLive = Layer.effect(
               task: Task
               message: Message
               run: Run
-              answer: Deferred.Deferred<AskOutcome> | null
+              answer: { readonly messageId: string; readonly deferred: Deferred.Deferred<AskOutcome> } | null
               start: RunStart | null
               delivered: string
               duplicate: boolean
@@ -1708,7 +1721,6 @@ export const CoreLive = Layer.effect(
             // Any message of the user settles the task's question: it is the answer, or it is ignored once the question's
             // run is gone. Another agent's message leaves the question to the user.
             const ask = from === null ? (s.pendingAsks.find((a) => a.taskId === taskId) ?? null) : null
-            if (from === null) s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
             const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
@@ -1725,8 +1737,15 @@ export const CoreLive = Layer.effect(
                 ...attached,
                 ...sent,
               }
-              const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
-              if (task.status === "needs_input" && from === null) task.status = "running"
+              const waiter = ask !== null && ask.runId === running.id ? (liveAsks.get(ask.messageId) ?? null) : null
+              const answer = waiter === null ? null : { messageId: ask!.messageId, deferred: waiter.answer }
+              if (from === null) {
+                // The user's message answers the question or supersedes it; either way it is the thread's next turn.
+                const answered = applyTaskEvent(s, task, { _tag: ask === null ? "userMessage" : "answer" })
+                if (answered._tag === "transitioned" && !answered.phase.pendingAsk) {
+                  s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
+                }
+              }
               task.updatedAt = now
               s.messages.push(message)
               return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false, title: titleRequest })
@@ -1788,7 +1807,14 @@ export const CoreLive = Layer.effect(
               ...(autoRetryAttempt === undefined ? {} : { autoRetryAttempt }),
             }
             const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
-            task.status = "running"
+            if (from === null) {
+              // The user's message starts the thread's next turn and clears a question the previous run left.
+              const sentTurn = applyTaskEvent(s, task, { _tag: "userMessage" })
+              if (sentTurn._tag === "transitioned" && !sentTurn.phase.pendingAsk) {
+                s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
+              }
+            }
+            applyTaskEvent(s, task, { _tag: "runStarted" })
             task.updatedAt = now
             // The new run supersedes whatever the failed run armed: a usage-limit notice or a retry timer is about a
             // run that no longer is the thread's latest. Clearing them here keeps the notice off a running thread
@@ -1852,7 +1878,7 @@ export const CoreLive = Layer.effect(
         // In-memory bookkeeping follows the reservation, never runs inside it: the update's mutations are rolled back on a
         // failed write, and these must not outlive them. A reply closes the question; the prompt is what a new run starts
         // with, not mail for its inbox.
-        if (reserved.answer) liveAsks.delete(reserved.run.id)
+        if (reserved.answer) liveAsks.delete(reserved.answer.messageId)
         if (reserved.answer || reserved.start !== null) seenFor(reserved.run.id).add(reserved.message.id)
         hub.publish({ _tag: "task.updated", task: reserved.task })
         // A title is generated beside the run, never in front of it: a slow or failed provider cannot hold up or
@@ -1885,7 +1911,7 @@ export const CoreLive = Layer.effect(
           let afterItems = reserved.message.afterItems ?? 0
           if (reserved.answer) {
             afterItems = Math.max(afterItems, harness.itemCount(reserved.run.id))
-            yield* Deferred.succeed(reserved.answer, { _tag: "answered", text: reserved.delivered })
+            yield* Deferred.succeed(reserved.answer.deferred, { _tag: "answered", text: reserved.delivered })
           } else {
             // Taken from the inbox before the steer is sent, so task_inbox cannot hand it over a second time.
             const seen = seenFor(reserved.run.id)
@@ -2174,7 +2200,7 @@ export const CoreLive = Layer.effect(
               // A cancelled delegated thread must not wake at a usage-limit reset or retry for a parent that stopped it.
               delete task.usageLimitResume
               delete task.autoRetry
-              if (task.status === "needs_input") task.status = "idle"
+              applyTaskEvent(s, task, { _tag: "cancelDelegation" })
               task.updatedAt = nowIso()
               changed.push({ ...task })
             }
@@ -2208,12 +2234,14 @@ export const CoreLive = Layer.effect(
         return yield* delegatedStatus(parentTaskId, childTaskId)
       })
 
+    // An acknowledgement says the parent's agent has the result, not that the result reached the parent: delivery is
+    // the deterministic result message's existence. The two are independent, so an ack before the sweep cannot
+    // suppress the delivery; the message id still makes a repeated delivery harmless.
     const acknowledgeDelegation: CoreShape["acknowledgeDelegation"] = (parentTaskId, childTaskId) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
       yield* delegatedStatus(parentTaskId, childTaskId)
       const acknowledged = yield* store.update((s) => {
         const child = s.tasks.find((t) => t.id === childTaskId)!
-        const delivered = s.messages.some((m) => m.taskId === parentTaskId && m.id === `delegation-result:${childTaskId}`)
-        if (delivered || child.delegation!.resultAcknowledged) return Either.right(null)
+        if (child.delegation!.resultAcknowledged) return Either.right(null)
         child.delegation = { ...child.delegation!, resultAcknowledged: true }
         return Either.right({ ...child })
       })
@@ -2245,11 +2273,10 @@ export const CoreLive = Layer.effect(
         const parent = state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child.owner)
         const parentRun = state.runs.find((r) => r.id === d.parentRunId)
         return (d.cancelledAt !== undefined || (run !== undefined && run.status !== "running" && (run.status === "cancelled" || (!hasPendingDelegations(state, run.id) && usageLimitWait(state, child, run) === null))) || (run === undefined && child.status === "failed")) && parent !== undefined && parent.archivedAt === undefined &&
-          !d.resultAcknowledged && parent.delegation?.cancelledAt === undefined && parentRun?.status !== "cancelled" && !holdsDelegationMail(state, parent) && !state.messages.some((m) => m.taskId === parent.id && m.id === `delegation-result:${child.id}`)
+          parent.delegation?.cancelledAt === undefined && parentRun?.status !== "cancelled" && !holdsDelegationMail(state, parent) && !state.messages.some((m) => m.taskId === parent.id && m.id === `delegation-result:${child.id}`)
       })
       yield* Effect.forEach(pending, (child) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
         const latest = yield* store.read
-        if (latest.tasks.find((t) => t.id === child.id)?.delegation?.resultAcknowledged) return
         const status = yield* delegatedStatus(child.delegation!.parentTaskId, child.id)
         if (status.task.delegation?.cancelledAt === undefined && (status.task.status === "needs_input" || status.run?.status === "running" || status.waitingForChildren || status.usageLimit !== null)) return
         const parent = latest.tasks.find((t) => t.id === child.delegation!.parentTaskId)
@@ -2318,6 +2345,11 @@ export const CoreLive = Layer.effect(
     /** Posts a question for the running run and waits for the user's answer. The question persists until it is answered. */
     const ask: CoreShape["ask"] = (taskId, runId, input) =>
       Effect.gen(function* () {
+        // The question's id is known before the write, so the waiter is registered against the row this call commits,
+        // never against a run that may still have an older question.
+        const messageId = newId()
+        // This call's ownership token for the run's in-flight slot; cleanup must not release another call's claim.
+        const claim = {}
         const answer = yield* Deferred.make<AskOutcome>()
         // Subscribed before posting, so a run that ends in the meantime cannot be missed.
         const unsubscribe = hub.subscribe(taskId, (event) => {
@@ -2326,6 +2358,14 @@ export const CoreLive = Layer.effect(
           }
         })
         return yield* Effect.gen(function* () {
+          // Two separate jobs. `askInFlight` refuses a concurrent ask from entry until the question is committed;
+          // `liveAsks` is the answer route and is set only with the committed question, keyed by that question's id.
+          // Registering the Deferred earlier would let an answer to an older, abandoned question resolve this one.
+          if (askInFlight.has(runId) || liveAskOfRun(runId) !== null) {
+            return yield* Effect.fail(new Conflict({ message: "a question is already waiting for an answer" }))
+          }
+          // The token makes cleanup own the claim: a refused concurrent ask must not delete the marker held by A.
+          askInFlight.set(runId, claim)
           const attachments = yield* storeAttachments(input.attachments)
           const posted = yield* store.update(
             (s): Either.Either<{ task: Task; message: Message }, NotFound | Conflict> => {
@@ -2335,15 +2375,17 @@ export const CoreLive = Layer.effect(
               if (!run || run.taskId !== taskId || run.status !== "running") {
                 return Either.left(new Conflict({ message: `run ${runId} is not the running run of task ${taskId}` }))
               }
-              // A question is replaced only when its call has gone (the call was dropped); a waiting one blocks.
+              // A question is replaced only when its call is gone (the call was dropped); one whose call is waiting
+              // still blocks. The waiter is keyed by question id, so only a waiting question of this run conflicts.
               const pending = s.pendingAsks.find((a) => a.taskId === taskId)
-              if (pending && (pending.runId !== runId || liveAsks.has(runId))) {
+              if (pending && (pending.runId !== runId || liveAsks.has(pending.messageId))) {
                 return Either.left(new Conflict({ message: "a question is already waiting for an answer" }))
               }
+              if (pending) s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
               const task = found.right
               const now = nowIso()
               const message: Message = {
-                id: newId(),
+                id: messageId,
                 taskId,
                 role: "agent",
                 text: input.question.trim(),
@@ -2352,14 +2394,16 @@ export const CoreLive = Layer.effect(
                 options: [...input.options],
                 attachments,
               }
+              const asked = applyTaskEvent(s, task, { _tag: "ask" })
+              if (asked._tag === "illegal") {
+                return Either.left(new Conflict({ message: `cannot ask a question: ${asked.reason}` }))
+              }
               s.messages.push(message)
-              s.pendingAsks = [
-                ...s.pendingAsks.filter((a) => a.taskId !== taskId),
-                { taskId, runId, messageId: message.id },
-              ]
-              task.status = "needs_input"
+              s.pendingAsks.push({ taskId, runId, messageId })
               task.updatedAt = now
-              liveAsks.set(runId, answer)
+              // Registered with the row in the same update, so the answer route exists only once the question does.
+              // A write that fails is rolled back and the `ensuring` below removes the waiter.
+              liveAsks.set(messageId, { runId, answer })
               return Either.right({ task: { ...task }, message })
             },
           )
@@ -2372,7 +2416,8 @@ export const CoreLive = Layer.effect(
           Effect.ensuring(
             Effect.sync(() => {
               unsubscribe()
-              if (liveAsks.get(runId) === answer) liveAsks.delete(runId)
+              if (askInFlight.get(runId) === claim) askInFlight.delete(runId)
+              if (liveAsks.get(messageId)?.answer === answer) liveAsks.delete(messageId)
             }),
           ),
         )
@@ -2916,7 +2961,9 @@ export const CoreLive = Layer.effect(
               }
               const task = found.right
               const now = nowIso()
-              task.status = input.status
+              // The live run's outcome wins: a report is advisory. Only `needs_input` names a phase, and only while a
+              // question is actually pending; any terminal report is just a message until the run settles.
+              applyTaskEvent(s, task, { _tag: "report", status: input.status })
               task.updatedAt = now
               const trimmed = input.message.trim()
               let message: Message | null = null

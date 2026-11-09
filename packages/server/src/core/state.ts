@@ -1,7 +1,19 @@
 import { Context, Effect, Either, Layer, Schema } from "effect"
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
-import { InternalError, Message, Run, Task, ModelHarness, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
+import {
+  InternalError,
+  Message,
+  Run,
+  Task,
+  ModelHarness,
+  ModelProvider,
+  DEFAULT_MODEL_PROVIDER,
+  transitionTask,
+  type TaskEvent,
+  type TaskPhase,
+  type TaskTransition,
+} from "@cloudagents/protocol"
 import { Config } from "../config"
 import { replaceFile, syncDir, writeAtomic } from "./atomic"
 import { migrateLegacyState } from "./migrate"
@@ -85,6 +97,29 @@ export interface StoreState {
    * recovery sweep never arms them again, across restarts too. Pruned once a run stops being its thread's latest.
    */
   settledRuns: string[]
+}
+
+/**
+ * A thread's phase as the store holds it: its status plus the run, ask and delegation facts that must agree with it.
+ * Callers derive it from persisted records; it is not the persisted shape (`TaskPhase`).
+ */
+export const taskPhaseOf = (state: Readonly<StoreState>, task: Task): TaskPhase => ({
+  status: task.status,
+  archived: task.archivedAt !== undefined,
+  pendingAsk: state.pendingAsks.some((ask) => ask.taskId === task.id),
+  runLive: state.runs.some((run) => run.taskId === task.id && run.status === "running"),
+  delegationCancelled: task.delegation?.cancelledAt !== undefined,
+})
+
+/**
+ * The one server entry point to the thread writer: runs `event` through `transitionTask` and, when the transition is
+ * legal, writes back the phase field the task persists (its status). The run and ask facts belong to their own
+ * records, so the caller adds or removes the ask row whose presence the transition reports.
+ */
+export const applyTaskEvent = (state: Readonly<StoreState>, task: Mutable<Task>, event: TaskEvent): TaskTransition => {
+  const transition = transitionTask(taskPhaseOf(state, task), event)
+  if (transition._tag === "transitioned") task.status = transition.phase.status
+  return transition
 }
 
 export interface StoreShape {
@@ -261,16 +296,28 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
  */
 const reconcile = (state: StoreState): void => {
   const now = new Date().toISOString()
+  // The task's phase is read while its run still counts as live: the transition is what turns the lost run into a
+  // failed thread, keeping a question that survived the restart.
+  for (const task of state.tasks) {
+    applyTaskEvent(state, task, { _tag: "restartReconcile" })
+    // `needs_input` without a question is not a real phase (D2). A live run was already turned into a failed thread
+    // by the transition above; with no run left the thread has nothing to wait for.
+    if (task.status === "needs_input" && !state.pendingAsks.some((ask) => ask.taskId === task.id)) {
+      task.status = "idle"
+    }
+    // A thread persisted `running` with no live run behind it has nothing left to finish, even when the transition
+    // had nothing to change.
+    if (task.status === "running" && !state.runs.some((run) => run.taskId === task.id && run.status === "running")) {
+      task.status = "failed"
+    }
+    // A delegation persisted before dispatch lost its launching process during restart.
+    if (task.delegation !== undefined && task.delegation.runId === undefined) task.status = "failed"
+  }
   for (const run of state.runs) {
     if (run.status !== "running") continue
     run.status = "failed"
     run.endedAt = now
     run.interruptedByRestart = true
-  }
-  for (const task of state.tasks) {
-    if (task.status === "running") task.status = "failed"
-    // A delegation persisted before dispatch lost its launching process during restart.
-    if (task.delegation !== undefined && task.delegation.runId === undefined) task.status = "failed"
   }
 }
 

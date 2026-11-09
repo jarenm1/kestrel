@@ -38,7 +38,7 @@ import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
-import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
+import { StateStore, applyTaskEvent, newId, nowIso } from "./state"
 import { makeAcpDriver, type AcpRunInput } from "./acp"
 import { makeClaudeDriver } from "./claude-stream"
 import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
@@ -366,24 +366,86 @@ export const AgentHarnessLive = Layer.effect(
         )
       })
 
-    /** Applies `f` to a run and its task inside one state update; publishes what changed. */
-    const patchRunAndTask = (
-      runId: string,
-      f: (run: Mutable<Run>, task: Mutable<Task>, s: StoreState) => void,
-    ): Effect.Effect<void, InternalError> =>
+    /** How a run ended, and what that means for its thread. */
+    type RunSettlement =
+      /** The run's turn ended. `ok` is the harness outcome, not the CLI exit code. */
+      | { readonly _tag: "ended"; readonly ok: boolean; readonly exitCode: number | null; readonly text: string }
+      /** A run that had started was stopped, by its user or by archiving the thread. */
+      | { readonly _tag: "cancelled" }
+      /** The box is going down: a started run is left as a crash leaves it, for the next start to reconcile. */
+      | { readonly _tag: "shutdown" }
+      /** The run never started; `reason` says why. */
+      | { readonly _tag: "aborted"; readonly reason: string }
+
+    /**
+     * The one writer of a run's settlement: its status, `endedAt` and `exitCode`, its thread's phase (through
+     * `transitionTask`) and the closing message, in one guarded update. A run that already settled, or whose thread is
+     * gone, is left alone. A shutdown keeps the thread as it was; the next start's reconciliation owns that edge.
+     */
+    const settleRun = (runId: string, settlement: RunSettlement) =>
       Effect.gen(function* () {
-        const changed = yield* store.update((s) => {
+        const now = nowIso()
+        const outcome = yield* store.update((s) => {
           const run = s.runs.find((r) => r.id === runId)
-          if (!run) return Either.right(null)
+          if (!run || run.status !== "running") return Either.right(null)
           const task = s.tasks.find((t) => t.id === run.taskId)
           if (!task) return Either.right(null)
-          f(run, task, s)
-          task.updatedAt = nowIso()
-          return Either.right({ run: { ...run }, task: { ...task } })
+          // The thread's phase is read while the run still counts as live; the transition is what settles the thread.
+          const event =
+            settlement._tag === "ended"
+              ? { _tag: "runSettled" as const, ok: settlement.ok }
+              : settlement._tag === "cancelled"
+                ? { _tag: "cancelRun" as const }
+                : settlement._tag === "aborted"
+                  ? { _tag: "runSettled" as const, ok: false }
+                  : null
+          let illegal: string | null = null
+          if (event !== null) {
+            const settled = applyTaskEvent(s, task, event)
+            // A cancelled run takes its question with it; a settled one keeps a question the user has not answered.
+            if (settled._tag === "illegal") illegal = settled.reason
+            else if (!settled.phase.pendingAsk) s.pendingAsks = s.pendingAsks.filter((ask) => ask.runId !== runId)
+          }
+          run.endedAt = now
+          run.exitCode = settlement._tag === "ended" ? settlement.exitCode : null
+          if (settlement._tag === "ended") run.status = settlement.ok ? "succeeded" : "failed"
+          else if (settlement._tag === "cancelled") run.status = "cancelled"
+          else {
+            run.status = "failed"
+            // A shutdown run is a restart interruption, as a crash leaves it; an aborted one never started.
+            if (settlement._tag === "shutdown") run.interruptedByRestart = true
+          }
+          task.updatedAt = now
+          const text =
+            settlement._tag === "ended"
+              ? settlement.text
+              : settlement._tag === "aborted"
+                ? `Run could not start: ${settlement.reason}`
+                : null
+          const message: Message | null =
+            text === null
+              ? null
+              : {
+                  id: newId(),
+                  taskId: task.id,
+                  role: settlement._tag === "aborted" ? "system" : "agent",
+                  text,
+                  runId,
+                  createdAt: now,
+                }
+          if (message !== null) s.messages.push(message)
+          return Either.right({ run: { ...run }, task: { ...task }, message, illegal })
         })
-        if (changed === null) return
-        publish({ _tag: "run.updated", run: changed.run })
-        publish({ _tag: "task.updated", task: changed.task })
+        if (outcome === null) return null
+        // The run's settlement is truth even when the thread's phase refused the event; make that visible instead of
+        // silently leaving a thread in a phase that disagrees with its run.
+        if (outcome.illegal !== null) {
+          yield* Effect.logWarning(`run ${runId}: settlement could not move its thread (${outcome.illegal})`)
+        }
+        if (outcome.message !== null) publish({ _tag: "message.created", message: outcome.message })
+        publish({ _tag: "run.updated", run: outcome.run })
+        publish({ _tag: "task.updated", task: outcome.task })
+        return outcome
       })
 
     /** Stores the task's context use (null clears it) and publishes the task; not an activity, so `updatedAt` stays. */
@@ -451,48 +513,19 @@ export const AgentHarnessLive = Layer.effect(
           catch: (e) => new InternalError({ message: `cannot write run items: ${String(e)}` }),
         }).pipe(Effect.catchAll((e) => Effect.logWarning(`run ${runId}: ${e.message}`)))
 
-        const outcome = yield* store.update((s) => {
-          const run = s.runs.find((r) => r.id === runId)
-          // Cancelled (or otherwise finished) runs keep their state.
-          if (!run || run.status !== "running") return Either.right(null)
-          const task = s.tasks.find((t) => t.id === run.taskId)
-          if (!task) return Either.right(null)
-          const ok = entry.driver === null ? exitCode === 0 : turn?.status === "completed"
-          const now = nowIso()
-          run.status = ok ? "succeeded" : "failed"
-          run.exitCode = exitCode
-          run.endedAt = now
-          // An agent that asked for input keeps that state until the user answers. A delegated child's parent is waiting on
-          // its result, so only a question still pending holds it there; a reported "needs input" ends with its run.
-          const holdsInput = task.status === "needs_input" &&
-            (task.delegation === undefined || task.delegation.cancelledAt !== undefined || s.pendingAsks.some((ask) => ask.taskId === task.id))
-          if (!holdsInput) task.status = ok ? "done" : "failed"
-          task.updatedAt = now
-          const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
-          // Diagnostics stay in output.log and agent.output, never in portable conversation history:
-          // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
-          const text =
-            entry.transcript.finalText() ??
-            failure ??
-            (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
-          const message: Message = {
-            id: newId(),
-            taskId: task.id,
-            role: "agent",
-            text,
-            runId,
-            createdAt: now,
-          }
-          s.messages.push(message)
-          return Either.right({ run: { ...run }, task: { ...task }, message })
-        })
+        const ok = entry.driver === null ? exitCode === 0 : turn?.status === "completed"
+        const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
+        // Diagnostics stay in output.log and agent.output, never in portable conversation history:
+        // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
+        const text =
+          entry.transcript.finalText() ??
+          failure ??
+          (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
+        const outcome = yield* settleRun(runId, { _tag: "ended", ok, exitCode, text })
         if (outcome === null) return
         if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
           toolFailures?.record(agentFailure(entry.agentKind, spawnError ?? turn.error, entry.diagnostic, exitCode, signal))
         }
-        publish({ _tag: "message.created", message: outcome.message })
-        publish({ _tag: "run.updated", run: outcome.run })
-        publish({ _tag: "task.updated", task: outcome.task })
       }).pipe(
         Effect.catchAll((e) => Effect.logError(`run ${runId} finalize failed: ${e.message}`)),
       )
@@ -507,6 +540,9 @@ export const AgentHarnessLive = Layer.effect(
     ) =>
       store
         .update((s) => {
+          // A session line that arrives after its run settled must not attach metadata to a finished run: the next
+          // run's resume target is only a run that really ended with a session.
+          if (s.runs.find((r) => r.id === runId)?.status !== "running") return Either.right(null)
           const session = { runId, sessionId, provider, harness, ...(continuation === null ? {} : { continuation }) }
           s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), session]
           return Either.right(null)
@@ -542,22 +578,10 @@ export const AgentHarnessLive = Layer.effect(
           }, KILL_GRACE_MS)
           timer.unref()
         }
-        yield* patchRunAndTask(runId, (run, task, s) => {
-          if (run.status !== "running") return
-          run.exitCode = null
-          run.endedAt = nowIso()
-          // The box is going down, not the user: a run that had started is left as a crash leaves it, and the next
-          // start's reconciliation marks it interrupted by restart and its task failed. A run still queued or launching
-          // never started an agent, so there is no work to resume and it is cancelled as before.
-          if (shutdown && entry !== undefined) {
-            run.status = "failed"
-            run.interruptedByRestart = true
-            return
-          }
-          run.status = "cancelled"
-          s.pendingAsks = s.pendingAsks.filter((a) => a.runId !== runId)
-          task.status = "idle"
-        })
+        // The box is going down, not the user: a run that had started is left as a crash leaves it, and the next
+        // start's reconciliation marks it interrupted by restart and its task failed. A run still queued or launching
+        // never started an agent, so there is no work to resume and it is cancelled as before.
+        yield* settleRun(runId, shutdown && entry !== undefined ? { _tag: "shutdown" } : { _tag: "cancelled" })
       })
 
     /** Counts a tool call's failure for the control plane. Replays have no driver; they only repeat old runs. */
@@ -1086,32 +1110,7 @@ export const AgentHarnessLive = Layer.effect(
         Effect.gen(function* () {
           releaseSlot(runId)
           yield* broker.revoke(runId)
-          const now = nowIso()
-          const outcome = yield* store.update((s) => {
-            const run = s.runs.find((r) => r.id === runId)
-            if (!run || run.status !== "running") return Either.right(null)
-            const task = s.tasks.find((t) => t.id === run.taskId)
-            if (!task) return Either.right(null)
-            run.status = "failed"
-            run.exitCode = null
-            run.endedAt = now
-            task.status = "failed"
-            task.updatedAt = now
-            const message: Message = {
-              id: newId(),
-              taskId: task.id,
-              role: "system",
-              text: `Run could not start: ${reason}`,
-              runId,
-              createdAt: now,
-            }
-            s.messages.push(message)
-            return Either.right({ run: { ...run }, task: { ...task }, message })
-          })
-          if (outcome === null) return
-          publish({ _tag: "message.created", message: outcome.message })
-          publish({ _tag: "run.updated", run: outcome.run })
-          publish({ _tag: "task.updated", task: outcome.task })
+          yield* settleRun(runId, { _tag: "aborted", reason })
         }),
 
       items: readItems,

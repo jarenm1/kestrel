@@ -137,13 +137,17 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
         run.endedAt = now
         return Either.right(undefined)
       })
+      // An acknowledgement is not a delivery: it records that the parent's agent has the result, but the automatic
+      // result message must still reach the thread. The stable message id keeps a repeated delivery harmless.
       expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(true)
       expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(false)
       yield* Effect.sleep("2500 millis")
       const answeredResults = (yield* store.read).messages.filter((m) => m.id === `delegation-result:${blocked.id}`)
       expect(answeredResults).toHaveLength(1)
       expect(answeredResults[0]?.text).toContain("Finished using option A")
-      expect((yield* store.read).messages.filter((m) => m.id === `delegation-result:${second.id}`)).toHaveLength(0)
+      const acknowledgedResult = (yield* store.read).messages.filter((m) => m.id === `delegation-result:${second.id}`)
+      expect(acknowledgedResult).toHaveLength(1)
+      expect(acknowledgedResult[0]?.text).toContain("finished with status succeeded")
       const nestedParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "nested-parent" })
       const nestedRunId = nestedParent.delegation!.runId!
       const grandchild = yield* core.delegate(nestedParent.id, nestedRunId, { ...input, requestId: "grandchild" })
@@ -263,6 +267,51 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       const disk = yield* Effect.promise(() => readFile(config.stateFile, "utf8"))
       expect(disk).toContain('"requestId":"retry-key"')
     })), 20_000)
+
+test("an acknowledgement does not let an ancestor's result overtake a descendant's continuation", () => withCore(({ store, core }) =>
+  Effect.gen(function* () {
+    const now = new Date().toISOString()
+    yield* store.update((s) => {
+      s.tasks.push({ id: "parent", owner: "owner", title: "Parent", status: "running", createdAt: now, updatedAt: now, checkouts: [] })
+      s.runs.push({ id: "parent-run", taskId: "parent", prompt: "work", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "openai", model: "gpt-6.1-sol" })
+      return Either.right(undefined)
+    })
+    const middle = yield* core.delegate("parent", "parent-run", { title: "Middle", message: "work", requestId: "middle" })
+    const middleRun = middle.delegation!.runId!
+    const grand = yield* core.delegate(middle.id, middleRun, { title: "Grand", message: "work", requestId: "grand" })
+    const grandRun = grand.delegation!.runId!
+    // The grandchild finished, and so did the middle run while it was still waiting for that result.
+    yield* store.update((s) => {
+      for (const [taskId, runId] of [[grand.id, grandRun], [middle.id, middleRun]] as const) {
+        const run = s.runs.find((r) => r.id === runId)!
+        run.status = "succeeded"
+        run.endedAt = now
+        s.tasks.find((t) => t.id === taskId)!.status = "done"
+      }
+      return Either.right(undefined)
+    })
+    // The middle thread acknowledges the grandchild before the 2 s sweep has delivered its result.
+    expect(yield* core.acknowledgeDelegation(middle.id, grand.id)).toBe(true)
+    yield* Effect.sleep("2500 millis")
+    const first = yield* store.read
+    // The grandchild's result starts a continuation run in the middle thread...
+    expect(first.messages.some((m) => m.id === `delegation-result:${grand.id}`)).toBe(true)
+    const continuation = first.runs.find((r) => r.taskId === middle.id && r.id !== middleRun && r.status === "running")
+    expect(continuation).toBeDefined()
+    // ...and the middle thread's result must wait for that continuation, even though the grandchild was acknowledged.
+    expect(first.messages.some((m) => m.id === `delegation-result:${middle.id}`)).toBe(false)
+    // Once the continuation finishes, the result that reaches the parent carries its answer.
+    yield* store.update((s) => {
+      const run = s.runs.find((r) => r.id === continuation!.id)!
+      run.status = "succeeded"
+      run.endedAt = now
+      s.tasks.find((t) => t.id === middle.id)!.status = "done"
+      s.messages.push({ id: "middle-final", taskId: middle.id, runId: run.id, role: "agent", text: "Final answer", createdAt: now })
+      return Either.right(undefined)
+    })
+    yield* Effect.sleep("2500 millis")
+    expect((yield* store.read).messages.find((m) => m.id === `delegation-result:${middle.id}`)?.text).toContain("Final answer")
+  })), 20_000)
 
 test("a usage limit holds delegated results until the work resumes or returns early", () => withCore(({ store, core, config }) =>
   Effect.gen(function* () {
