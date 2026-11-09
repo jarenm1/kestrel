@@ -57,26 +57,20 @@ export interface WebhookPhase {
   readonly seen: boolean
 }
 
-export type WebhookEvent = { readonly _tag: "deliver" } | { readonly _tag: "prune" }
+export type WebhookEvent = { readonly _tag: "deliver" }
 
 export type WebhookTransition = {
   readonly _tag: "transitioned"
   readonly phase: WebhookPhase
   readonly changed: boolean
-  readonly action: "insert" | "delete" | "none"
+  readonly action: "insert" | "none"
 }
 
-/** The ledger's one writer: a seen delivery is a duplicate, not a second insert. */
-export const transitionWebhook = (phase: WebhookPhase, event: WebhookEvent): WebhookTransition => {
-  if (event._tag === "deliver") {
-    return phase.seen
-      ? { _tag: "transitioned", phase, changed: false, action: "none" }
-      : { _tag: "transitioned", phase: { seen: true }, changed: true, action: "insert" }
-  }
-  return phase.seen
-    ? { _tag: "transitioned", phase: { seen: false }, changed: true, action: "delete" }
-    : { _tag: "transitioned", phase, changed: false, action: "none" }
-}
+/** The delivery decision: a seen id is a duplicate, not a second insert. Retention stays a storage concern. */
+export const transitionWebhook = (phase: WebhookPhase, _event: WebhookEvent): WebhookTransition =>
+  phase.seen
+    ? { _tag: "transitioned", phase, changed: false, action: "none" }
+    : { _tag: "transitioned", phase: { seen: true }, changed: true, action: "insert" }
 
 /** One queued PR activity row. `deliveryId` is the freshness token that protects a newer event. */
 export interface PrActivityPhase {

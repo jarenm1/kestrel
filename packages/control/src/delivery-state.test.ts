@@ -63,7 +63,6 @@ test("a webhook delivery is inserted once and a seen one is a duplicate", () => 
     changed: false,
     action: "none",
   })
-  expect(transitionWebhook({ seen: true }, { _tag: "prune" }).action).toBe("delete")
 })
 
 test("a PR activity claim resets attempts, and delivery or drop is terminal", () => {
