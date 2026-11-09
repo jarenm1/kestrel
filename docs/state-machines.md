@@ -88,20 +88,21 @@ and phone clients; otherwise it lives in the owning package. It returns
 `applyXEvent` writes only the phase fields the transition owns, inside the caller's existing store update; records the
 caller writes for its own reasons (messages, intents, counters) stay outside it.
 
-Illegal transitions are asserted in tests. A development runtime throws; production logs the reason and continues.
-Do not make a currently-landed edge fatal in production until its loud path has shipped for a release. Every migration
-PR names the next writer it leaves and deletes the branch it replaced.
+Illegal transitions are asserted in the pure tests. The runtime logs the reason and continues; a development throw is
+added to a domain only after its loud path has shipped for a release and the currently-landed edges are fixed. Do not
+make a currently-landed edge fatal while the old direct writer is still the recovery path. Every migration PR names
+the next writer it leaves and deletes the branch it replaced.
 
 | Module | Pure transition | Runtime apply | First writer | Owner |
 |---|---|---|---|---|
 | `applyRunEvent` | `protocol/src/run-state.ts` | `server/src/core/run-state.ts` | `settleRun` | `server-run-authority` |
 | `applyDelegationEvent` | `protocol/src/delegation-state.ts` | `server/src/core/delegation-state.ts` | `acknowledgeDelegation` | `server-run-authority` |
-| `applyNestBoxEvent` | `control/src/nest-control.ts` | `control/src/nest-fleet.ts` | report application | `host-nest-correctness` |
+| `applyNestBoxEvent` | `control/src/nest-transition.ts` | `control/src/nest-fleet.ts` | VM report | `host-nest-correctness` |
 | `applyDesktopEvent` | `server/src/desktop/desktop-state.ts` | `server/src/desktop/manager.ts` | `failSession` | `server-desktop-gpu` |
-| `applyDeliveryEvent` | `control/src/delivery-state.ts` | `control/src/hub.ts` | `runFire` | `control-plane` |
+| `applyDeliveryEvent` | `control/src/delivery-state.ts` | `control/src/hub.ts` | `finishFire` | `control-plane` |
 
-Sequence: archive/unarchive through the existing `applyTaskEvent` first (it currently writes only `status`), then the
-run and delegation modules sequentially in `server-run-authority`; Nest, desktop and delivery can proceed in parallel
+Sequence: archive/unarchive first through the existing `applyTaskEvent` (it now writes the archive field too), then
+the run and delegation modules sequentially in `server-run-authority`; Nest, desktop and delivery proceed in parallel
 on disjoint files. Keep `state.ts`'s task loop before its run loop: `taskPhaseOf` reads `run.status === "running"`, so
 reordering it makes `restartReconcile` a no-op and breaks the restart tests.
 
