@@ -1852,7 +1852,10 @@ export class Hub extends DurableObject<Env> {
     error: string | null,
   ): AutomationRun {
     const sql = this.ctx.storage.sql
-    const transition = applyDeliveryEvent(firePhaseOf(fire), { _tag: "settle", status })
+    // `fire` may have been read before the box call; the alarm can settle its lease while that call is in flight.
+    // Re-read so the transition sees the stored terminal outcome, not the caller's stale snapshot.
+    const current = this.fireRow(fire.id) ?? fire
+    const transition = applyDeliveryEvent(firePhaseOf(current), { _tag: "settle", status })
     if (transition._tag === "illegal") {
       console.warn(`automation fire ${fire.id}: ${transition.reason}`)
       // Keep the stored terminal phase; do not create a second, conflicting run.
@@ -1872,7 +1875,7 @@ export class Hub extends DurableObject<Env> {
     if (existing !== null) {
       sql.exec(
         "UPDATE automation_fires SET outcome = ?, task_id = ?, error = ? WHERE id = ? AND outcome IS NULL",
-        transition.phase.outcome,
+        existing.status,
         existing.taskId,
         existing.error,
         fire.id,
