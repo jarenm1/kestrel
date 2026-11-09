@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, mock, setSystemTime, spyOn, test } from "bun:test"
-import type { Automation } from "@cloudagents/protocol"
+import type { Automation, AutomationRun } from "@cloudagents/protocol"
+import type { AutomationFireRow } from "./automation-fires-table"
 import type { Env } from "./env"
 import type { PullRequestEvent } from "./github"
 import type { Hub as HubClass } from "./hub"
@@ -19,6 +20,13 @@ describe("relay ids", () => {
     }
   })
 })
+
+/** The private fire methods this suite drives directly; the cast is test-only and names the exact shape. */
+interface FireTestAccess {
+  fireRow(id: string): AutomationFireRow | null
+  finishFire(fire: AutomationFireRow, status: "started" | "failed", taskId: string | null, error: string | null): AutomationRun
+}
+const fireAccess = (hub: HubClass): FireTestAccess => hub as unknown as FireTestAccess
 
 const START = Date.parse("2026-01-01T00:00:00.000Z")
 const HOUR = 60 * 60 * 1000
@@ -308,6 +316,33 @@ describe("automation fire intents", () => {
     ])
     // The stuck claim was failed without another box call; the reclaimable one reached the missing-automation check.
     expect(box).not.toHaveBeenCalled()
+  })
+
+  test("a late settlement with a stale fire snapshot keeps the lease failure", async () => {
+    setSystemTime(new Date(START))
+    const { hub, db } = newHub()
+    db.run(
+      `INSERT INTO automation_fires (id, automation_id, fire_key, reason, claimed_at, started_at, attempts)
+       VALUES ('race', 'gone', 'schedule:1', 'schedule', ?, ?, 1)`,
+      START,
+      START,
+    )
+    // The runFire snapshot predates the box call; the alarm fails the fire while that call is still in flight.
+    const fire = fireAccess(hub)
+    const stale = fire.fireRow("race")
+    if (stale === null) throw new Error("the seeded fire is missing")
+    const failed = fire.finishFire(stale, "failed", null, "fire did not finish before its lease expired")
+    const late = fire.finishFire(stale, "started", "task-late", null)
+
+    expect(late).toEqual(failed)
+    expect(db.query("SELECT outcome, task_id AS taskId, error FROM automation_fires WHERE id = 'race'").get()).toEqual({
+      outcome: "failed",
+      taskId: null,
+      error: "fire did not finish before its lease expired",
+    })
+    expect(db.query("SELECT status, task_id AS taskId FROM automation_runs WHERE id = 'race'").all()).toEqual([
+      { status: "failed", taskId: null },
+    ])
   })
 
   test("settled fires are pruned after the dedupe window, while a queued fire stays", async () => {

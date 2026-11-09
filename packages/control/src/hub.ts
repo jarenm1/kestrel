@@ -77,6 +77,7 @@ import {
   ensureAutomationFiresTable,
   type AutomationFireRow,
 } from "./automation-fires-table"
+import { applyDeliveryEvent, firePhaseOf } from "./delivery-state"
 import { ensurePrWatchTables } from "./pr-watches-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, FILE_TOKEN_HEADER, isAllowedLogin, type Env } from "./env"
@@ -1851,6 +1852,25 @@ export class Hub extends DurableObject<Env> {
     error: string | null,
   ): AutomationRun {
     const sql = this.ctx.storage.sql
+    // `fire` may have been read before the box call; the alarm can settle its lease while that call is in flight.
+    // Re-read so the transition sees the stored terminal outcome, not the caller's stale snapshot.
+    const current = this.fireRow(fire.id) ?? fire
+    const transition = applyDeliveryEvent(firePhaseOf(current), { _tag: "settle", status })
+    if (transition._tag === "illegal") {
+      console.warn(`automation fire ${fire.id}: ${transition.reason}`)
+      // Keep the stored terminal phase; do not create a second, conflicting run.
+      return (
+        this.runRow(fire.id) ?? {
+          id: fire.id,
+          automationId: fire.automationId,
+          firedAt: new Date(fire.claimedAt).toISOString(),
+          reason: fire.reason,
+          status: fire.outcome ?? status,
+          taskId: fire.taskId,
+          error: fire.error,
+        }
+      )
+    }
     const existing = this.runRow(fire.id)
     if (existing !== null) {
       sql.exec(
