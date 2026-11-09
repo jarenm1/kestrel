@@ -12,11 +12,11 @@ const store: CredentialStoreShape = {
 
 const credentials = JSON.stringify({ user: "alice" })
 
-const httpFrame = (id: number): Extract<RelayFrame, { t: "http" }> => ({
+const httpFrame = (id: number, path = "/api/tasks/t1/messages"): Extract<RelayFrame, { t: "http" }> => ({
   t: "http",
   id,
   method: "POST",
-  path: "/api/tasks/t1/messages",
+  path,
   headers: {},
 })
 
@@ -55,11 +55,18 @@ describe("relay dispatcher", () => {
     const replies = sent.filter((frame): frame is Extract<RelayFrame, { t: "http-res" }> => frame.t === "http-res")
     expect(replies).toHaveLength(1)
     expect(replies[0]?.id).toBe(7)
+
+    // A new Hub instance restarts low ids: the same id with different content is a new request, not a retry.
+    const reusedReply = replyFor(7)
+    dispatcher.dispatch(httpFrame(7, "/api/tasks/t1/other"))
+    await reusedReply
+    expect(calls).toBe(2)
+
     // A different request id still runs.
     const secondReply = replyFor(8)
     dispatcher.dispatch(httpFrame(8))
     await secondReply
-    expect(calls).toBe(2)
+    expect(calls).toBe(3)
   })
 
   test("a duplicate ws-open keeps the live stream instead of orphaning a replacement", () => {

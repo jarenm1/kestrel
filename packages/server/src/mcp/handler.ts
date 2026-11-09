@@ -229,11 +229,18 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
     // Check the ceilings against the sessions that would remain: a retried initialize always replaces its own run's
     // session (that is how MCP_SESSION_LIMITS.perRun is kept) without being counted against the user twice.
     const otherSessions = [...sessions.values()].filter((session) => session.runId !== runId)
-    const otherInitializing = [...initializing].filter(([id]) => id !== runId).map(([, entry]) => entry)
-    const userSessions = otherSessions.filter((session) => session.user === user).length +
-      otherInitializing.filter((entry) => entry.user === user).length
-    const total = otherSessions.length + otherInitializing.length
-    if (userSessions >= MCP_SESSION_LIMITS.perUser || total >= MCP_SESSION_LIMITS.global) {
+    // A finishing initialize can be in both maps for the same run; the ceilings count runs, not map entries.
+    const otherRuns = new Set([
+      ...otherSessions.map((session) => session.runId),
+      ...[...initializing].filter(([id]) => id !== runId).map(([id]) => id),
+    ])
+    const userRuns = new Set([
+      ...otherSessions.filter((session) => session.user === user).map((session) => session.runId),
+      ...[...initializing]
+        .filter(([id, entry]) => id !== runId && entry.user === user)
+        .map(([id]) => id),
+    ])
+    if (userRuns.size >= MCP_SESSION_LIMITS.perUser || otherRuns.size >= MCP_SESSION_LIMITS.global) {
       sendJsonRpcError(res, 503, -32000, "too many MCP sessions")
       return
     }

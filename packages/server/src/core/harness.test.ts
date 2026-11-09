@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Checkout, Message, ModelProvider, Run, Task } from "@cloudagents/protocol"
-import { CredentialBroker, CredentialBrokerLive } from "../broker"
+import { BROKER_GRANT_TTL_MS, CredentialBroker, CredentialBrokerLive } from "../broker"
 import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
@@ -97,7 +97,7 @@ const harnessLayer = (
     options.realBroker
       ? CredentialBrokerLive.pipe(Layer.provide(Layer.merge(configLayer, credentialLayer)))
       : Layer.succeed(CredentialBroker, {
-          issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }),
+          issue: () => Effect.succeed({ token: "test-only", expiresAt: Date.now() + BROKER_GRANT_TTL_MS, base: "", env: {} }),
           revoke: () => Effect.void,
           grantForToken: () => Effect.succeed(null),
           onRevoke: () => () => undefined,

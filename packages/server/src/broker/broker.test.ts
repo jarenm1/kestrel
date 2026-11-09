@@ -213,22 +213,22 @@ describe("broker issuance", () => {
     }
   })
 
-  test("a grant expires even when its run never revoked it", async () => {
+  test("a grant stays usable past its diagnostic horizon until it is revoked", async () => {
     const runtime = ManagedRuntime.make(brokerLayer)
     try {
       const result = await runtime.runPromise(
         Effect.gen(function* () {
           const broker = yield* CredentialBroker
           const lease = yield* broker.issue("run-expire", "octocat", "openrouter", { harness: "codex" })
-          if (lease.expiresAt === undefined) throw new Error("the live broker did not stamp the lease")
-          const expiresAt = lease.expiresAt
-          // At the expiry instant the token is already unusable.
-          setSystemTime(new Date(expiresAt))
-          return { expiresAt, grant: yield* broker.grantForToken(lease.token) }
+          // `task_ask` can run past any finite TTL, so the stamp is diagnostic; only revoke ends the grant.
+          setSystemTime(new Date(lease.expiresAt))
+          const live = yield* broker.grantForToken(lease.token)
+          yield* broker.revoke("run-expire")
+          return { expiresAt: lease.expiresAt, live, afterRevoke: yield* broker.grantForToken(lease.token) }
         }),
       )
-      expect(result.expiresAt).toBeGreaterThan(Date.now() - BROKER_GRANT_TTL_MS)
-      expect(result.grant).toBeNull()
+      expect(result.live).toMatchObject({ runId: "run-expire" })
+      expect(result.afterRevoke).toBeNull()
     } finally {
       setSystemTime()
       await runtime.dispose()
@@ -496,32 +496,6 @@ describe("broker requests", () => {
       expect(response.status).toBe(403)
       expect((await response.json() as { _tag: string })._tag).toBe("Forbidden")
       expect(keyReads).toBe(0)
-    } finally {
-      const closed = Promise.withResolvers<void>()
-      box.close(() => closed.resolve())
-      await closed.promise
-    }
-  })
-
-  test("an expired grant is refused and revoked even if the broker still returns it", async () => {
-    const revoked: string[] = []
-    const broker = brokerOf({
-      grantForToken: () => Effect.succeed(grant(["openrouter"], { expiresAt: Date.now() - 1 })),
-      revoke: (runId) => Effect.sync(() => void revoked.push(runId)),
-    })
-    const box = createServer((req, res) => void handleBroker(broker, req, res))
-    const listening = Promise.withResolvers<void>()
-    box.listen(0, "127.0.0.1", listening.resolve)
-    await listening.promise
-    try {
-      const port = (box.address() as AddressInfo).port
-      const response = await fetch(`http://127.0.0.1:${port}/broker/token/openrouter/anthropic/v1/messages`, {
-        method: "POST",
-        body: "{}",
-      })
-      expect(response.status).toBe(401)
-      expect((await response.json() as { _tag: string })._tag).toBe("Unauthorized")
-      expect(revoked).toEqual(["run"])
     } finally {
       const closed = Promise.withResolvers<void>()
       box.close(() => closed.resolve())

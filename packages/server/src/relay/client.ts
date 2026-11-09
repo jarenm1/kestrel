@@ -1,4 +1,5 @@
 import { Context, Duration, Either, Effect, Runtime, Schema } from "effect"
+import { createHash } from "node:crypto"
 import {
   CREDENTIALS_HEADER,
   RELAY_CONNECT_PATH,
@@ -73,6 +74,16 @@ export const runRelay = (options: RelayOptions): Effect.Effect<void, never, Cred
 /** How many recent HTTP request ids are remembered for duplicate suppression. */
 const MAX_RECENT_HTTP_IDS = 1024
 
+/** A stable digest of everything that makes one tunnelled request distinct; header order cannot change it. */
+const httpFingerprint = (frame: Extract<RelayFrame, { t: "http" }>): string => {
+  const headers = Object.keys(frame.headers)
+    .sort()
+    .map((name) => [name, frame.headers[name]])
+  return createHash("sha256")
+    .update(JSON.stringify([frame.method, frame.path, headers, frame.body ?? null]))
+    .digest("hex")
+}
+
 export interface RelayDispatcher {
   readonly dispatch: (frame: RelayFrame) => void
   /** Closes every tunnelled stream and forgets them. */
@@ -93,14 +104,21 @@ export interface RelayDispatcherOptions {
  */
 export const makeRelayDispatcher = (options: RelayDispatcherOptions): RelayDispatcher => {
   const streams = new Map<number, RelayStream>()
-  /** Insertion order is the eviction order: the oldest id drops once the window is full. */
-  const recentHttp = new Set<number>()
+  /**
+   * Recent HTTP ids and the exact request each carried. Insertion order is the eviction order. An id alone is not
+   * enough: the Hub's allocator restarts low ids after hibernation, so a different request may legitimately reuse an
+   * id the box has already seen. Only the same request is a retry.
+   */
+  const recentHttp = new Map<number, string>()
 
-  const seenHttp = (id: number): boolean => {
-    if (recentHttp.has(id)) return true
-    recentHttp.add(id)
+  /** True only for an exact retry of a recently served request; a reused id with different content is served. */
+  const seenHttp = (frame: Extract<RelayFrame, { t: "http" }>): boolean => {
+    const fingerprint = httpFingerprint(frame)
+    if (recentHttp.get(frame.id) === fingerprint) return true
+    recentHttp.delete(frame.id)
+    recentHttp.set(frame.id, fingerprint)
     if (recentHttp.size > MAX_RECENT_HTTP_IDS) {
-      const oldest = recentHttp.values().next().value
+      const oldest = recentHttp.keys().next().value
       if (oldest !== undefined) recentHttp.delete(oldest)
     }
     return false
@@ -109,7 +127,7 @@ export const makeRelayDispatcher = (options: RelayDispatcherOptions): RelayDispa
   const dispatch = (frame: RelayFrame): void => {
     switch (frame.t) {
       case "http": {
-        if (seenHttp(frame.id)) return
+        if (seenHttp(frame)) return
         const creds = absorbCredentials(frame.headers, options.store)
         const identity = creds === null ? null : { user: creds.user, dev: creds.dev === true }
         void serveTunnelHttp(frame, options.handle, identity, (reply) => options.send(encodeFrame(reply)))

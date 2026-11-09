@@ -103,9 +103,11 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
     "task_report",
     {
       description:
-        "Report the task's state to the user. Use 'working' while making progress, 'needs_input' when you need " +
-        "an answer from the user (prefer task_ask, which waits for the answer), 'done' when the work is complete, " +
-        "or 'failed' if you cannot complete it. Set attachScreenshot to attach a PNG of the current desktop (it must be running; see desktop_open).",
+        "Report the task's state to the user. Use 'working' while making progress, 'done' when the work is complete, " +
+        "or 'failed' if you cannot complete it. A live run's outcome is authoritative: a terminal report is shown as " +
+        "a message but does not end the run. Use task_ask when you need an answer from the user; " +
+        "'needs_input' in a report is advisory and does not wait. Set attachScreenshot to attach a PNG of the current " +
+        "desktop (it must be running; see desktop_open).",
       inputSchema: {
         status: z.enum(["working", "needs_input", "done", "failed"]).describe("Current task state"),
         message: z.string().describe("Short message for the user"),
@@ -127,7 +129,11 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
             const mapped: TaskStatus = status === "working" ? "running" : status
             const attachments = yield* screenshotIfAsked(deps, ctx.taskId, attachScreenshot === true)
             yield* deps.report(ctx.taskId, ctx.runId, { status: mapped, message, attachments })
-            return text(`reported ${mapped}`)
+            return text(
+              mapped === "needs_input"
+                ? "reported needs_input as an advisory message; use task_ask to ask and wait for an answer"
+                : `reported ${mapped}`,
+            )
           }),
         ),
       ),
