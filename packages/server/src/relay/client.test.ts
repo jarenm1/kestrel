@@ -56,17 +56,23 @@ describe("relay dispatcher", () => {
     expect(replies).toHaveLength(1)
     expect(replies[0]?.id).toBe(7)
 
-    // A new Hub instance restarts low ids: the same id with different content is a new request, not a retry.
+    // Suppression is in-flight only: once the first request answered, a Hub that restarts ids at 1 can reuse id 7
+    // for the same or a different request and it must be served.
+    const finishedRetry = replyFor(7)
+    dispatcher.dispatch(httpFrame(7))
+    await finishedRetry
+    expect(calls).toBe(2)
+
     const reusedReply = replyFor(7)
     dispatcher.dispatch(httpFrame(7, "/api/tasks/t1/other"))
     await reusedReply
-    expect(calls).toBe(2)
+    expect(calls).toBe(3)
 
     // A different request id still runs.
     const secondReply = replyFor(8)
     dispatcher.dispatch(httpFrame(8))
     await secondReply
-    expect(calls).toBe(3)
+    expect(calls).toBe(4)
   })
 
   test("a duplicate ws-open keeps the live stream instead of orphaning a replacement", () => {
@@ -97,6 +103,31 @@ describe("relay dispatcher", () => {
     // Once the browser (or the relay) closes it, the id can be opened again.
     streams[0]!.receiveClose()
     dispatcher.dispatch(open)
+    expect(streams).toHaveLength(2)
+  })
+
+  test("a reused ws-open id for a different path replaces the stale stream", () => {
+    const streams: RelayStream[] = []
+    const dispatcher = makeRelayDispatcher({
+      send: () => undefined,
+      store,
+      handle: async () => new Response("ok"),
+      runStream: (_route, _user, socket) => void streams.push(socket),
+    })
+    const open = (path: string): Extract<RelayFrame, { t: "ws-open" }> => ({
+      t: "ws-open",
+      id: 9,
+      path,
+      headers: { [CREDENTIALS_HEADER]: credentials },
+    })
+
+    dispatcher.dispatch(open("/api/tasks/t1/events"))
+    expect(streams).toHaveLength(1)
+    // Same path is a retry and stays a no-op.
+    dispatcher.dispatch(open("/api/tasks/t1/events"))
+    expect(streams).toHaveLength(1)
+    // A reused id with a different path is a new stream: the old one is closed and replaced.
+    dispatcher.dispatch(open("/api/tasks/t2/events"))
     expect(streams).toHaveLength(2)
   })
 

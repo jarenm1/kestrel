@@ -1,5 +1,4 @@
 import { Context, Duration, Either, Effect, Runtime, Schema } from "effect"
-import { createHash } from "node:crypto"
 import {
   CREDENTIALS_HEADER,
   RELAY_CONNECT_PATH,
@@ -71,19 +70,6 @@ export const runRelay = (options: RelayOptions): Effect.Effect<void, never, Cred
     }
   })
 
-/** How many recent HTTP request ids are remembered for duplicate suppression. */
-const MAX_RECENT_HTTP_IDS = 1024
-
-/** A stable digest of everything that makes one tunnelled request distinct; header order cannot change it. */
-const httpFingerprint = (frame: Extract<RelayFrame, { t: "http" }>): string => {
-  const headers = Object.keys(frame.headers)
-    .sort()
-    .map((name) => [name, frame.headers[name]])
-  return createHash("sha256")
-    .update(JSON.stringify([frame.method, frame.path, headers, frame.body ?? null]))
-    .digest("hex")
-}
-
 export interface RelayDispatcher {
   readonly dispatch: (frame: RelayFrame) => void
   /** Closes every tunnelled stream and forgets them. */
@@ -103,38 +89,37 @@ export interface RelayDispatcherOptions {
  * orphaning) the stream it names.
  */
 export const makeRelayDispatcher = (options: RelayDispatcherOptions): RelayDispatcher => {
-  const streams = new Map<number, RelayStream>()
+  const streams = new Map<number, { readonly stream: RelayStream; readonly path: string }>()
   /**
-   * Recent HTTP ids and the exact request each carried. Insertion order is the eviction order. An id alone is not
-   * enough: the Hub's allocator restarts low ids after hibernation, so a different request may legitimately reuse an
-   * id the box has already seen. Only the same request is a retry.
+   * HTTP ids whose request is still being served. Control sends each frame once, so a retry only matters while the
+   * first is in flight; remembering finished ids would falsely drop a legitimate request after a Hub restart reuses
+   * a low id. Removal happens on the reply or when the handler settles.
    */
-  const recentHttp = new Map<number, string>()
-
-  /** True only for an exact retry of a recently served request; a reused id with different content is served. */
-  const seenHttp = (frame: Extract<RelayFrame, { t: "http" }>): boolean => {
-    const fingerprint = httpFingerprint(frame)
-    if (recentHttp.get(frame.id) === fingerprint) return true
-    recentHttp.delete(frame.id)
-    recentHttp.set(frame.id, fingerprint)
-    if (recentHttp.size > MAX_RECENT_HTTP_IDS) {
-      const oldest = recentHttp.keys().next().value
-      if (oldest !== undefined) recentHttp.delete(oldest)
-    }
-    return false
-  }
+  const inFlightHttp = new Set<number>()
 
   const dispatch = (frame: RelayFrame): void => {
     switch (frame.t) {
       case "http": {
-        if (seenHttp(frame)) return
+        if (inFlightHttp.has(frame.id)) return
+        inFlightHttp.add(frame.id)
+        const finish = () => inFlightHttp.delete(frame.id)
         const creds = absorbCredentials(frame.headers, options.store)
         const identity = creds === null ? null : { user: creds.user, dev: creds.dev === true }
-        void serveTunnelHttp(frame, options.handle, identity, (reply) => options.send(encodeFrame(reply)))
+        void serveTunnelHttp(frame, options.handle, identity, (reply) => {
+          finish()
+          options.send(encodeFrame(reply))
+        }).finally(finish)
         return
       }
       case "ws-open": {
-        if (streams.has(frame.id)) return
+        const existing = streams.get(frame.id)
+        if (existing !== undefined) {
+          // A retried open for the same stream is a no-op. A reused id for a different path is a new stream: close the
+          // stale one and replace it, rather than leaving the new browser socket with no data.
+          if (existing.path === frame.path) return
+          existing.stream.receiveClose()
+          streams.delete(frame.id)
+        }
         const url = new URL(frame.path, TUNNEL_ORIGIN)
         const protocol = frame.headers["x-kestrel-preview-protocol"]?.split(",")[0]?.trim()
         const route = streamRoute(url.pathname, frame.path, protocol)
@@ -148,18 +133,18 @@ export const makeRelayDispatcher = (options: RelayDispatcherOptions): RelayDispa
           return
         }
         const stream = new RelayStream(frame.id, options.send)
-        streams.set(frame.id, stream)
+        streams.set(frame.id, { stream, path: frame.path })
         stream.onClose(() => {
-          if (streams.get(frame.id) === stream) streams.delete(frame.id)
+          if (streams.get(frame.id)?.stream === stream) streams.delete(frame.id)
         })
         options.runStream(route, user, stream)
         return
       }
       case "ws-text":
-        streams.get(frame.id)?.receiveText(frame.data)
+        streams.get(frame.id)?.stream.receiveText(frame.data)
         return
       case "ws-close":
-        streams.get(frame.id)?.receiveClose()
+        streams.get(frame.id)?.stream.receiveClose()
         return
       case "ping":
         options.send(encodeFrame({ t: "pong" }))
@@ -174,7 +159,7 @@ export const makeRelayDispatcher = (options: RelayDispatcherOptions): RelayDispa
   return {
     dispatch,
     close: () => {
-      for (const stream of streams.values()) stream.receiveClose()
+      for (const entry of streams.values()) entry.stream.receiveClose()
       streams.clear()
     },
   }

@@ -116,6 +116,31 @@ export const MCP_SESSION_LIMITS = {
   global: 64,
 } as const
 
+export interface McpRunOwner {
+  readonly runId: string
+  readonly user: string
+}
+
+/**
+ * The sessions that would remain after replacing `currentRunId`. A finishing initialize can be in both `sessions` and
+ * `initializing`; the ceilings count runs, so each id contributes once.
+ */
+export const mcpRunCounts = (
+  sessions: Iterable<McpRunOwner>,
+  initializing: Iterable<McpRunOwner>,
+  currentRunId: string,
+  user: string,
+): { readonly userRuns: number; readonly totalRuns: number } => {
+  const total = new Set<string>()
+  const users = new Set<string>()
+  for (const entry of [...sessions, ...initializing]) {
+    if (entry.runId === currentRunId) continue
+    total.add(entry.runId)
+    if (entry.user === user) users.add(entry.runId)
+  }
+  return { totalRuns: total.size, userRuns: users.size }
+}
+
 /**
  * Returns a node http handler for every request whose URL starts with /mcp/<taskId>.
  * Stateful streamable HTTP: one McpServer + transport per session, keyed by Mcp-Session-Id.
@@ -228,19 +253,13 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
 
     // Check the ceilings against the sessions that would remain: a retried initialize always replaces its own run's
     // session (that is how MCP_SESSION_LIMITS.perRun is kept) without being counted against the user twice.
-    const otherSessions = [...sessions.values()].filter((session) => session.runId !== runId)
-    // A finishing initialize can be in both maps for the same run; the ceilings count runs, not map entries.
-    const otherRuns = new Set([
-      ...otherSessions.map((session) => session.runId),
-      ...[...initializing].filter(([id]) => id !== runId).map(([id]) => id),
-    ])
-    const userRuns = new Set([
-      ...otherSessions.filter((session) => session.user === user).map((session) => session.runId),
-      ...[...initializing]
-        .filter(([id, entry]) => id !== runId && entry.user === user)
-        .map(([id]) => id),
-    ])
-    if (userRuns.size >= MCP_SESSION_LIMITS.perUser || otherRuns.size >= MCP_SESSION_LIMITS.global) {
+    const { userRuns, totalRuns } = mcpRunCounts(
+      sessions.values(),
+      [...initializing].map(([id, entry]) => ({ runId: id, user: entry.user })),
+      runId,
+      user,
+    )
+    if (userRuns >= MCP_SESSION_LIMITS.perUser || totalRuns >= MCP_SESSION_LIMITS.global) {
       sendJsonRpcError(res, 503, -32000, "too many MCP sessions")
       return
     }

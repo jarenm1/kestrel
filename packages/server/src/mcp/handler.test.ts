@@ -4,7 +4,21 @@ import type { AddressInfo } from "node:net"
 import type { Run } from "@cloudagents/protocol"
 import { Effect } from "effect"
 import type { BrokerGrant } from "../broker"
-import { createMcpHandler, MCP_SESSION_LIMITS, type McpDeps } from "./handler"
+import { createMcpHandler, MCP_SESSION_LIMITS, mcpRunCounts, type McpDeps } from "./handler"
+
+describe("MCP session ceilings", () => {
+  test("a run that is in sessions and initializing is counted once", () => {
+    const sessions = [
+      { runId: "a", user: "u" },
+      { runId: "b", user: "u" },
+    ]
+    const initializing = [
+      { runId: "a", user: "u" },
+      { runId: "c", user: "v" },
+    ]
+    expect(mcpRunCounts(sessions, initializing, "current", "u")).toEqual({ totalRuns: 3, userRuns: 2 })
+  })
+})
 
 interface Box {
   readonly url: string
