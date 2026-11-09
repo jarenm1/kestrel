@@ -33,6 +33,47 @@ const report = (state: NestVmReport["state"], since = 100, overrides: Partial<Ne
 const apply = (current: NestBoxPhase, next: NestVmReport) =>
   transitionNestBox(current, { _tag: "vmReported", report: next })
 
+const result = (
+  current: NestBoxPhase,
+  overrides: Partial<Extract<Parameters<typeof transitionNestBox>[1], { _tag: "commandResult" }>> = {},
+) =>
+  transitionNestBox(current, {
+    _tag: "commandResult",
+    kind: "create",
+    ok: false,
+    owed: false,
+    vmPresent: false,
+    ...overrides,
+  })
+
+test("a command result requires a pending command", () => {
+  expect(result(phase())).toEqual({ _tag: "illegal", reason: "not-pending", phase: phase() })
+})
+
+test("a failed create marks a provisioning box, but not a live VM", () => {
+  expect(result(phase({ state: "provisioning", pendingId: "cmd" }))).toMatchObject({
+    _tag: "transitioned",
+    phase: { createFailed: true },
+  })
+  expect(result(phase({ pendingId: "cmd" }))).toEqual({
+    _tag: "illegal",
+    reason: "create-failed-on-live-vm",
+    phase: phase({ pendingId: "cmd" }),
+  })
+})
+
+test("a lapse-owed create and non-create results leave createFailed alone", () => {
+  const current = phase({ state: "provisioning", pendingId: "cmd", createFailed: true })
+  expect(result(current, { owed: true })).toMatchObject({ phase: { createFailed: true } })
+  expect(result(current, { kind: "resume", owed: false })).toMatchObject({ phase: { createFailed: true } })
+})
+
+test("a parked result without a VM report releases the claim; one with a report keeps it", () => {
+  const parked = phase({ state: "parked", pendingId: "cmd" })
+  expect(result(parked, { kind: "resume" })).toMatchObject({ phase: { hostId: null } })
+  expect(result(parked, { kind: "resume", vmPresent: true })).toMatchObject({ phase: { hostId: "host-a" } })
+})
+
 test("a newer report moves the phase and records its since", () => {
   const next = apply(phase(), report("suspended", 200))
   expect(next).toMatchObject({
