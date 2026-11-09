@@ -331,4 +331,24 @@ describe("guest link", () => {
     await Bun.sleep(80)
     expect(guest.connections()).toBe(1)
   })
+
+  test("onConnect runs on the first connection and again after a reconnect", async () => {
+    const guest = await fakeGuest()
+    let connects = 0
+    startLink(guest, { onConnect: () => connects++ })
+    await guest.when(() => connects === 1)
+
+    guest.dropLatest()
+    await guest.when(() => connects === 2)
+  })
+
+  test("a wish the guest never answers rejects after the request timeout instead of waiting forever", async () => {
+    const guest = await fakeGuest()
+    const { link, warnings } = startLink(guest, { requestTimeoutMs: 40 })
+    await guest.when(() => guest.connections() === 1)
+
+    const pending = link.setWanted(true)
+    await expect(pending).rejects.toThrow("the guest did not answer in time")
+    expect(warnings.some((message) => message.includes("got no reply"))).toBe(true)
+  })
 })
