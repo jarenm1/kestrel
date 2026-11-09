@@ -105,6 +105,11 @@ export const handleBroker = async (
 
   const grant = await Effect.runPromise(broker.grantForToken(token))
   if (grant === null) return sendJson(res, 401, { _tag: "Unauthorized", message: "unknown or revoked broker token" })
+  // A grant can outlive a crashed run's revoke; its expiry is the backstop. Treat it as revoked for later requests.
+  if (grant.expiresAt <= Date.now()) {
+    await Effect.runPromise(broker.revoke(grant.runId))
+    return sendJson(res, 401, { _tag: "Unauthorized", message: "expired broker token" })
+  }
 
   const provider = BROKER_PROVIDERS.find((p) => p === providerRaw)
   if (provider === undefined) return sendJson(res, 404, { _tag: "NotFound", message: `no broker for ${providerRaw}` })

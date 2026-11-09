@@ -191,10 +191,18 @@ export const credentialFor = (creds: RelayCredentials | null, provider: BrokerPr
   return null
 }
 
+/**
+ * The longest a broker token can live without being revoked. A run revokes its grant when it settles, so this only
+ * bounds a grant left behind by a box that crashed mid-run; it is deliberately longer than any ordinary turn.
+ */
+export const BROKER_GRANT_TTL_MS = 24 * 60 * 60_000
+
 /** A live broker token: the run it was minted for and the user who started that run. */
 export interface BrokerGrant {
   readonly runId: string
   readonly user: string
+  /** Epoch milliseconds; a token at or past this instant is rejected like a revoked one. */
+  readonly expiresAt: number
   /** Native vendor runs retain both vendor APIs; every alternate-harness route is scoped to its selected provider. */
   readonly providers: readonly BrokerProvider[]
   /**
@@ -213,6 +221,11 @@ export interface BrokerGrant {
 /** What a run gets for its token: the token itself, its provider base, and the env that points the CLI at it. */
 export interface BrokerLease {
   readonly token: string
+  /**
+   * Epoch milliseconds; the run's grant, and this token with it, cannot be used at or after this instant.
+   * `CredentialBrokerLive` always sets it; optional only so test doubles of the broker need not carry the clock.
+   */
+  readonly expiresAt?: number
   /** `http://127.0.0.1:<sandboxPort>/broker/<token>`; routes append `/<provider>/<api>/...`. */
   readonly base: string
   readonly env: Readonly<Record<string, string>>
@@ -283,6 +296,11 @@ export const CredentialBrokerLive = Layer.effect(
         const liveBytes = Buffer.from(live)
         if (liveBytes.length === candidate.length && timingSafeEqual(liveBytes, candidate)) found = grant
       }
+      if (found !== null && found.expiresAt <= Date.now()) {
+        // An expired grant is a revoked one: drop it before anything can use it.
+        revokeSync(found.runId)
+        return null
+      }
       return found
     }
 
@@ -302,6 +320,7 @@ export const CredentialBrokerLive = Layer.effect(
         Effect.sync(() => {
           revokeSync(runId)
           const token = randomBytes(24).toString("base64url")
+          const expiresAt = Date.now() + BROKER_GRANT_TTL_MS
           const harness = options?.harness ?? (provider === null ? null : DEFAULT_BROKER_HARNESS[provider])
           const nativeVendor =
             (provider === "anthropic" && harness === "claude") || (provider === "openai" && harness === "codex")
@@ -310,6 +329,7 @@ export const CredentialBrokerLive = Layer.effect(
           grantByToken.set(token, {
             runId,
             user,
+            expiresAt,
             providers,
             opencodeSession: sessionFor(options?.sessionId),
             // Only a Go route needs it, and only for the run it was minted for.
@@ -317,7 +337,7 @@ export const CredentialBrokerLive = Layer.effect(
           })
           tokenByRun.set(runId, token)
           const base = `http://127.0.0.1:${config.sandboxPort}/broker/${token}`
-          return { token, base, env: brokerEnv(provider, base, token, harness) }
+          return { token, expiresAt, base, env: brokerEnv(provider, base, token, harness) }
         }),
       revoke: (runId) => Effect.sync(() => revokeSync(runId)),
       grantForToken: (token) => Effect.sync(() => grantFor(token)),
