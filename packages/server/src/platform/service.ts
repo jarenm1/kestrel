@@ -1,4 +1,5 @@
 import { Context, Data, Effect } from "effect"
+import type { GpuSnapshot } from "./gpu-state"
 
 export class PlatformError extends Data.TaggedError("PlatformError")<{ readonly message: string }> {}
 
@@ -14,6 +15,8 @@ export interface GpuOnDemand {
   readonly request: (runId: string) => Effect.Effect<void, PlatformError>
   /** Withdraws the run's request. The host detaches the GPU once no run wants it. */
   readonly release: (runId: string) => Effect.Effect<void, PlatformError>
+  /** The host's last `GpuState` and what the box reconciled it to; for diagnostics and status. */
+  readonly state: Effect.Effect<GpuSnapshot>
 }
 
 export interface PlatformHooks {

@@ -492,7 +492,13 @@ export const DEFAULT_DESKTOP_QUALITY: DesktopQuality = "1080p30"
 export const DesktopStatus = Schema.Struct({
   taskId: Schema.String,
   state: DesktopState,
-  /** X display string, e.g. ":101". Null when stopped. Injected as DISPLAY into agent runs. */
+  /**
+   * The encoder is present, so a stream is (or is about to be) produced. Independent of `state`: a `running` desktop
+   * with no viewers stops its encoder after the linger and is not streaming, and `starting` is streaming while the
+   * encoder boots. Older boxes omit it.
+   */
+  streaming: Schema.optional(Schema.Boolean),
+  /** X display string, e.g. ":101". Null when the desktop is not attachable (stopped or failed). Injected as DISPLAY into agent runs. */
   display: Schema.NullOr(Schema.String),
   /** The desktop's own resolution; its aspect ratio is the stream's. */
   width: Schema.Number,

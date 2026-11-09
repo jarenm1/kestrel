@@ -68,8 +68,8 @@ owner of that file rather than editing it.
 | `host-nest-correctness` | `packages/host/**`, `packages/control/src/nest-*` | host VM record/recovery/volume/GPU reservation; Nest VM, command, claim, wake, enrollment |
 | `control-plane` | `packages/control/src/**` except `nest-*` | sessions, OAuth, pairing, capability tokens, TURN, relay/box sockets, fleet placement, automation, PR delivery, meter, hooks |
 | `server-run-authority` | `packages/server/src/core/{service,harness,state,run-recovery,transcript}.ts` | task, run, ask, recovery arms, delegation, session resume, archive, admission, run entry, checkouts, uploads, quota |
-| `server-desktop-gpu` | `packages/server/src/{desktop,platform,sandbox}/**` | desktop session, encoder, GPU wish/link, WebRTC, RTP, viewer refcount, holders, systemd, audio |
-| `server-tools` | `packages/server/src/{broker,mcp,cliauth,direct,relay,http}/**` | broker grant, MCP session, CLI login/accounts, stream adapters, direct auth (incl. offline), model discovery |
+| `server-desktop-gpu` | `packages/server/src/{desktop,platform,sandbox}/**`, `packages/server/src/http/streams.ts` | desktop session, encoder, GPU wish/link, WebRTC, RTP, viewer refcount, holders, systemd, audio |
+| `server-tools` | `packages/server/src/{broker,mcp,cliauth,direct,relay,http}/**` except `http/streams.ts` | broker grant, MCP session, CLI login/accounts, stream adapters, direct auth (incl. offline), model discovery |
 | `app-sync` | `packages/app/src/**` | live cache, reconnect, snapshot merge, desktop connection, pairing page, token cache, roster, settings queue |
 | `mobile-desktop-clients` | `packages/mobile/src/**`, `packages/desktop/src/**` | mobile session/cache/tokens, Electron handoff and session stores, transcript bridge |
 
@@ -158,8 +158,11 @@ hello/lease ordering, inventory/live-report ordering and park timeout; do not re
 **Contract:** `running` does not mean “streaming”. Add `streaming` as an additive optional field in the desktop PR, and
 treat a `failed` session as not attachable: a viewer must be refused with a retryable reason, not parked forever.
 
-**Remaining gaps:** `toStatus` treats `failed` as live and keeps its display; `failed` sessions keep their map entry;
-restart budget resets on every config; NVENC failures ban hardware for the whole process.
+**Wave 1 status:** `streaming` is published when an encoder starts or stops; a failed session refuses viewers with a
+retryable reason; the restart budget only earns credit after a stable live period or a served viewer.
+
+**Remaining gaps:** `toStatus` keeps a `failed` session's display for diagnostics (viewers still cannot attach); NVENC
+failures ban hardware for the whole process.
 
 ### 4. GPU wish and `GpuState`
 
@@ -170,8 +173,11 @@ renderer `gl | pixman` per session.
 reconciles both. `attaching` has a deadline and a visible status. Withdrawing the last wish is not the same as
 releasing the GPU; only the host's `none`/`detaching` (or an explicit release reply) makes the renderer fall back.
 
-**Remaining gaps:** `gpuState` is handled as an edge only; nothing stores or replays it; a missed detach leaves
-`hardwareRender` stale; attach after the 120 s request timeout still restarts desktops.
+**Wave 1 status:** the box stores the last `GpuState` and replays it on every guest-link reconnect; `attaching` keeps
+one timestamp across reconnects and falls back at its deadline; a missed detach is reconciled instead of leaving
+`hardwareRender` stale.
+
+**Remaining gaps:** an attach after the 120 s request timeout still restarts desktops.
 
 ### 5. Delegation
 
@@ -341,8 +347,8 @@ current branch already fixed it; the row stays as the record of what was checked
 | Machine | Encoding | Risk |
 |---|---|---|
 | Desktop session | `DesktopState` + session fields | H |
-| Encoder | kind/initialized/restart budget + global NVENC flags | H |
-| GPU wish / state / renderer | run Set + edge-only host frames + `hardwareRender` | H |
+| Encoder | kind/initialized/restart budget (stable-period credit) + global NVENC flags | H |
+| GPU wish / state / renderer | run Set + stored/replayed `GpuState` + attaching deadline + `hardwareRender` | H |
 | Guest link | socket/backoff/wish/awaiting/enrolled | M-H |
 | WebRTC peer | peer/live/viewToken/gathering/connection | M |
 | RTP sender / tap | started/awaitingKey/queue/GOP | M |

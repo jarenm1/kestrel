@@ -22,6 +22,17 @@ import { profileFor, profileRestartNeeded } from "./profile"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
 import { isWsl } from "./platform"
+import { desktopStatus, HEIGHT, WIDTH, type DesktopStatusSource } from "./status"
+import {
+  ENCODER_STABLE_MS,
+  MAX_ENCODER_RESTARTS,
+  encoderConfigured,
+  encoderRestart,
+  encoderStable,
+  restartBudget,
+  viewerServed,
+  type RestartBudget,
+} from "./restart-budget"
 import wallpaper from "./wallpaper.png" with { type: "file" }
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
@@ -129,8 +140,6 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
   }
 >() {}
 
-const WIDTH = 2560
-const HEIGHT = 1440
 const FIRST_DISPLAY = 101
 const LAST_DISPLAY = 199
 const X_SOCKET_TIMEOUT_MS = 10_000
@@ -155,8 +164,6 @@ const KEYFRAME_INTERVAL_S = 4
 const GOP_CACHE_MAX_BYTES = 8 * 1024 * 1024
 /** How long a live encoder keeps running after its last viewer leaves. */
 const LINGER_MS = 15_000
-/** Unexpected encoder exits tolerated while viewers are attached before the desktop fails. */
-const MAX_ENCODER_RESTARTS = 3
 /** Unexpected xdotool helper exits tolerated per desktop before it fails. */
 const MAX_INPUT_RESTARTS = 3
 /** Leave most of the desktop readiness budget for CPU fallback if NVENC never produces its config. */
@@ -250,7 +257,10 @@ interface Session {
   /** Sinks that must not get delta fragments until the next keyframe. */
   awaiting: Set<DesktopSink>
   lingerTimer: NodeJS.Timeout | null
-  restartsLeft: number
+  /** Unexpected encoder restarts left; reset only by a stable live period or a served viewer. */
+  restartBudget: RestartBudget
+  /** Fires once the live encoder has been live long enough to earn its restart budget back. */
+  stableTimer: NodeJS.Timeout | null
   stderrTail: string
   /** The long-lived xdotool helper; null until boot starts it and while it is being restarted. */
   input: InputPipe | null
@@ -579,18 +589,18 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     let openboxConfig: { readonly dir: string; readonly rc: string; readonly wallpaper: string } | null = null
 
     const toStatus = (taskId: string, s: Session | undefined): DesktopStatus => {
-      const live = s !== undefined && s.state !== "stopped"
-      const quality = live ? s.quality : DEFAULT_DESKTOP_QUALITY
-      return {
-        taskId,
-        state: s?.state ?? "stopped",
-        display: live ? s.display : null,
-        width: WIDTH,
-        height: HEIGHT,
-        fps: DESKTOP_QUALITIES[quality].fps,
-        quality,
-        error: live ? s.error : null,
-      }
+      const source: DesktopStatusSource | undefined =
+        s === undefined
+          ? undefined
+          : {
+              state: s.state,
+              display: s.display,
+              quality: s.quality,
+              error: s.error,
+              // Encoder presence is the streaming fact; the lifecycle state is not.
+              streaming: s.encoder !== null,
+            }
+      return desktopStatus(taskId, source)
     }
 
     const publish = (s: Session) => {
@@ -609,6 +619,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const detachEncoder = (s: Session) => {
       cancelLinger(s)
       clearTimeout(s.encoder?.startupTimer)
+      clearTimeout(s.stableTimer ?? undefined)
+      s.stableTimer = null
       s.encoder = null
       s.config = null
       s.gop = null
@@ -635,6 +647,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       if (enc === null) return
       detachEncoder(s)
       if (enc.child) void terminate([enc.child])
+      // Encoder presence changed while `state` did not: watchers must see `streaming: false` (e.g. after the linger).
+      publish(s)
     }
 
     /** Starts the linger countdown once the last viewer has left a live encoder. */
@@ -686,7 +700,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           enc.initialized = true
           clearTimeout(enc.startupTimer)
           enc.startupTimer = undefined
-          s.restartsLeft = MAX_ENCODER_RESTARTS
+          // A config proves the encoder started, not that it stays alive: only a stable live period (or a served
+          // viewer) earns the restart budget back, so an encoder that initializes then dies cannot loop forever.
+          s.restartBudget = encoderConfigured(s.restartBudget, Date.now())
+          clearTimeout(s.stableTimer ?? undefined)
+          s.stableTimer = setTimeout(() => {
+            s.stableTimer = null
+            if (s.encoder !== enc) return
+            s.restartBudget = encoderStable(s.restartBudget, Date.now())
+          }, ENCODER_STABLE_MS)
           s.config = config
           s.state = "running"
           Deferred.unsafeDone(s.ready, Effect.void)
@@ -742,6 +764,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onExit: (reason) => onEncoderExit(s, enc, reason),
       })
       s.encoder = enc
+      // Encoder presence changed; `state` may not have (a viewer woke an idle running desktop).
+      publish(s)
       if (kind === "nvenc") {
         enc.startupTimer = setTimeout(() => {
           if (s.encoder !== enc || enc.initialized || (s.state !== "starting" && s.state !== "running")) return
@@ -833,11 +857,12 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       }
       // Nobody is watching: the next subscribe starts the encoder again.
       if (s.sinks.size === 0) return
-      if (s.restartsLeft === 0) {
+      const restart = encoderRestart(s.restartBudget)
+      s.restartBudget = restart.budget
+      if (!restart.allowed) {
         failSession(s, `${why}; gave up after ${MAX_ENCODER_RESTARTS} restarts`)
         return
       }
-      s.restartsLeft--
       launchEncoder(s, preferredEncoder())
     }
 
@@ -1120,7 +1145,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               gopBytes: 0,
               awaiting: new Set(),
               lingerTimer: null,
-              restartsLeft: MAX_ENCODER_RESTARTS,
+              restartBudget: restartBudget(),
+              stableTimer: null,
               inputRestartsLeft: MAX_INPUT_RESTARTS,
               stderrTail: "",
             }
@@ -1153,6 +1179,11 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const attachSink = (taskId: string, sink: DesktopSink) =>
       Effect.gen(function* () {
         const s = yield* lookup(taskId)
+        // A failed session has no live processes and no display: refuse it instead of parking a viewer that would wait
+        // for a stream that will never come.
+        if (s.state === "failed") {
+          return yield* Effect.fail(new DesktopError({ message: `desktop for task ${taskId} failed` }))
+        }
         s.sinks.add(sink)
         sink.onStatus(toStatus(taskId, s))
         cancelLinger(s)
@@ -1174,6 +1205,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           if (s.config !== null) sink.onMedia({ kind: "config", config: s.config })
           s.awaiting.add(sink)
         }
+        // A viewer attached to a live stream is a successful encoder session: the next failure starts from a full budget.
+        if (s.state === "running" && s.config !== null) s.restartBudget = viewerServed()
         return Effect.sync(() => {
           // Marked first: a relaunch that is still running must not attach this viewer again.
           detachedSinks.add(sink)

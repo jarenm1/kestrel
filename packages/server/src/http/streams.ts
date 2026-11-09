@@ -3,7 +3,7 @@ import { DesktopInput, DesktopRtcClientMessage, type DesktopRtcServerMessage, ty
 import { Config } from "../config"
 import { EventHub } from "../core/events"
 import { CoreService } from "../core/service"
-import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, sessionIceServers } from "../desktop"
+import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, sessionIceServers, viewerConfig, viewerConfigStep } from "../desktop"
 import { TaskStatsService } from "../stats"
 import { ActivityTracker } from "../platform/tracker"
 
@@ -173,9 +173,9 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     const sendStatus = (status: DesktopStatus) => {
       if (!socketClosed) socket.sendText(JSON.stringify(status))
     }
-    // Sent once per running desktop on this socket, ahead of its status: the viewer holds the ICE servers before it
-    // offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
-    let configSent = false
+    // Sent once per running desktop session on this socket, ahead of its status: the viewer holds the ICE servers
+    // before it offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
+    let viewer = viewerConfig()
     const sendConfig = async (): Promise<void> => {
       const resolved = await sessionIceServers(config.webrtc, managed, taskId)
       if (socketClosed) return
@@ -201,37 +201,46 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
         }
         const signal = message.right
         if (signal._tag === "rtc.config.request") {
-          if (configSent) enqueue(sendConfig)
+          const step = viewerConfigStep(viewer, { _tag: "config-request" })
+          viewer = step.config
+          if (step.sendConfig) enqueue(sendConfig)
           return
         }
         yield* Effect.promise(() => rtc.handle(signal))
       })
 
+    // A failed or stopped desktop has no stream to attach to. Refuse with a retryable reason and close, so the viewer
+    // retries later instead of parking on a config that will never come.
+    const subscribed = yield* desktop.subscribe(taskId, {
+      get baselineOnly(): boolean {
+        return rtc.baselineOnly
+      },
+      onStatus: (status) => {
+        // A stop, a failure or a restart starts a new session; a request before its first config is answered by it.
+        const step = viewerConfigStep(viewer, { _tag: "status", state: status.state })
+        viewer = step.config
+        if (step.sendConfig) {
+          enqueue(async () => {
+            await sendConfig()
+            if (step.sendStatus) sendStatus(status)
+          })
+        } else if (step.sendStatus) {
+          enqueue(async () => sendStatus(status))
+        }
+      },
+      onMedia: (unit) => {
+        tap.push(unit)
+        rtc.push(unit)
+      },
+      onAudio: (opus, timestamp) => rtc.pushAudio(opus, timestamp),
+    }).pipe(Effect.either)
+    if (subscribed._tag === "Left") {
+      sendSignal({ _tag: "rtc.unavailable", reason: subscribed.left.message, retryable: true })
+      rtc.close()
+      return yield* closeWith(socket, CLOSE_INTERNAL, subscribed.left.message)
+    }
     yield* Effect.acquireUseRelease(
-      desktop.subscribe(taskId, {
-        get baselineOnly(): boolean {
-          return rtc.baselineOnly
-        },
-        onStatus: (status) => {
-          if (status.state !== "running") {
-            configSent = false
-            enqueue(async () => sendStatus(status))
-          } else if (configSent) {
-            enqueue(async () => sendStatus(status))
-          } else {
-            configSent = true
-            enqueue(async () => {
-              await sendConfig()
-              sendStatus(status)
-            })
-          }
-        },
-        onMedia: (unit) => {
-          tap.push(unit)
-          rtc.push(unit)
-        },
-        onAudio: (opus, timestamp) => rtc.pushAudio(opus, timestamp),
-      }),
+      Effect.succeed(subscribed.right),
       () =>
         Effect.gen(function* () {
           socket.onText((data) => fork(handleMessage(data)))
@@ -244,9 +253,8 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           }),
           Effect.zipRight(unsubscribe, Effect.sync(() => rtc.close())),
         ),
-    ).pipe(Effect.catchAll((e) => closeWith(socket, CLOSE_INTERNAL, e.message)))
+    )
   })
-
 
 const servePreview = (
   route: Extract<StreamRoute, { kind: "preview" }>,

@@ -32,6 +32,16 @@ export interface GuestLinkOptions {
   /** How often the box checks its activity for a change, and the heartbeat interval. Defaults: 1 s and the contract's. */
   readonly pollMs?: number
   readonly heartbeatMs?: number
+  /**
+   * Runs after each connection is established, including reconnects, so the caller can replay level-triggered state
+   * (the last GPU state) the guest may have reported while the link was down.
+   */
+  readonly onConnect?: () => void
+  /**
+   * How long a wish waits for the guest's reply before it fails. Defaults to 3 minutes, past the host's 120 s attach
+   * deadline, so a missing reply cannot leave a waiter behind forever.
+   */
+  readonly requestTimeoutMs?: number
 }
 
 export interface GuestLink {
@@ -58,6 +68,7 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
   const maxMs = options.reconnectMaxMs ?? 30_000
   const pollMs = options.pollMs ?? 1_000
   const heartbeatMs = options.heartbeatMs ?? BOX_ACTIVITY_INTERVAL_MS
+  const requestTimeoutMs = options.requestTimeoutMs ?? 180_000
 
   let socket: Socket | null = null
   // True from the socket's connect until its close: a frame made while connecting is sent by the connect replay.
@@ -65,8 +76,11 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
   let closed = false
   // The current GPU wish, with the id the guest answers it under. Replayed on every new connection.
   let wish: { readonly id: string; readonly wanted: boolean } | null = null
-  // Wishes the guest has not answered yet, by id.
-  const awaiting = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
+  // Wishes the guest has not answered yet, by id. The timer bounds the wait when a reply never comes.
+  const awaiting = new Map<
+    string,
+    { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+  >()
   // Once enrolled, every new connection tells the guest, so it drops the enrollment token from the env file.
   let enrolled = false
   let delay = minMs
@@ -120,6 +134,7 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
         const waiter = awaiting.get(frame.id)
         if (waiter === undefined) return
         awaiting.delete(frame.id)
+        clearTimeout(waiter.timer)
         if (frame.ok) waiter.resolve()
         else waiter.reject(new Error(frame.error ?? "the guest refused the request"))
         return
@@ -143,6 +158,12 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
     current.on("connect", () => {
       connected = true
       delay = minMs
+      // Replay level-triggered state: a report the guest sent while the link was down would otherwise be lost.
+      try {
+        options.onConnect?.()
+      } catch (error) {
+        options.warn(`guest link connect hook failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
       write({ _tag: "hello", boxVersion: options.boxVersion })
       if (wish !== null) write({ _tag: "gpuWanted", id: wish.id, wanted: wish.wanted })
       if (enrolled) write({ _tag: "enrolled" })
@@ -194,14 +215,24 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
       const previous = wish
       wish = next
       const answer = new Promise<void>((resolve, reject) => {
-        if (closed) reject(new Error("the box is stopping"))
-        else awaiting.set(next.id, { resolve, reject })
+        if (closed) {
+          reject(new Error("the box is stopping"))
+          return
+        }
+        const timer = setTimeout(() => {
+          if (awaiting.delete(next.id)) {
+            options.warn(`guest GPU ${value ? "request" : "release"} got no reply in ${requestTimeoutMs} ms`)
+            reject(new Error("the guest did not answer in time"))
+          }
+        }, requestTimeoutMs)
+        awaiting.set(next.id, { resolve, reject, timer })
       })
       // The guest answers only the latest wish (the reconnect replay carries only it), so an older wish still waiting is
       // settled by this answer when it asks for the same state, and refused when it asks for the other one.
       const superseded = previous === null ? undefined : awaiting.get(previous.id)
       if (previous !== null && superseded !== undefined) {
         awaiting.delete(previous.id)
+        clearTimeout(superseded.timer)
         if (previous.wanted === value) answer.then(superseded.resolve, superseded.reject)
         else
           superseded.reject(
@@ -228,7 +259,10 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
       clearTimeout(reconnectTimer)
       socket?.destroy()
       socket = null
-      for (const waiter of awaiting.values()) waiter.reject(new Error("the box is stopping"))
+      for (const waiter of awaiting.values()) {
+        clearTimeout(waiter.timer)
+        waiter.reject(new Error("the box is stopping"))
+      }
       awaiting.clear()
     },
   }
