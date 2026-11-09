@@ -76,6 +76,39 @@ owner of that file rather than editing it.
 `service.ts` belongs to `server-run-authority`. A desktop change that needs a `CoreService` hunk lands after that PR,
 or the hunk is supplied by the core owner.
 
+## Wave 2
+
+**Status:** Wave 1 is merged. Wave 2 extracts the remaining transition modules and migrates one writer per PR. It does
+not change a call site's behaviour; when a migration exposes an illegal edge, the PR names the edge and either handles
+it explicitly or leaves it as a documented log-and-continue until Wave 3.
+
+**Pattern.** A pure `transitionX(phase, event)` lives in `packages/protocol/src` when the record is shared by the web
+and phone clients; otherwise it lives in the owning package. It returns
+`{ _tag: "transitioned", phase, changed }` or `{ _tag: "illegal", reason }` and never performs a side effect. A runtime
+`applyXEvent` writes only the phase fields the transition owns, inside the caller's existing store update; records the
+caller writes for its own reasons (messages, intents, counters) stay outside it.
+
+Illegal transitions are asserted in the pure tests. The runtime logs the reason and continues; a development throw is
+added to a domain only after its loud path has shipped for a release and the currently-landed edges are fixed. Do not
+make a currently-landed edge fatal while the old direct writer is still the recovery path. Every migration PR names
+the next writer it leaves and deletes the branch it replaced.
+
+| Module | Pure transition | Runtime apply | First writer | Owner |
+|---|---|---|---|---|
+| `applyRunEvent` | `protocol/src/run-state.ts` | `server/src/core/run-state.ts` | `settleRun` | `server-run-authority` |
+| `applyDelegationEvent` | `protocol/src/delegation-state.ts` | `server/src/core/delegation-state.ts` | `acknowledgeDelegation` | `server-run-authority` |
+| `applyNestBoxEvent` | `control/src/nest-transition.ts` | `control/src/nest-fleet.ts` | VM report | `host-nest-correctness` |
+| `applyDesktopEvent` | `server/src/desktop/desktop-state.ts` | `server/src/desktop/manager.ts` | `failSession` | `server-desktop-gpu` |
+| `applyDeliveryEvent` | `control/src/delivery-state.ts` | `control/src/hub.ts` | `finishFire` | `control-plane` |
+
+Sequence: archive/unarchive first through the existing `applyTaskEvent` (it now writes the archive field too), then
+the run and delegation modules sequentially in `server-run-authority`; Nest, desktop and delivery proceed in parallel
+on disjoint files. Keep `state.ts`'s task loop before its run loop: `taskPhaseOf` reads `run.status === "running"`, so
+reordering it makes `restartReconcile` a no-op and breaks the restart tests.
+
+Wave 3 remains client convergence: one reconnect owner, one desktop-cache writer, one working predicate, duplicate
+merge helpers deleted. It starts after these modules land.
+
 ## Contract machines
 
 ### 1. Thread and run
