@@ -78,9 +78,9 @@ or the hunk is supplied by the core owner.
 
 ## Wave 2
 
-**Status:** Wave 2 writers are centralized once #373–#377 land. The remaining gaps below are product/architectural
-decisions (session-expiry sweeps, NVENC policy, box-side fire idempotency, client ordering), not unmigrated phase
-writes.
+**Status:** Wave 1 and Wave 2 are merged; their phase writers are centralized. The remaining gaps below are
+product/architectural decisions (session-expiry sweeps, NVENC policy, box-side fire idempotency, client ordering), not
+unmigrated phase writes.
 
 Wave 2 changed call-site behaviour only where a PR named the edge (for example #370 stopped setting `createFailed` on
 a live VM, and #376 changed when the failed-create claim is released). An unhandled illegal edge logs and continues.
