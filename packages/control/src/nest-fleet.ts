@@ -662,11 +662,20 @@ export class NestFleet {
     }
     // A new placement: a higher epoch and a new VM incarnation, so the old host's copy is evicted on its next report. The
     // claim is kept only once the resume is sent; if it is not, the box stays unplaced for the next wake.
-    const previous = { hostId: row.hostId, ownerEpoch: row.ownerEpoch, vmId: row.vmId, ...this.enrollFields(row) }
+    const previous = {
+      hostId: row.hostId,
+      ownerEpoch: row.ownerEpoch,
+      vmId: row.vmId,
+      vmSince: row.vmSince,
+      ...this.enrollFields(row),
+    }
     const url = publicUrlFor(row.boxId, target.slug, this.domain)
     row.hostId = target.hostId
     row.ownerEpoch += 1
     row.vmId = crypto.randomUUID()
+    // `since` comes from the reporting host's clock and is only comparable within one VM incarnation. The new host
+    // sets a fresh baseline with its first report.
+    row.vmSince = null
     const enrollToken = this.adoptToken(row, minted)
     if (!this.dispatch(row, this.resumeCommand(row, enrollToken, url))) {
       Object.assign(row, previous)
