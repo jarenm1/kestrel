@@ -102,8 +102,13 @@ run and its thread, using `StateStore.updateOutcome` where the spawn must follow
 | any | `task_report(done/failed)` while live | unchanged | advisory only |
 | any | archive | same status, `archivedAt` set | teardown still cancels the run |
 
-**Remaining gaps:** `report` currently writes any status (`service.ts` `report`); `harness.finish` does not use one
-writer; `needs_input` can exist without a pending ask; `recordSession` accepts a settled run.
+**Wave 1 status:** `report`, user messages and answers, `task_ask`, delegation cancel and restart reconciliation go
+through `transitionTask`; `finish`, `stopRun` and `abort` share `settleRun`; an askless `needs_input` is normalized at
+startup and `recordSession` ignores settled runs.
+
+**Known exceptions:** a delegated thread whose assignment could not be dispatched (`service.ts` `delegate`) and the
+reconcile fallbacks in `state.ts` (an orphan `running` thread, an askless `needs_input`, a delegation that never
+reserved a run) still write `status` directly. Everything else goes through the target writers above.
 
 ### 2. Nest VM, command and claim
 
