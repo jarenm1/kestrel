@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { ThreadGraphs } from "@/components/ThreadGraphs";
+import { embedEvent, initialViewerView, reduceViewer } from "@/lib/desktopViewer";
 import { colors, fonts, radius, spacing } from "@/theme";
 import type { DesktopStatus } from "@cloudagents/protocol";
 
@@ -15,19 +16,6 @@ import type { DesktopStatus } from "@cloudagents/protocol";
 const AUTH_REFRESH_WINDOW_MS = 5_000;
 /** The embed keeps retrying an unreachable stream by itself; a fresh URL, in case its token expired, is minted this often. */
 const UNREACHABLE_REFRESH_MS = 30_000;
-
-/** Messages the desktop embed page (`<app host>/embed/desktop`) posts to the host. */
-type EmbedEvent = { event: "status"; state: string } | { event: "auth-expired" } | { event: "unreachable" };
-
-function embedEvent(data: unknown): EmbedEvent | null {
-  if (typeof data !== "object" || data === null) return null;
-  const message = data as { type?: unknown; event?: unknown; state?: unknown };
-  if (message.type !== "kestrel-desktop") return null;
-  if (message.event === "auth-expired") return { event: "auth-expired" };
-  if (message.event === "unreachable") return { event: "unreachable" };
-  if (message.event === "status" && typeof message.state === "string") return { event: "status", state: message.state };
-  return null;
-}
 
 /**
  * Desktop viewer. The stream plays in the desktop embed page, loaded in an HtmlView: a WebView on native, an iframe on
@@ -41,8 +29,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const desktop = useQuery(queries.desktop(taskId));
   const status = desktop.data ?? null;
   const [embed, setEmbed] = useState<{ taskId: string; url: string } | null>(null);
-  const [streamError, setStreamError] = useState<unknown>(null);
-  const [viewerState, setViewerState] = useState<string | null>(null);
+  const [viewer, dispatchViewer] = useReducer(reduceViewer, initialViewerView);
   // The embed is unmounted while the app is backgrounded, which closes its connections; it remounts on foreground.
   const [inForeground, setInForeground] = useState(true);
   const webView = useRef<HtmlViewHandle | null>(null);
@@ -65,6 +52,12 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     return () => sub.remove();
   }, []);
 
+  // A stream's status and errors belong to its embed URL. A new URL starts from nothing, so a restarted desktop cannot
+  // inherit the old stream's "live", "unreachable" or sign-in failure.
+  useEffect(() => {
+    dispatchViewer({ _tag: "embedChanged" });
+  }, [embed?.url]);
+
   // The embed URL carries the stream's ws URL, and that carries its token. It is resolved outside render and kept
   // while unchanged, so the WebView does not reload. It is re-resolved on each desktop state change and on foreground,
   // so a restarted stream or a resumed app gets a token that has not expired.
@@ -75,11 +68,15 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       (ws) => {
         if (!current) return;
         const url = api.desktopEmbedUrl(taskId, ws);
-        setStreamError(null);
         setEmbed((prev) => (prev?.taskId === taskId && prev.url === url ? prev : { taskId, url }));
       },
       (error: unknown) => {
-        if (current) setStreamError(error);
+        if (current) {
+          dispatchViewer({
+            _tag: "failed",
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     );
     return () => {
@@ -94,9 +91,9 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const onEmbedMessage = useCallback(
     (data: unknown) => {
       const message = embedEvent(data);
-      if (message?.event === "status") {
-        setViewerState(message.state);
-      } else if (message?.event === "unreachable") {
+      if (message === null) return;
+      dispatchViewer({ _tag: "message", message });
+      if (message.event === "unreachable") {
         const now = Date.now();
         if (now - lastUnreachableRefresh.current < UNREACHABLE_REFRESH_MS) return;
         lastUnreachableRefresh.current = now;
@@ -104,28 +101,35 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           (ws) => webView.current?.postMessage({ type: "kestrel-desktop", ws }),
           () => {}
         );
-      } else if (message?.event === "auth-expired") {
+      } else if (message.event === "auth-expired") {
         const now = Date.now();
         if (now - lastAuthRefresh.current < AUTH_REFRESH_WINDOW_MS) {
-          setStreamError(new Error("The desktop stream rejected a fresh sign-in. Stop and start the desktop to retry."));
+          dispatchViewer({
+            _tag: "failed",
+            reason: "The desktop stream rejected a fresh sign-in. Stop and start the desktop to retry.",
+          });
           return;
         }
         lastAuthRefresh.current = now;
         api.desktopSocketUrl(taskId, { fresh: true }).then(
           (ws) => webView.current?.postMessage({ type: "kestrel-desktop", ws }),
-          (error: unknown) => setStreamError(error)
+          (error: unknown) =>
+            dispatchViewer({
+              _tag: "failed",
+              reason: error instanceof Error ? error.message : String(error),
+            })
         );
       }
     },
     [api, taskId]
   );
 
-  const actionError = toggle.error ?? desktop.error ?? streamError;
+  const actionError = toggle.error ?? desktop.error;
   const error = actionError
     ? actionError instanceof Error
       ? actionError.message
       : String(actionError)
-    : status?.error ?? null;
+    : viewer.error ?? status?.error ?? null;
 
   const aspect = status?.width && status?.height ? status.width / status.height : 16 / 9;
   const showViewer = status?.state === "running" && inForeground && embed?.taskId === taskId;
@@ -144,9 +148,10 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         {status ? <StatusIcon status={status.state} /> : null}
         {status?.state === "running" ? (
           <Text style={styles.info}>
-            {status.width}×{status.height} · {status.fps} fps{viewerState ? ` · ${viewerState}` : ""}
+            {status.width}×{status.height} · {status.fps} fps{viewer.state ? ` · ${viewer.state}` : ""}
           </Text>
         ) : null}
+        {viewer.unreachable ? <Text style={styles.warning}>Stream unreachable. Retrying…</Text> : null}
       </View>
       {error ? <Alert style={styles.alert}>{error}</Alert> : null}
       <View style={[styles.well, { aspectRatio: aspect }]}>
@@ -177,6 +182,7 @@ const styles = StyleSheet.create({
   container: { paddingHorizontal: spacing.md, paddingBottom: spacing.lg },
   toolbar: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: spacing.sm },
   info: { color: colors.mutedForeground, fontSize: 12, fontFamily: fonts.mono },
+  warning: { color: colors.warning, fontSize: 12 },
   alert: { marginBottom: spacing.sm },
   well: { width: "100%", marginBottom: spacing.md, borderRadius: radius.xl, overflow: "hidden", backgroundColor: "#000" },
   webview: { flex: 1, backgroundColor: "#000" },
