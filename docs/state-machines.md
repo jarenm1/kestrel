@@ -224,7 +224,12 @@ only when nothing wrote after its `onMutate`. The RTC state is derived from its 
 viewer: the stream layer reconnects a closed signalling socket at the later of the negotiation deadline and the 2 s
 fallback, not an immediate loop that resets a 1→30 s backoff.
 
-**Remaining gaps:** mobile has no 401 listener and reimplements the merge helpers.
+**Wave 1 status (mobile and Electron):** mobile task writes and snapshots carry the same monotonic guards, reconnect
+invalidates cached `runItems`, the desktop cache has one reducer, `/api/me` results and late 401s are guarded by the
+session generation, and the Electron handoff/queue is single-flight and serialized.
+
+**Remaining gaps:** `DesktopStatus` carries no timestamp or version, so between two events, or two stream frames, the
+later arrival wins; ordering is guaranteed only against the documented races above.
 
 ## Machine register
 
