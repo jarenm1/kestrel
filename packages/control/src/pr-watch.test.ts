@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, mock, spyOn, test } from "bun:test"
-import { BOX_USER_HEADER } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, Paths } from "@cloudagents/protocol"
 import type { Env } from "./env"
 
 mock.module("cloudflare:workers", () => ({ DurableObject: class {} }))
@@ -24,10 +24,17 @@ afterAll(() => {
 
 /** The box's answer to `GET /api/tasks/:id`, set per test. */
 let boxAnswer: { ok: boolean; status: number; body: string } = { ok: true, status: 200, body: "{}" }
+const boxCalls: { method: string; path: string; body?: unknown }[] = []
 const stub = {
   getUser: async (login: string) => (login === "octo" ? { login } : null),
   credentials: async () => ({ github: "gh-token" }),
-  boxCall: async () => boxAnswer,
+  githubHookInUse: async () => false,
+  githubHook: async () => null,
+  unwatchPullRequests: async () => [{ repo: REPO, number: pr.number }],
+  boxCall: async (_login: string, method: string, path: string, body?: unknown) => {
+    boxCalls.push({ method, path, body })
+    return boxAnswer
+  },
 }
 const env = {
   BOX_TOKEN: "relay-secret",
@@ -111,5 +118,31 @@ describe("POST /box/automations/pr-watch: box failures", () => {
     const response = await watch()
     expect(response.status).toBe(502)
     expect(await response.json()).toEqual({ _tag: "BadGateway", message: "invalid thread response" })
+  })
+})
+
+describe("DELETE /box/automations/pr-watch", () => {
+  const unwatch = (): Promise<Response> =>
+    worker.fetch(new Request("https://app.example/box/automations/pr-watch", {
+      method: "DELETE",
+      headers: { authorization: "Bearer relay-secret", "content-type": "application/json", [BOX_USER_HEADER]: "octo" },
+      body: JSON.stringify({ taskId: TASK_ID, repo: REPO, number: pr.number }),
+    }), env)
+
+  test("clears the box's watch mark after removing the control row", async () => {
+    boxCalls.length = 0
+    boxAnswer = { ok: true, status: 200, body: "{}" }
+    const response = await unwatch()
+    expect(response.status).toBe(204)
+    expect(boxCalls).toEqual([
+      { method: "POST", path: Paths.taskPullRequestWatching(TASK_ID), body: { repo: REPO, number: pr.number, watching: false } },
+    ])
+  })
+
+  test("a box that refuses the mark clear does not fail the unwatch", async () => {
+    boxCalls.length = 0
+    boxAnswer = { ok: false, status: 503, body: JSON.stringify({ _tag: "BoxOffline", message: "offline" }) }
+    expect((await unwatch()).status).toBe(204)
+    expect(boxCalls).toHaveLength(1)
   })
 })

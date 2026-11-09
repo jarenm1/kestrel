@@ -58,6 +58,19 @@ describe("ensurePrWatchTables", () => {
     expect(db.query("SELECT count(*) AS n FROM pr_watches").get()).toEqual({ n: 2 })
   })
 
+  test("adds the retry counter to an existing queue without resetting it", () => {
+    db.run(`CREATE TABLE pr_activity_queue (
+      login TEXT NOT NULL, task_id TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
+      kind TEXT NOT NULL, delivery_id TEXT NOT NULL, due_at INTEGER NOT NULL,
+      PRIMARY KEY (login, task_id, repo, pr_number, kind))`)
+    db.run("INSERT INTO pr_activity_queue VALUES ('octo', 't1', 'acme/app', 12, 'review', 'd1', 7)")
+    ensurePrWatchTables(sql)
+    expect(db.query("SELECT attempts FROM pr_activity_queue").get()).toEqual({ attempts: 0 })
+    db.run("UPDATE pr_activity_queue SET attempts = 3")
+    ensurePrWatchTables(sql)
+    expect(db.query("SELECT attempts FROM pr_activity_queue").get()).toEqual({ attempts: 3 })
+  })
+
   test("leaves the rebuilt tables alone on a later start", () => {
     ensurePrWatchTables(sql)
     db.run("INSERT INTO pr_watches (login, task_id, repo, pr_number) VALUES ('octo', 't1', 'acme/app', 12)")

@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } fr
 import { Schema } from "effect"
 import { BOX_ID_HEADER, BOX_TURN_PATH, BoxTurnCredentials } from "@cloudagents/protocol"
 import type { Env } from "./env"
-import { MAX_TURN_CREDENTIAL_CACHE, TURN_CREDENTIAL_REFRESH_MS, TURN_CREDENTIAL_TTL_SECONDS } from "./turn"
+import {
+  MAX_TURN_CREDENTIAL_CACHE,
+  TURN_CREDENTIAL_REFRESH_MS,
+  TURN_CREDENTIAL_TTL_SECONDS,
+  invalidateTurnCredentials,
+} from "./turn"
 
 // The Worker and Hub import `cloudflare:workers`, so the mock must be registered before either module loads.
 mock.module("cloudflare:workers", () => ({ DurableObject: class {} }))
@@ -250,6 +255,19 @@ describe("POST /box/turn", () => {
     } finally {
       stub.managedBoxVerify = successful
     }
+  })
+
+  test("forgetting a box's identity makes the next request ask the provider again", async () => {
+    setSystemTime(new Date("2026-03-01T00:00:00.000Z"))
+    const headers = { authorization: "Bearer m-secret", [BOX_ID_HEADER]: "m-invalidate" }
+    expect((await send(headers)).status).toBe(200)
+    expect((await send(headers)).status).toBe(200)
+    expect(calls).toHaveLength(1)
+
+    invalidateTurnCredentials("managed:m-invalidate")
+
+    expect((await send(headers)).status).toBe(200)
+    expect(calls).toHaveLength(2)
   })
 
   test("keeps the cache bounded, refreshing a box whose entry was evicted", async () => {
