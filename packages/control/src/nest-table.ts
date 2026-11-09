@@ -23,6 +23,7 @@ export const ensureNestTables = (sql: FleetSql): void => {
     host_id TEXT,
     vm_id TEXT NOT NULL,
     owner_epoch INTEGER NOT NULL,
+    vm_since INTEGER,
     state TEXT NOT NULL,
     limits TEXT NOT NULL,
     volume_ref TEXT,
@@ -47,6 +48,8 @@ export const ensureNestTables = (sql: FleetSql): void => {
   if (!boxColumns.some((c) => c.name === "create_failed")) {
     sql.exec("ALTER TABLE nest_boxes ADD COLUMN create_failed INTEGER NOT NULL DEFAULT 0")
   }
+  // Null means "no ordered report yet": every report is accepted until the first one records its `since`.
+  if (!boxColumns.some((c) => c.name === "vm_since")) sql.exec("ALTER TABLE nest_boxes ADD COLUMN vm_since INTEGER")
   if (!boxColumns.some((c) => c.name === "retry_kind")) sql.exec("ALTER TABLE nest_boxes ADD COLUMN retry_kind TEXT")
   if (!boxColumns.some((c) => c.name === "retry_count")) {
     sql.exec("ALTER TABLE nest_boxes ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
@@ -62,6 +65,8 @@ export type NestBoxRow = {
   hostId: string | null
   vmId: string
   ownerEpoch: number
+  /** The latest VM report's `since`; older reports are stale. Null before the first report. */
+  vmSince: number | null
   state: NestVmState
   limits: NestLimits
   volumeRef: string | null
@@ -101,6 +106,7 @@ type NestBoxSqlRow = {
   hostId: string | null
   vmId: string
   ownerEpoch: number
+  vmSince: number | null
   state: string
   limits: string
   volumeRef: string | null
@@ -122,7 +128,7 @@ type NestBoxSqlRow = {
 }
 
 const NEST_BOX_COLUMNS = `box_id AS boxId, login, host_id AS hostId, vm_id AS vmId, owner_epoch AS ownerEpoch,
-  state, limits, volume_ref AS volumeRef, backed_up_at AS backedUpAt, image_id AS imageId, vcpus,
+  vm_since AS vmSince, state, limits, volume_ref AS volumeRef, backed_up_at AS backedUpAt, image_id AS imageId, vcpus,
   memory_bytes AS memoryBytes, gpus, wake_wanted AS wakeWanted, enroll_hash AS enrollHash,
   enroll_expires_at AS enrollExpiresAt, pending_id AS pendingId, pending_kind AS pendingKind,
   pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed,
@@ -145,6 +151,7 @@ const toBoxRow = (row: NestBoxSqlRow): NestBoxRow => ({
   hostId: row.hostId,
   vmId: row.vmId,
   ownerEpoch: row.ownerEpoch,
+  vmSince: row.vmSince,
   state: row.state as NestVmState,
   limits: decodeLimits(JSON.parse(row.limits)),
   volumeRef: row.volumeRef,
@@ -167,10 +174,10 @@ const toBoxRow = (row: NestBoxSqlRow): NestBoxRow => ({
 
 export const insertNestBox = (sql: FleetSql, row: NestBoxRow): void => {
   sql.exec(
-    `INSERT INTO nest_boxes (box_id, login, host_id, vm_id, owner_epoch, state, limits, volume_ref, backed_up_at,
-      image_id, vcpus, memory_bytes, gpus, wake_wanted, enroll_hash, enroll_expires_at, pending_id, pending_kind,
-      pending_command, pending_deadline, create_failed, retry_kind, retry_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO nest_boxes (box_id, login, host_id, vm_id, owner_epoch, vm_since, state, limits, volume_ref,
+      backed_up_at, image_id, vcpus, memory_bytes, gpus, wake_wanted, enroll_hash, enroll_expires_at, pending_id,
+      pending_kind, pending_command, pending_deadline, create_failed, retry_kind, retry_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ...nestBoxBindings(row),
   )
 }
@@ -178,10 +185,10 @@ export const insertNestBox = (sql: FleetSql, row: NestBoxRow): void => {
 /** Writes every mutable column of a row. */
 export const saveNestBox = (sql: FleetSql, row: NestBoxRow): void => {
   sql.exec(
-    `UPDATE nest_boxes SET login = ?, host_id = ?, vm_id = ?, owner_epoch = ?, state = ?, limits = ?, volume_ref = ?,
-      backed_up_at = ?, image_id = ?, vcpus = ?, memory_bytes = ?, gpus = ?, wake_wanted = ?, enroll_hash = ?,
-      enroll_expires_at = ?, pending_id = ?, pending_kind = ?, pending_command = ?, pending_deadline = ?,
-      create_failed = ?, retry_kind = ?, retry_count = ?
+    `UPDATE nest_boxes SET login = ?, host_id = ?, vm_id = ?, owner_epoch = ?, vm_since = ?, state = ?, limits = ?,
+      volume_ref = ?, backed_up_at = ?, image_id = ?, vcpus = ?, memory_bytes = ?, gpus = ?, wake_wanted = ?,
+      enroll_hash = ?, enroll_expires_at = ?, pending_id = ?, pending_kind = ?, pending_command = ?,
+      pending_deadline = ?, create_failed = ?, retry_kind = ?, retry_count = ?
      WHERE box_id = ?`,
     ...nestBoxBindings(row).slice(1),
     row.boxId,
@@ -194,6 +201,7 @@ const nestBoxBindings = (row: NestBoxRow): (string | number | null)[] => [
   row.hostId,
   row.vmId,
   row.ownerEpoch,
+  row.vmSince,
   row.state,
   JSON.stringify(row.limits),
   row.volumeRef,

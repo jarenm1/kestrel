@@ -270,6 +270,12 @@ describe("VM reports and epochs", () => {
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", vcpus: 4, pending: null })
   })
 
+  test("an older report does not move a newer VM", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { since: now - 1000 }))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running" })
+  })
+
   test("a copy left at an older epoch on another host is evicted when it reports", async () => {
     const firstVm = await runningBox()
     fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
@@ -289,6 +295,20 @@ describe("VM reports and epochs", () => {
     // The host's `evict` refuses an epoch that is not strictly newer than the copy it holds; the control plane's
     // epoch is newer than the stale report's, so the host accepts it.
     expect(evict.ownerEpoch).toBeGreaterThan(stale.ownerEpoch)
+  })
+
+  test("a re-placed VM accepts a lower since from its new host", async () => {
+    const firstVm = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-a", [], 1.25)
+    await hello("host-b", [], 9)
+    await fleet.wakeRequest("host-a", "box-1")
+
+    const resume = lastCommand("host-b", "resume")
+    // A new host with a slower clock: its first running report is older than host-a's last report, but it belongs to
+    // the new VM incarnation and epoch, so it is the new baseline.
+    fleet.vm("host-b", vmReport("box-1", resume.command.vmId, 2, "running", { since: now - 5000 }))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running" })
   })
 
   test("inventory evicts a stale copy only once the host's last chunk arrives", async () => {
