@@ -30,6 +30,16 @@ export function pairingApproved(approvedCode: string | null, code: string): bool
   return approvedCode !== null && approvedCode === code
 }
 
+/** The approve mutation's 409 for this exact code is the terminal already-approved state (not the box-limit 409). */
+export function pairingConflict(error: unknown, code: string, submittedCode: string | undefined): boolean {
+  return (
+    submittedCode === code &&
+    error instanceof ApiError &&
+    error.status === 409 &&
+    !error.message.includes("boxes per user")
+  )
+}
+
 /**
  * Poll while the code can still change: pending, or unresolved after a transient failure. A terminal phase, a
  * permanent 404 (unknown or expired) or 409 (already approved) stops it.

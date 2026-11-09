@@ -120,8 +120,8 @@ function DelegatedCard({ child, onCancel, cancelling }: { child: ChildView; onCa
  * line sums them up; open, active ones show as cards with their latest activity and finished ones as compact rows. It
  * opens by itself while any is active and closes when all finish, until the user toggles it.
  *
- * Whether a child is active comes from `isTaskWorking`, the same selector the sidebar uses, so `running` and
- * `needs_input` mean the same thing in both places. Its runs are only polled (its events stream to its own view
+ * Whether a child is active comes from `isTaskWorking` and `isTaskAwaitingUser`, the same selectors the sidebar uses,
+ * so a running child is working while a `needs_input` child is awaiting the user. Its runs are only polled (its events stream to its own view
  * alone), so they decide labels, times and activity, never whether it is done.
  */
 function DelegatedTasks({ taskId }: { taskId: string }) {

@@ -46,6 +46,15 @@ test("while a viewer streams, a backlogged desktop.updated event does not overwr
   expect(fallback.status.state).toBe("stopped")
 })
 
+test("after the stream closes, a stopped event clears the running cache", () => {
+  const authority = new DesktopStreamAuthority()
+  authority.frame("task-1")
+  const running = applyDesktopStatus(undefined, status("running"), "stream")
+  authority.close()
+  const stopped = applyDesktopStatus(running, status("stopped"), "event", undefined, isDesktopStreamActive("task-1"))
+  expect(stopped.status.state).toBe("stopped")
+})
+
 test("stream authority is claimed by a frame and released when the socket closes", () => {
   const authority = new DesktopStreamAuthority()
   authority.frame("authority-a")

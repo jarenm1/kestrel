@@ -330,7 +330,8 @@ export class DesktopRtc {
 
   /** Milliseconds until a scheduled negotiation retry, or `fallback` when none is pending. */
   reconnectDelay(fallback: number): number {
-    return this.retryAt === null ? fallback : Math.max(0, this.retryAt - Date.now())
+    // Never go below the fallback: once the negotiation deadline has passed, an immediate redial that fails would loop.
+    return this.retryAt === null ? fallback : Math.max(fallback, this.retryAt - Date.now())
   }
 
   /**

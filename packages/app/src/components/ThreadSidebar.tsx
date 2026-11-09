@@ -117,10 +117,11 @@ interface Props {
 }
 
 /**
- * The user's threads (tasks) as vertical tabs, most recent first. Working threads (running, or waiting on an
- * unanswered question) leave the list for a foldable dock at the bottom, above the account menu, and return to the
- * list when they finish. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and
- * expands it. On wide screens the strip slides between the two widths while the list and the rail crossfade.
+ * The user's threads (tasks) as vertical tabs, most recent first. Working threads (running, or with a live run) leave
+ * the list for a foldable dock at the bottom, above the account menu; threads waiting on the user (`needs_input`) get
+ * their own always-visible group. Both return to the list when they settle. Collapsed, the sidebar is an icon rail;
+ * the Kestrel mark doubles as the toggle that collapses and expands it. On wide screens the strip slides between the
+ * two widths while the list and the rail crossfade.
  */
 export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }: Props) {
   const now = useNow(CLOCK_TICK_MS)

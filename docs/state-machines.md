@@ -221,8 +221,8 @@ timestamps land, and a delete leaves no tombstone), while item lists follow serv
 collection the stream can have missed, including `runItems`. One owner writes `keys.desktop(taskId)`: status frames
 while a viewer's socket is delivering them, `desktop.updated` and REST snapshots otherwise, and a mutation response
 only when nothing wrote after its `onMutate`. The RTC state is derived from its own events. There is one retry loop per
-viewer: the stream layer reconnects a closed signalling socket at the negotiation layer's deadline, not a flat 2 s
-loop resetting a 1→30 s backoff.
+viewer: the stream layer reconnects a closed signalling socket at the later of the negotiation deadline and the 2 s
+fallback, not an immediate loop that resets a 1→30 s backoff.
 
 **Remaining gaps:** mobile has no 401 listener and reimplements the merge helpers.
 

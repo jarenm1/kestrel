@@ -385,6 +385,10 @@ describe("refusal and retry", () => {
     clock.advance(1)
     await settle()
     expect(FakePeer.all.length).toBe(3)
+
+    // Once the deadline has passed, the socket's fallback must not redial immediately: it waits for the fallback.
+    clock.advance(retryDelay(1))
+    expect(h.rtc.reconnectDelay(2000)).toBe(2000)
   })
 
   test("a non-retryable refusal is unsupported and does not retry", async () => {

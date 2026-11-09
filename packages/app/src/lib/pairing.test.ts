@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import type { PendingPairing } from "@cloudagents/protocol"
 import { ApiError } from "@/api/errors"
-import { PAIRING_POLL_MS, pairingApproved, pairingPhase, pairingPollMs } from "./pairing"
+import { PAIRING_POLL_MS, pairingApproved, pairingConflict, pairingPhase, pairingPollMs } from "./pairing"
 
 const EXPIRES = "2026-11-01T00:10:00.000Z"
 const pending: PendingPairing = {
@@ -22,6 +22,16 @@ test("approval belongs to its code, and a 409 is the terminal approved phase", (
   expect(pairingApproved("ABCD-EFGH", "ZZZZ-ZZZZ")).toBe(false)
   expect(pairingApproved(null, "ABCD-EFGH")).toBe(false)
   expect(pairingPhase(pending, false, Date.parse(EXPIRES) - 1, false, true)?._tag).toBe("approved")
+})
+
+test("only a 409 for the submitted code is the terminal approve conflict", () => {
+  const conflict = new ApiError(409, "pairing code already approved")
+  expect(pairingConflict(conflict, "ABCD-EFGH", "ABCD-EFGH")).toBe(true)
+  // The page's code changed while the request was in flight: the answer no longer describes what is on screen.
+  expect(pairingConflict(conflict, "ZZZZ-ZZZZ", "ABCD-EFGH")).toBe(false)
+  // The box-limit 409 is a validation error, not evidence the code was approved.
+  expect(pairingConflict(new ApiError(409, "boxes per user limit reached"), "ABCD-EFGH", "ABCD-EFGH")).toBe(false)
+  expect(pairingConflict(new ApiError(404, "no such pairing"), "ABCD-EFGH", "ABCD-EFGH")).toBe(false)
 })
 
 test("a pending code is expired at expiresAt, so the form cannot stay editable", () => {

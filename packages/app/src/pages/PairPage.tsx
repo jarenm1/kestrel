@@ -6,7 +6,7 @@ import { api } from "@/api/client"
 import { ApiError } from "@/api/errors"
 import { applyBoxList, queries, queryClient } from "@/api/queries"
 import { BOX_FORM_ERROR, parseBoxForm } from "@/components/Boxes"
-import { pairingApproved, pairingPhase, pairingPollMs } from "@/lib/pairing"
+import { pairingApproved, pairingConflict, pairingPhase, pairingPollMs } from "@/lib/pairing"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -78,8 +78,10 @@ export function PairPage() {
     retry: (failureCount, error) =>
       failureCount < 3 && !(error instanceof ApiError && (error.status === 404 || error.status === 409)),
   })
-  // A code approved elsewhere answers 409; it is a terminal state, not a retryable failure.
-  const conflict = pending.error instanceof ApiError && pending.error.status === 409
+  // A code approved elsewhere answers 409; it is a terminal state, not a retryable failure. The approve mutation can
+  // be the first to see it (the same code, in this tab or another), so derive it from that error too.
+  const approveConflict = pairingConflict(approve.error, code, approve.variables?.code)
+  const conflict = (pending.error instanceof ApiError && pending.error.status === 409) || approveConflict
   const gone = pending.error instanceof ApiError && pending.error.status === 404
   const phase = pairingPhase(pending.data, approved, now, gone, conflict)
 
