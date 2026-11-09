@@ -710,7 +710,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
             s.restartBudget = encoderStable(s.restartBudget, Date.now())
           }, ENCODER_STABLE_MS)
           s.config = config
-          s.state = "running"
+          applyDesktopEvent(s, { _tag: "configured" })
           Deferred.unsafeDone(s.ready, Effect.void)
           publish(s)
           for (const sink of s.sinks) sink.onMedia({ kind: "config", config })
