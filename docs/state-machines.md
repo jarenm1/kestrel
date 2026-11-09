@@ -376,7 +376,7 @@ current branch already fixed it; the row stays as the record of what was checked
 
 | Machine | Encoding | Risk |
 |---|---|---|
-| MCP session/auth | one session per run; distinct-run per-user/global ceilings | M |
+| MCP session/auth | one session per run, closed on revoke; bounded by live runs (no per-user/global ceiling, admission owns concurrency) | M |
 | Broker grant | `grantByToken` + `tokenByRun` Maps; live-run liveness on expiry | H |
 | CLI page-login | per-user+provider semaphore + pending Map + `preparing` Set + marker | H |
 | CLI account/caches | selection file + probes + TTL caches | M |

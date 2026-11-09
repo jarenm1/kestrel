@@ -4,21 +4,7 @@ import type { AddressInfo } from "node:net"
 import type { Run } from "@cloudagents/protocol"
 import { Effect } from "effect"
 import type { BrokerGrant } from "../broker"
-import { createMcpHandler, MCP_SESSION_LIMITS, mcpRunCounts, type McpDeps } from "./handler"
-
-describe("MCP session ceilings", () => {
-  test("a run that is in sessions and initializing is counted once", () => {
-    const sessions = [
-      { runId: "a", user: "u" },
-      { runId: "b", user: "u" },
-    ]
-    const initializing = [
-      { runId: "a", user: "u" },
-      { runId: "c", user: "v" },
-    ]
-    expect(mcpRunCounts(sessions, initializing, "current", "u")).toEqual({ totalRuns: 3, userRuns: 2 })
-  })
-})
+import { createMcpHandler, type McpDeps } from "./handler"
 
 interface Box {
   readonly url: string
@@ -182,37 +168,18 @@ describe("MCP session lifecycle", () => {
     expect((await withSession(box, "task-3", token("run-3b"), live)).status).toBe(401)
   })
 
-  test("the per-user session ceiling refuses a further run instead of evicting a live one", async () => {
+  test("every admitted run of one user gets a session: a parent and a full delegated batch", async () => {
     const box = await startBox()
-    const sessions: string[] = []
-    for (let index = 0; index < MCP_SESSION_LIMITS.perUser; index += 1) {
-      const runId = `run-${index}`
-      box.issue(token(runId), { id: runId, taskId: `task-${index}` })
-      sessions.push(sessionIdOf(await initialize(box, `task-${index}`, token(runId))))
-    }
+    // `delegate_batch` accepts ten children; with the parent that is eleven concurrent runs for one user.
+    const runIds = Array.from({ length: 11 }, (_, index) => `batch-${index}`)
+    for (const runId of runIds) box.issue(token(runId), { id: runId, taskId: `task-${runId}` })
+    const opened = await Promise.all(runIds.map((runId) => initialize(box, `task-${runId}`, token(runId))))
+    expect(opened.map((response) => response.status)).toEqual(runIds.map(() => 200))
 
-    // One more run for the same user is refused; the established sessions still answer.
-    box.issue(token("run-over"), { id: "run-over", taskId: "task-over" })
-    const refused = await initialize(box, "task-over", token("run-over"))
-    expect(refused.status).toBe(503)
-    expect(await refused.text()).toContain("too many MCP sessions")
-    expect((await withSession(box, "task-0", token("run-0"), sessions[0]!)).status).not.toBe(404)
-  })
-
-  test("initializing runs are counted once, so exactly the per-user ceiling is accepted", async () => {
-    const box = await startBox()
-    const initialized = await Promise.all(
-      Array.from({ length: MCP_SESSION_LIMITS.perUser }, (_, index) => {
-        const runId = `init-${index}`
-        box.issue(token(runId), { id: runId, taskId: `init-task-${index}` })
-        return initialize(box, `init-task-${index}`, token(runId))
-      }),
+    const sessions = opened.map(sessionIdOf)
+    const served = await Promise.all(
+      runIds.map((runId, index) => withSession(box, `task-${runId}`, token(runId), sessions[index]!)),
     )
-    expect(initialized.map((response) => response.status)).toEqual(
-      Array.from({ length: MCP_SESSION_LIMITS.perUser }, () => 200),
-    )
-
-    box.issue(token("init-over"), { id: "init-over", taskId: "init-over-task" })
-    expect((await initialize(box, "init-over-task", token("init-over"))).status).toBe(503)
+    expect(served.map((response) => response.status)).toEqual(runIds.map(() => 200))
   })
 })
