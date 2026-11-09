@@ -29,7 +29,7 @@ test("dispatch and continuation reserve a run, and a dispatched delegation canno
   })
 })
 
-test("a re-link takes the child over and clears the old parent's terminal flags", () => {
+test("a re-link takes the child over, keeping cancellation and resetting only the acknowledgement", () => {
   const terminal: DelegationPhase = {
     parentRunId: "parent-1",
     runId: "run-1",
@@ -41,7 +41,7 @@ test("a re-link takes the child over and clears the old parent's terminal flags"
     phase: {
       parentRunId: "parent-2",
       runId: "run-1",
-      cancelledAt: undefined,
+      cancelledAt: AT,
       resultAcknowledged: false,
     },
     changed: true,

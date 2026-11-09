@@ -44,8 +44,8 @@ const next = (phase: DelegationPhase, patch: Partial<DelegationPhase>): Delegati
 /**
  * The one writer of the delegation phase fields. Acknowledgement is idempotent; a second acknowledgement is a no-op.
  * Cancellation is terminal for the delegation, but a late acknowledgement is still recorded rather than dropped: the
- * result may have reached the parent just before the cancel, and the flag is advisory. A re-link is the deliberate
- * exception: a new parent run takes the child over and starts from a clean delivery/ack state.
+ * result may have reached the parent just before the cancel, and the flag is advisory. A re-link keeps a cancellation
+ * terminal because it starts no new run; it only resets the acknowledgement for the new parent run.
  */
 export const transitionDelegation = (phase: DelegationPhase, event: DelegationEvent): DelegationTransition => {
   switch (event._tag) {
@@ -61,7 +61,6 @@ export const transitionDelegation = (phase: DelegationPhase, event: DelegationEv
     case "relinked":
       return next(phase, {
         parentRunId: event.parentRunId,
-        cancelledAt: undefined,
         resultAcknowledged: false,
       })
     case "acknowledged":
