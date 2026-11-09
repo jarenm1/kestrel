@@ -173,6 +173,27 @@ describe("pairing collection", () => {
       usedAt: null,
     })
   })
+
+  test("a collection just before expiry stays replayable for its grace, then ends", () => {
+    setSystemTime(new Date(START))
+    const { hub } = newHub()
+    const session = signIn(hub)
+    const started = hub.startPairing({}, "https://app.example")
+    const expiresAt = Date.parse(started!.expiresAt)
+    expect(
+      hub.approvePairing(session, started!.code.replace(/-/g, ""), { name: "box", url: "https://box.example", activate: false }).ok,
+    ).toBe(true)
+
+    setSystemTime(new Date(expiresAt - 1_000))
+    const first = hub.pollPairing(started!.pairingId)
+    if (first === null || first.status !== "approved") throw new Error("expected the approved box")
+
+    // The CLI lost that answer: the grace runs from the collection, past the pairing's expiry (TTL plus grace).
+    setSystemTime(new Date(expiresAt + 30_000))
+    expect(hub.pollPairing(started!.pairingId)).toMatchObject({ status: "approved", secret: first.secret })
+    setSystemTime(new Date(expiresAt + 60_000))
+    expect(hub.pollPairing(started!.pairingId)).toBeNull()
+  })
 })
 
 describe("session capabilities", () => {
@@ -369,6 +390,26 @@ describe("automation fire intents", () => {
     expect(db.query("SELECT status, task_id AS taskId FROM automation_runs WHERE id = 'race'").all()).toEqual([
       { status: "failed", taskId: null },
     ])
+  })
+
+  test("a late settlement after the run row was pruned answers with the stored lease failure", async () => {
+    setSystemTime(new Date(START))
+    const { hub, db } = newHub()
+    db.run(
+      `INSERT INTO automation_fires (id, automation_id, fire_key, reason, claimed_at, started_at, attempts)
+       VALUES ('pruned', 'gone', 'schedule:1', 'schedule', ?, ?, 1)`,
+      START,
+      START,
+    )
+    const fire = fireAccess(hub)
+    const stale = fire.fireRow("pruned")
+    if (stale === null) throw new Error("the seeded fire is missing")
+    const failed = fire.finishFire(stale, "failed", null, "fire did not finish before its lease expired")
+    // Run retention dropped the run row while the settled fire intent is still inside its dedupe window.
+    db.run("DELETE FROM automation_runs WHERE id = 'pruned'")
+
+    expect(fire.finishFire(stale, "started", "task-late", null)).toEqual(failed)
+    expect(db.query("SELECT COUNT(*) AS n FROM automation_runs WHERE id = 'pruned'").get()).toEqual({ n: 0 })
   })
 
   test("settled fires are pruned after the dedupe window, while a queued fire stays", async () => {

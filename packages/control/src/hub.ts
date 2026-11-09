@@ -1132,9 +1132,10 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * Pending, or the approved box with its current secret. D3: the first approved poll claims the pairing (`used_at`)
-   * and returns the box; the same `pairingId` may repeat that answer during a 60 s grace for a CLI that lost the
-   * response. Approval does not extend the original expiry. After the grace, or after expiry, the answer is null; null
-   * too when the pairing is unknown or its box was deleted since.
+   * and returns the box; it must come before `expires_at`, which approval never moves. The same `pairingId` may then
+   * repeat that answer for a 60 s grace from that first collection, even past `expires_at`, for a CLI that lost the
+   * response: the secret is served at most until the TTL plus the grace. Null after the grace, for an uncollected
+   * pairing past its expiry, for an unknown pairing, or when its box was deleted since.
    */
   pollPairing(pairingId: string): PairingPoll | null {
     const now = Date.now()
@@ -1894,16 +1895,17 @@ export class Hub extends DurableObject<Env> {
     const transition = applyDeliveryEvent(firePhaseOf(current), { _tag: "settle", status })
     if (transition._tag === "illegal") {
       console.warn(`automation fire ${fire.id}: ${transition.reason}`)
-      // Keep the stored terminal phase; do not create a second, conflicting run.
+      // Keep the stored terminal phase; do not create a second, conflicting run. With the run row pruned, project the
+      // stored fire (`current`), not the caller's snapshot, which may predate the outcome that made this illegal.
       return (
         this.runRow(fire.id) ?? {
-          id: fire.id,
-          automationId: fire.automationId,
-          firedAt: new Date(fire.claimedAt).toISOString(),
-          reason: fire.reason,
-          status: fire.outcome ?? status,
-          taskId: fire.taskId,
-          error: fire.error,
+          id: current.id,
+          automationId: current.automationId,
+          firedAt: new Date(current.claimedAt).toISOString(),
+          reason: current.reason,
+          status: current.outcome ?? status,
+          taskId: current.taskId,
+          error: current.error,
         }
       )
     }
