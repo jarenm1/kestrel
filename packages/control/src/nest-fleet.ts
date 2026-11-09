@@ -203,8 +203,12 @@ export class NestFleet {
     if (row === null || row.hostId !== hostId) return
     const kind = row.pendingKind
     if (kind === null) {
+      // pendingId and pendingKind are written and cleared together; this row was found by pendingId, so this is an
+      // invariant violation. Clear the marker and still apply any VM report the result carried.
+      console.warn(`nest: pending command ${commandId} for ${row.boxId} has no kind`)
       this.clearPending(row)
       saveNestBox(this.sql, row)
+      if (vm !== undefined) this.vm(hostId, vm)
       return
     }
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
