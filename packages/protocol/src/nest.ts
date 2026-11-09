@@ -102,7 +102,10 @@ export const NestVmReport = Schema.Struct({
   userId: Id,
   ownerEpoch: OwnerEpoch,
   state: NestVmState,
-  /** When the VM entered `state`. */
+  /**
+   * When the VM entered `state`, by the host's clock. Never decreases for one VM on one host, even if the clock steps
+   * back (the host then reports 1 ms past the previous state's): control drops a report older than the last it applied.
+   */
   since: EpochMs,
   /** The guest image this VM was cloned from (`manifest.json` `imageId`). */
   imageId: Id,

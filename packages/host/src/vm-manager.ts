@@ -173,6 +173,13 @@ const tapDown = async (network: NestNetwork): Promise<void> => {
   }
 }
 
+/**
+ * The `since` of a state a VM enters now. Control orders one VM's reports by `since` and drops an older one (D10), so it
+ * must never go backwards: after the wall clock steps back it stays 1 ms past the state the VM is leaving, or every
+ * later report of the new state would be dropped as stale.
+ */
+const enteredAt = (previous: number): number => Math.max(Date.now(), previous + 1)
+
 const createNewRecord = (fields: {
   readonly boxId: string
   readonly vmId: string
@@ -590,7 +597,7 @@ export class VmManager {
       lastError: null,
       ...patch,
       state,
-      since: state === vm.state ? vm.since : Date.now(),
+      since: state === vm.state ? vm.since : enteredAt(vm.since),
       operation: null,
     })
   }
@@ -914,7 +921,7 @@ export class VmManager {
       vm = this.commit({
         ...released,
         state: "parked",
-        since: Date.now(),
+        since: enteredAt(released.since),
         ownerEpoch: cmd.ownerEpoch,
         vmId: cmd.vmId,
         userId: cmd.userId,
@@ -1681,7 +1688,7 @@ export class VmManager {
     let next: VmRecord = {
       ...record,
       state: plan.state,
-      since: plan.state === record.state ? record.since : Date.now(),
+      since: plan.state === record.state ? record.since : enteredAt(record.since),
       process: plan.adoptVmm ? record.process : null,
       network: plan.clearNetwork ? null : record.network,
       volumeProcess: plan.killVolume ? null : record.volumeProcess,
@@ -1698,7 +1705,7 @@ export class VmManager {
         this.attachLink(record.boxId, link)
       } catch (error) {
         next = await this.releaseVm({ ...next, state: "parked" })
-        next = { ...next, since: Date.now(), lastError: errorMessage(error) }
+        next = { ...next, since: enteredAt(next.since), lastError: errorMessage(error) }
       }
     }
     this.commit(next)

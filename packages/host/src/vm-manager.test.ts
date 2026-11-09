@@ -265,6 +265,21 @@ describe("recovery and volume safety", () => {
     expect(persisted).toMatchObject({ state: "parked", frozen: false })
   })
 
+  test("a state entered after the wall clock stepped back still reports a later since than the state it left", async () => {
+    const { manager } = fixture()
+    const internalsOf = internals(manager)
+    // The VM entered `running` an hour "ahead" of the current clock: the host clock has since been stepped back.
+    const running = recordOf({ state: "running", since: Date.now() + 3_600_000 })
+    internalsOf.records.set(running.boxId, running)
+
+    await internalsOf.recover(running)
+
+    // Control drops a report whose `since` is older than the last one it applied, so the parked state must order after.
+    const recovered = internalsOf.records.get(running.boxId)!
+    expect(recovered.state).toBe("parked")
+    expect(recovered.since).toBeGreaterThan(running.since)
+  })
+
   test("a higher-epoch resume with no backup refuses and keeps the local volume", async () => {
     const { manager, stateDir } = fixture()
     manager.setLease(Date.now() + 60_000)
