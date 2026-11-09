@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { NEST_LAPSE_REFUSAL } from "@cloudagents/protocol"
-import { chmodSync, mkdirSync, rmSync } from "node:fs"
-import { destroyCommand, newTestManager, resumeCommand, type TestManager } from "./vm-manager.fixture"
+import { NEST_LAPSE_REFUSAL, type NestHostCommand } from "@cloudagents/protocol"
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import type { VmRecord } from "./schema"
+import { stateLayout, vmPaths } from "./state-store"
+import { destroyCommand, newTestManager, resumeCommand, testLimits, type TestManager } from "./vm-manager.fixture"
+import type { VmManager } from "./vm-manager"
 
 let fixtures: TestManager[] = []
 const fixture = (): TestManager => {
@@ -194,5 +197,89 @@ describe("commands received before the lease lapsed or the connection dropped", 
     const again = await manager.execute("cmd-done", destroyCommand(1))
     expect(again?.outcome).toEqual(first?.outcome)
     expect(applied).toEqual(["destroy"])
+  })
+})
+
+const GIB = 1024 * 1024 * 1024
+
+const recordOf = (overrides: Partial<VmRecord>): VmRecord => ({
+  schemaVersion: 1,
+  boxId: "box-1",
+  vmId: "vm-1",
+  userId: "user-1",
+  ownerEpoch: 1,
+  state: "running",
+  since: 0,
+  imageId: "image-1",
+  publicUrl: "https://box-1.example.test",
+  limits: testLimits,
+  vcpus: 1,
+  memoryBytes: GIB,
+  gpus: [],
+  gpuAttachedAt: null,
+  volumeRef: null,
+  backedUpAt: null,
+  localRef: null,
+  localDirty: true,
+  frozen: false,
+  network: null,
+  process: null,
+  volumeProcess: null,
+  snapshotGen: null,
+  cloneId: null,
+  operation: null,
+  lastError: null,
+  ...overrides,
+})
+
+/** The manager's private record map and transition functions, as the tests exercise them directly. */
+const internals = (manager: VmManager) =>
+  manager as unknown as {
+    records: Map<string, VmRecord>
+    recover: (record: VmRecord) => Promise<void>
+    resumeCommand: (command: NestHostCommand) => Promise<void>
+    destroy: (command: NestHostCommand) => Promise<void>
+  }
+
+describe("recovery and volume safety", () => {
+  test("recovery writes a stale freeze away, so the next restart does not stop a healthy box", async () => {
+    const { manager, stateDir } = fixture()
+    const internalsOf = internals(manager)
+    const frozen = recordOf({ state: "running", frozen: true })
+    internalsOf.records.set(frozen.boxId, frozen)
+
+    await internalsOf.recover(frozen)
+
+    const recovered = internalsOf.records.get(frozen.boxId)
+    expect(recovered).toMatchObject({ state: "parked", frozen: false })
+    const persisted = JSON.parse(readFileSync(vmPaths(stateLayout(stateDir), frozen.boxId).record, "utf8")) as VmRecord
+    expect(persisted).toMatchObject({ state: "parked", frozen: false })
+  })
+
+  test("a higher-epoch resume with no backup refuses and keeps the local volume", async () => {
+    const { manager, stateDir } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    const internalsOf = internals(manager)
+    const parked = recordOf({ state: "parked", ownerEpoch: 1, localDirty: true, volumeRef: null })
+    internalsOf.records.set(parked.boxId, parked)
+    const volume = vmPaths(stateLayout(stateDir), parked.boxId).volume
+    mkdirSync(vmPaths(stateLayout(stateDir), parked.boxId).dir, { recursive: true })
+    writeFileSync(volume, "unbacked local data")
+
+    await expect(internalsOf.resumeCommand(resumeCommand(2))).rejects.toThrow(/no volume backup/)
+
+    expect(existsSync(volume)).toBe(true)
+    expect(internalsOf.records.get(parked.boxId)).toMatchObject({ ownerEpoch: 1, localDirty: true })
+  })
+
+  test("a destroy at a newer epoch keeps an evicted tombstone's backup", async () => {
+    const { manager } = fixture()
+    const internalsOf = internals(manager)
+    const tombstone = recordOf({ state: "deleted", ownerEpoch: 1, volumeRef: "vol-1", localDirty: false })
+    internalsOf.records.set(tombstone.boxId, tombstone)
+
+    await internalsOf.destroy(destroyCommand(2))
+
+    expect(internalsOf.records.get(tombstone.boxId)).toMatchObject({ state: "deleted", ownerEpoch: 1, volumeRef: "vol-1" })
   })
 })

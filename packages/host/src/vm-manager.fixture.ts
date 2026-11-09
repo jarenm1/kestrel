@@ -66,6 +66,7 @@ export const newTestManager = (): TestManager => {
     volumeStore: "file:///unused",
     volumeKeyFile: null,
     capacity: { vcpus: 4, memoryBytes: 8 * GIB },
+    template: { maxVcpus: 4, maxMemoryBytes: 8 * GIB },
     gpus: [],
   } as unknown as HostConfig
   const manager = new VmManager(config, layout, events)

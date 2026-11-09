@@ -50,4 +50,10 @@ describe("recovery of a running VM", () => {
     expect(plan.adoptVmm).toBe(true)
     expect(plan.killVmm).toBe(false)
   })
+
+  test("an adopted running VM keeps its memory image", () => {
+    const plan = recoverPlan(record({ state: "running", frozen: false, snapshotGen: 3 }), alive)
+    expect(plan.adoptVmm).toBe(true)
+    expect(plan.dropMemoryImages).toBe(false)
+  })
 })

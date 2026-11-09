@@ -885,6 +885,10 @@ export class VmManager {
       })
     } else if (cmd.ownerEpoch > current.ownerEpoch) {
       // The local volume is the previous owner's copy: the new owner's backup (cmd.volumeRef) is the only source.
+      // Refuse before releasing or deleting anything when there is no source, or the only copy would be lost.
+      if (cmd.volumeRef === null) {
+        throw new HostError(`cannot resume box ${cmd.boxId} at epoch ${cmd.ownerEpoch}: no volume backup to restore`)
+      }
       const released = await this.releaseVm(current)
       rmSync(this.paths(cmd.boxId).volume, { force: true })
       vm = this.commit({
@@ -1160,9 +1164,10 @@ export class VmManager {
   private async destroy(cmd: Command<"destroy">): Promise<void> {
     const vm = this.records.get(cmd.boxId)
     if (vm === undefined) return
-    // A tombstone that still holds its backup ref was interrupted mid-destroy (recovery marks it deleted): finish the wipe.
+    // A tombstone that still holds its backup ref was either interrupted mid-destroy (finish the wipe) or left by
+    // `evict`, which keeps the backup for the box's new owner. Only the owner at the tombstone's epoch may wipe it.
     if (vm.state === "deleted") {
-      if (vm.volumeRef !== null) {
+      if (vm.volumeRef !== null && vm.ownerEpoch === cmd.ownerEpoch) {
         await deleteVolumeStore(this.volume, cmd.boxId)
         this.finish(vm, "deleted", { volumeRef: null, backedUpAt: null })
       }
@@ -1620,7 +1625,8 @@ export class VmManager {
       await terminateProcess(record.volumeProcess.process, VOLUME_STOP_GRACE_MS)
     }
     if (plan.clearNetwork && record.network !== null) await tapDown(record.network)
-    if (plan.dropMemoryImages && record.snapshotGen !== null) {
+    // An adopted VMM may still be using its recorded image; only an image no process holds may be removed.
+    if (plan.dropMemoryImages && !plan.adoptVmm && record.snapshotGen !== null) {
       rmSync(p.snapshot(record.snapshotGen), { recursive: true, force: true })
     }
     // A suspend that died after renaming its next generation into place leaves an image nothing will adopt.
@@ -1633,6 +1639,8 @@ export class VmManager {
       process: plan.adoptVmm ? record.process : null,
       network: plan.clearNetwork ? null : record.network,
       volumeProcess: plan.killVolume ? null : record.volumeProcess,
+      // A stale freeze must not survive the restart: the written record must agree with the state recovery chose.
+      frozen: false,
       snapshotGen: plan.dropMemoryImages ? null : record.snapshotGen,
       gpus: plan.adoptVmm ? record.gpus : [],
       gpuAttachedAt: plan.adoptVmm ? record.gpuAttachedAt : null,

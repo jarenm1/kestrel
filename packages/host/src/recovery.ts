@@ -47,7 +47,15 @@ export const recoverPlan = (record: VmRecord, facts: RecoveryFacts): RecoveryPla
     switch (record.state) {
       case "running":
         if (facts.vmmAlive && !volumeGone) {
-          return { ...stopAll("running"), adoptVmm: true, killVmm: false, killVolume: false, clearNetwork: false }
+          // An adopted VMM keeps its recorded memory image: the image is not stale just because the process survived.
+          return {
+            ...stopAll("running"),
+            adoptVmm: true,
+            killVmm: false,
+            killVolume: false,
+            clearNetwork: false,
+            dropMemoryImages: false,
+          }
         }
         return stopAll("parked")
       case "suspended":
