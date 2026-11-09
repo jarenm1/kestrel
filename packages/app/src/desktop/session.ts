@@ -1,13 +1,17 @@
 import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
-import { type DesktopSource, openDesktopStream } from "@/api/events"
+import { type DesktopConnection, type DesktopSource, openDesktopStream } from "@/api/events"
 import type { RtcDiagnostics } from "@/desktop/diagnostics"
 import { DesktopRtc, type RtcStats, type RtcState } from "@/desktop/webrtc"
+import { DesktopStreamAuthority } from "@/desktop/status"
 
 /** How the WebSocket ended. `opened` false means the handshake was refused or failed (auth, or no box). */
 export interface DesktopClose {
   code: number | null
   opened: boolean
 }
+
+/** A signalling socket that closed while the viewer still wants the stream reconnects after this long. */
+const RECONNECT_MS = 2000
 
 export interface DesktopSessionListeners {
   onStatus: (status: DesktopStatus) => void
@@ -29,32 +33,56 @@ export interface DesktopSession {
 /**
  * One desktop viewing session: the WebSocket for status and signaling, and the WebRTC peer that plays into `video`.
  * Closing it tears both down without reporting `onClose`.
+ *
+ * Retries have one owner per layer: this function reconnects a closed signalling socket, and `DesktopRtc` owns
+ * negotiation failures and refusals with its own 1→30 s backoff. Keeping the same `DesktopRtc` across a socket
+ * reconnect means a refusal or failed attempt is never answered by a fresh offer two seconds later.
  */
 export function startDesktopSession(
   source: DesktopSource,
   video: HTMLVideoElement,
   listeners: DesktopSessionListeners,
 ): DesktopSession {
+  let stream: DesktopConnection | undefined
+  let retry: number | undefined
+  let closed = false
+  // Authority follows the socket, not the viewer's intent: it is claimed by the first frame and released on close.
+  const authority = new DesktopStreamAuthority()
   const rtc = new DesktopRtc(video, {
-    send: (message) => stream.send(message),
+    send: (message) => stream?.send(message),
     onState: listeners.onRtc,
     onStats: listeners.onStats,
     onDiagnostics: listeners.onDiagnostics,
     onAudio: listeners.onAudio,
   })
-  const stream = openDesktopStream(source, {
-    onStatus: listeners.onStatus,
-    onSignal: (message) => rtc.handle(message),
-    onClose: (close) => {
-      rtc.close()
-      listeners.onClose(close)
-    },
-  })
+
+  const connect = () => {
+    if (closed) return
+    stream = openDesktopStream(source, {
+      onStatus: (status) => {
+        authority.frame(status.taskId)
+        listeners.onStatus(status)
+      },
+      onSignal: (message) => rtc.handle(message),
+      onClose: (close) => {
+        if (closed) return
+        authority.close()
+        rtc.disconnect()
+        listeners.onClose(close)
+        retry = window.setTimeout(connect, rtc.reconnectDelay(RECONNECT_MS))
+      },
+    })
+  }
+  connect()
+
   return {
     sendInput: (message, pointer = false) => rtc.sendInput(message, pointer),
     close: () => {
+      closed = true
+      window.clearTimeout(retry)
+      authority.close()
       rtc.close()
-      stream.close()
+      stream?.close()
     },
   }
 }

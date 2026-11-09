@@ -46,9 +46,6 @@ import type { RtcState, RtcStats } from "@/desktop/webrtc"
 /** Until the first status arrives the box assumes the usual 16:9 desktop. */
 const DEFAULT_ASPECT = 16 / 9
 
-/** After a connection ends, the next attempt waits this long. The WebRTC layer applies its own backoff on top. */
-const RECONNECT_MS = 2000
-
 /** A zero-width character the hidden input always holds, so a Backspace on an empty field is still an input event. */
 const SENTINEL = "\u200b"
 
@@ -145,7 +142,6 @@ export function DesktopScreen({
   const [mods, setMods] = useState<ReadonlySet<Modifier>>(() => new Set())
   const [view, setView] = useState<View>(FIT_VIEW)
   const [cursorPos, setCursorPos] = useState<Point>({ x: 0.5, y: 0.5 })
-  const [generation, setGeneration] = useState(0)
   const [scroll] = useState(() => new NotchAccumulator())
   const [heldKeys] = useState(() => new HeldKeys())
   // Latest pointer move, sent at the next animation frame. Any other input flushes it first.
@@ -210,12 +206,11 @@ export function DesktopScreen({
     statusRef.current = status
   })
 
-  // Each connection is a billed relay request, so a null source stays disconnected. A closed connection retries after
-  // RECONNECT_MS, but only while the parent still wants it: setting the source to null cancels the retry.
+  // Each connection is a billed relay request, so a null source stays disconnected. The session reconnects a closed
+  // signalling socket itself and keeps the WebRTC backoff, so this effect owns only the viewer's intent (`source`).
   useEffect(() => {
     const video = videoRef.current
     if (!video || source === null) return
-    let retry: number | undefined
     const session = startDesktopSession(source, video, {
       onStatus: (s) => callbacks.current.onStatus(s),
       onRtc: setRtc,
@@ -225,19 +220,17 @@ export function DesktopScreen({
       onClose: (close) => {
         callbacks.current.onStats(null)
         callbacks.current.onClose(close)
-        retry = window.setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS)
       },
     })
     sessionRef.current = session
     return () => {
-      window.clearTimeout(retry)
       session.close()
       sessionRef.current = null
       setRtc("idle")
       setAudio(false)
       setDiagnostics(null)
     }
-  }, [source, generation])
+  }, [source])
 
   // Keeps the trackpad cursor dot on the desktop's content rect, which letterboxing and zoom both move.
   useEffect(() => {

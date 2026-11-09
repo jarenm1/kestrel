@@ -22,6 +22,7 @@ import { Button } from "@cloudagents/ui/button"
 import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { groupSubThreads } from "@/lib/subThreads"
+import { isTaskAwaitingUser, isTaskWorking } from "@/lib/taskStatus"
 import { cn } from "@/lib/utils"
 import { APP_HOME, threadPath } from "@/routes"
 import { errorText, formatAgo, repoShortName } from "@/util"
@@ -116,10 +117,11 @@ interface Props {
 }
 
 /**
- * The user's threads (tasks) as vertical tabs, most recent first. Working threads need nothing from the user, so
- * they leave the list for a foldable dock at the bottom, above the account menu, and return to the list when the run
- * ends. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and expands it. On wide
- * screens the strip slides between the two widths while the list and the rail crossfade.
+ * The user's threads (tasks) as vertical tabs, most recent first. Working threads (running, or with a live run) leave
+ * the list for a foldable dock at the bottom, above the account menu; threads waiting on the user (`needs_input`) get
+ * their own always-visible group. Both return to the list when they settle. Collapsed, the sidebar is an icon rail;
+ * the Kestrel mark doubles as the toggle that collapses and expands it. On wide screens the strip slides between the
+ * two widths while the list and the rail crossfade.
  */
 export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }: Props) {
   const now = useNow(CLOCK_TICK_MS)
@@ -141,8 +143,9 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
   const active = byRecent.filter((task) => task.archivedAt === undefined)
   const archivedCount = byRecent.length - active.length
   const { roots, children } = groupSubThreads(active)
-  const threads = roots.filter((task) => task.status !== "running")
-  const working = roots.filter((task) => task.status === "running")
+  const awaiting = roots.filter((task) => isTaskAwaitingUser(task))
+  const threads = roots.filter((task) => !isTaskWorking(task) && !isTaskAwaitingUser(task))
+  const working = roots.filter((task) => isTaskWorking(task))
 
   function archiveThread(task: Task) {
     archive.mutate(task.id, {
@@ -233,6 +236,21 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
             </AnimatePresence>
           </motion.nav>
           <AnimatePresence initial={false}>
+            {awaiting.length > 0 && (
+              <motion.nav
+                key="awaiting"
+                layoutScroll
+                aria-label="Threads needing input"
+                {...REVEAL}
+                className="relative mr-1 flex max-h-[30%] shrink-0 flex-col items-stretch gap-1 overflow-auto border-t border-border/60 pt-1"
+              >
+                <AnimatePresence initial={false} mode="popLayout">
+                  {awaiting.map(railTab)}
+                </AnimatePresence>
+              </motion.nav>
+            )}
+          </AnimatePresence>
+          <AnimatePresence initial={false}>
             {working.length > 0 && (
               <motion.nav
                 key="working"
@@ -279,6 +297,18 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           </NavLink>
           {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
           {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
+          {awaiting.length > 0 && (
+            <>
+              <h2 className="flex items-center gap-1.5 px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">
+                <StatusIcon status="needs_input" className="[&>svg]:size-3.5" />
+                Needs input
+                <span className="tabular-nums">{awaiting.length}</span>
+              </h2>
+              <AnimatePresence initial={false} mode="popLayout">
+                {awaiting.map(threadTab)}
+              </AnimatePresence>
+            </>
+          )}
           {threads.length > 0 && (
             <h2 className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">Threads</h2>
           )}
@@ -467,7 +497,7 @@ function ThreadTab({ ref, task, now, isOpen, archiving, onArchive, hasChildren }
             {formatAgo(task.updatedAt, now)}
           </span>
         </span>
-        <FadingTitle text={task.title} working={task.status === "running"} />
+        <FadingTitle text={task.title} working={isTaskWorking(task)} />
         <span className={cn("flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground", hasChildren && "pl-6")}>
           {checkout ? (
             <>

@@ -6,6 +6,7 @@ import { describeTool, threadChoiceRun, type AgentItem, type ContextUsage, type 
 import { Transcript } from "@cloudagents/ui/transcript"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
+import { isTaskAwaitingUser, isTaskWorking } from "@/lib/taskStatus"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatElapsed } from "@/util"
@@ -114,28 +115,26 @@ function DelegatedCard({ child, onCancel, cancelling }: { child: ChildView; onCa
   )
 }
 
-/** A thread's runs and reports go on while it is running or waiting for the user to answer. */
-const isWorking = (task: Task) => task.status === "running" || task.status === "needs_input"
-
 /**
  * Delegated threads are independent conversations; their original run stays linked even after follow-ups. One header
  * line sums them up; open, active ones show as cards with their latest activity and finished ones as compact rows. It
  * opens by itself while any is active and closes when all finish, until the user toggles it.
  *
- * Whether a child is active comes from its task status, which the thread list streams live. Its runs are only polled
- * (its events stream to its own view alone), so they decide labels, times and activity, never whether it is done.
+ * Whether a child is active comes from `isTaskWorking` and `isTaskAwaitingUser`, the same selectors the sidebar uses,
+ * so a running child is working while a `needs_input` child is awaiting the user. Its runs are only polled (its events stream to its own view
+ * alone), so they decide labels, times and activity, never whether it is done.
  */
 function DelegatedTasks({ taskId }: { taskId: string }) {
   const tasks = useQuery(queries.tasks()).data ?? []
   const children = tasks.filter((task) => task.delegation?.parentTaskId === taskId)
   const runs = useQueries({
-    queries: children.map((task) => ({ ...queries.runs(task.id), refetchInterval: isWorking(task) ? DELEGATION_POLL_MS : false })),
+    queries: children.map((task) => ({ ...queries.runs(task.id), refetchInterval: (isTaskWorking(task) || isTaskAwaitingUser(task)) ? DELEGATION_POLL_MS : false })),
   })
   const latestRuns = runs.map((query) => query.data?.reduce<Run | undefined>((latest, r) => (latest === undefined || r.startedAt > latest.startedAt ? r : latest), undefined))
   const items = useQueries({
     queries: children.map((task, index) => {
       const run = latestRuns[index]
-      return { ...queries.runItems(task.id, run?.id ?? ""), enabled: isWorking(task) && run?.status === "running", refetchInterval: DELEGATION_POLL_MS }
+      return { ...queries.runItems(task.id, run?.id ?? ""), enabled: (isTaskWorking(task, runs[index]?.data) || isTaskAwaitingUser(task)) && run?.status === "running", refetchInterval: DELEGATION_POLL_MS }
     }),
   })
   const queryClient = useQueryClient()
@@ -161,11 +160,11 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
     const delegated = runs[index]?.data?.find((r) => r.id === runId)
     const latest = latestRuns[index]
     const cancelled = child.delegation?.cancelledAt !== undefined
-    const working = isWorking(child)
+    const working = isTaskWorking(child, runs[index]?.data) || isTaskAwaitingUser(child)
     // A child stopped by a usage limit is not done while the box will resume it at the provider's reset.
     const arm = working ? undefined : child.usageLimitResume
     const resuming = arm?.autoResume === true
-    const nestedActive = runId !== undefined && tasks.some((task) => task.delegation?.parentRunId === runId && task.delegation?.cancelledAt === undefined && (isWorking(task) || task.usageLimitResume?.autoResume === true))
+    const nestedActive = runId !== undefined && tasks.some((task) => task.delegation?.parentRunId === runId && task.delegation?.cancelledAt === undefined && (isTaskWorking(task) || isTaskAwaitingUser(task) || task.usageLimitResume?.autoResume === true))
     const starting = runId === undefined && child.status !== "failed"
     const active = !cancelled && (working || resuming || nestedActive || starting)
     // A finished child whose polled runs still say "running" is labelled from its live status until the refetch lands.

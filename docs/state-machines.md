@@ -383,13 +383,13 @@ current branch already fixed it; the row stays as the record of what was checked
 
 | Machine | Encoding | Risk |
 |---|---|---|
-| Task/run live cache | event → cache, no version | H |
-| Stream reconnect | `disconnected` + `generation` + 2 s | M-H |
-| Snapshot merge | object identity; now `mergeSnapshot` | M |
-| Desktop connection | `RtcState` + flags + two retry layers | H |
+| Task/run live cache | event → cache + `Task.updatedAt` guard | H |
+| Stream reconnect | `disconnected` + `generation` + negotiation/2 s deadline | M-H |
+| Snapshot merge | shared `mergeSnapshot` + identity/`updatedAt` guards | M |
+| Desktop connection | `RtcState` + stream authority + one retry owner | H |
 | Viewer visibility | `docVisible/onScreen/expired` + grace | L-M |
-| Sidebar working/archived | derived `running` + `archivedAt` | M |
-| Pairing page | query/mutation flags, no poll/expiry | M |
+| Sidebar working/awaiting/archived | derived `running`/`needs_input` + `archivedAt` | M |
+| Pairing page | poll + `expiresAt` + terminal approved/expired phase | M |
 | Box data channel | pools + cooldown + generation | M |
 | Box token cache | `tokens` + `minting` | M |
 | Thread roster / active box | `taskBoxes` + stamped box list (PR #345) | M |

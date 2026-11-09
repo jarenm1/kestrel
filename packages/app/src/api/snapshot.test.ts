@@ -45,13 +45,13 @@ describe("fetchSnapshot", () => {
 })
 
 describe("fetchTaskSnapshot", () => {
-  const task = (usedTokens: number): Task => ({
+  const task = (usedTokens: number, updatedAt = "2026-01-01T00:00:00.000Z"): Task => ({
     id: "task",
     owner: "owner",
     title: "thread",
     status: "running",
     createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
+    updatedAt,
     checkouts: [],
     context: { model: "claude-opus-5-5", usedTokens, windowTokens: 1_000_000 },
   })
@@ -74,6 +74,13 @@ describe("fetchTaskSnapshot", () => {
     const client = new QueryClient()
     client.setQueryData(taskKey, task(300))
     const merged = await fetchTaskSnapshot(client, taskKey, async () => task(350))
+    expect(merged.context?.usedTokens).toBe(350)
+  })
+
+  test("a snapshot older than an event that landed before the fetch started is ignored", async () => {
+    const client = new QueryClient()
+    client.setQueryData(taskKey, task(350, "2026-01-01T00:00:05.000Z"))
+    const merged = await fetchTaskSnapshot(client, taskKey, async () => task(300, "2026-01-01T00:00:01.000Z"))
     expect(merged.context?.usedTokens).toBe(350)
   })
 })

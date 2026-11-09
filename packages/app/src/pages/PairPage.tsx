@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { type ApprovePairingBody, MAX_USER_BOXES, type PendingPairing } from "@cloudagents/protocol"
 import { Link, useSearchParams } from "react-router-dom"
@@ -6,6 +6,7 @@ import { api } from "@/api/client"
 import { ApiError } from "@/api/errors"
 import { applyBoxList, queries, queryClient } from "@/api/queries"
 import { BOX_FORM_ERROR, parseBoxForm } from "@/components/Boxes"
+import { pairingApproved, pairingConflict, pairingPhase, pairingPollMs } from "@/lib/pairing"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -35,11 +36,54 @@ function pairingError(e: unknown): string {
   return errorText(e)
 }
 
+/** Redraws the page while a code is pending, so `expiresAt` is enforced without waiting for the next poll. */
+function useClock(intervalMs: number): number {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs)
+    return () => window.clearInterval(id)
+  }, [intervalMs])
+  return now
+}
+
 /** Approval page of `kestrel-box login`: the signed-in user checks the code the terminal shows and approves it. */
 export function PairPage() {
   const [searchParams] = useSearchParams()
   const [code, setCode] = useState(() => normalizeCode(searchParams.get("code") ?? ""))
-  const pending = useQuery({ ...queries.pairing(code), enabled: code.length === CODE_LENGTH })
+  const [approvedCode, setApprovedCode] = useState<string | null>(null)
+  const now = useClock(1000)
+  const approve = useMutation({
+    mutationFn: ({ code: approving, body }: { code: string; body: ApprovePairingBody }) =>
+      api.approvePairing(approving, body),
+    onSuccess: (list, variables) => {
+      void applyBoxList(queryClient, list)
+      setApprovedCode(variables.code)
+    },
+  })
+  // A success only settles the code it was sent for; editing the input must not mark the next code approved.
+  const approved = pairingApproved(approvedCode, code)
+  const pending = useQuery({
+    ...queries.pairing(code),
+    enabled: code.length === CODE_LENGTH && !approved,
+    // Poll while the code can still change; a transient failure keeps polling, so the page recovers by itself.
+    refetchInterval: (query) => {
+      const error = query.state.error
+      const conflict = error instanceof ApiError && error.status === 409
+      const gone = error instanceof ApiError && error.status === 404
+      return pairingPollMs(
+        pairingPhase(query.state.data, approved, Date.now(), gone, conflict),
+        error,
+      )
+    },
+    retry: (failureCount, error) =>
+      failureCount < 3 && !(error instanceof ApiError && (error.status === 404 || error.status === 409)),
+  })
+  // A code approved elsewhere answers 409; it is a terminal state, not a retryable failure. The approve mutation can
+  // be the first to see it (the same code, in this tab or another), so derive it from that error too.
+  const approveConflict = pairingConflict(approve.error, code, approve.variables?.code)
+  const conflict = (pending.error instanceof ApiError && pending.error.status === 409) || approveConflict
+  const gone = pending.error instanceof ApiError && pending.error.status === 404
+  const phase = pairingPhase(pending.data, approved, now, gone, conflict)
 
   return (
     <div className="mx-auto flex w-full max-w-xl flex-col gap-6 p-6">
@@ -58,46 +102,80 @@ export function PairPage() {
               placeholder="XXXX-XXXX"
               autoComplete="off"
               spellCheck={false}
-              onChange={(e) => setCode(normalizeCode(e.target.value))}
+              disabled={approve.isPending}
+              onChange={(e) => {
+                approve.reset()
+                setCode(normalizeCode(e.target.value))
+              }}
               className="font-mono tracking-widest"
             />
           </label>
-          {pending.isFetching && <div className="text-muted-foreground">Loading…</div>}
-          {pending.error && <Alert>{pairingError(pending.error)}</Alert>}
-          {pending.data && <PairingForm code={code} pending={pending.data} />}
+          {pending.isFetching && pending.data === undefined && !gone && (
+            <div className="text-muted-foreground">Loading…</div>
+          )}
+          {pending.error && (phase === undefined || phase._tag === "pending") && (
+            <Alert>{pairingError(pending.error)}</Alert>
+          )}
+          {phase?._tag === "pending" && (
+            <PairingForm
+              pending={phase.pending}
+              approving={approve.isPending}
+              error={approve.error}
+              onSubmit={(body) => approve.mutate({ code, body })}
+            />
+          )}
+          {phase?._tag === "approved" && (
+            <Paired
+              text={
+                conflict
+                  ? "This code was already approved. Your terminal will finish setup."
+                  : "Paired. Your terminal will finish setup."
+              }
+            />
+          )}
+          {phase?._tag === "expired" && (
+            <Alert>This pairing code expired. Run `kestrel-box login` again to get a new code.</Alert>
+          )}
         </CardContent>
       </Card>
     </div>
   )
 }
 
+/** The terminal state of a code: no form, whatever this page or another tab did with it. */
+function Paired({ text }: { text: string }) {
+  return (
+    <p>
+      {text}{" "}
+      <Link to="/settings/boxes" className="text-foreground underline underline-offset-4">
+        Settings › Boxes
+      </Link>
+    </p>
+  )
+}
+
 /** The box the CLI suggested, editable before approval. Mounted once the code's pending pairing has loaded. */
-function PairingForm({ code, pending }: { code: string; pending: PendingPairing }) {
+function PairingForm({
+  pending,
+  approving,
+  error,
+  onSubmit,
+}: {
+  pending: PendingPairing
+  approving: boolean
+  error: unknown
+  onSubmit: (body: ApprovePairingBody) => void
+}) {
   const [name, setName] = useState(pending.name ?? "")
   const [url, setUrl] = useState(pending.url ?? DEFAULT_BOX_URL)
   const [activate, setActivate] = useState(true)
   const [invalid, setInvalid] = useState(false)
-  const approve = useMutation({
-    mutationFn: (body: ApprovePairingBody) => api.approvePairing(code, body),
-    onSuccess: (list) => applyBoxList(queryClient, list),
-  })
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const body = parseBoxForm(name, url)
     setInvalid(body === null)
-    if (body) approve.mutate({ ...body, activate })
-  }
-
-  if (approve.isSuccess) {
-    return (
-      <p>
-        Paired. Your terminal will finish setup.{" "}
-        <Link to="/settings/boxes" className="text-foreground underline underline-offset-4">
-          Settings › Boxes
-        </Link>
-      </p>
-    )
+    if (body) onSubmit({ ...body, activate })
   }
 
   return (
@@ -121,10 +199,10 @@ function PairingForm({ code, pending }: { code: string; pending: PendingPairing 
       </label>
       <span className="text-xs text-muted-foreground">Code expires {formatTime(pending.expiresAt)}.</span>
       {invalid && <Alert>{BOX_FORM_ERROR}</Alert>}
-      {approve.error && <Alert>{pairingError(approve.error)}</Alert>}
+      {error !== null && error !== undefined && <Alert>{pairingError(error)}</Alert>}
       <div className="flex justify-end">
-        <Button type="submit" disabled={approve.isPending}>
-          {approve.isPending ? "Approving…" : "Approve"}
+        <Button type="submit" disabled={approving}>
+          {approving ? "Approving…" : "Approve"}
         </Button>
       </div>
     </form>
