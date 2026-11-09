@@ -18,9 +18,13 @@ describe("GitHub access", () => {
   test("refuses unapproved OAuth accounts before creating a user, connection or session", async () => {
     const originalFetch = globalThis.fetch
     const writes: string[] = []
+    const consumed: Array<[string, string]> = []
     const stub = {
       readOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/", revision: "r1" }),
-      consumeOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/", revision: "r1" }),
+      consumeOAuthState: (state: string, revision: string) => {
+        consumed.push([state, revision])
+        return { kind: "login", provider: "github", returnTo: "/", revision: "r1" }
+      },
       upsertUser: () => writes.push("user"),
       putConnection: () => writes.push("connection"),
       createSession: () => writes.push("session"),
@@ -39,6 +43,8 @@ describe("GitHub access", () => {
       expect(response.status).toBe(302)
       expect(response.headers.get("set-cookie")).toContain("session=")
       expect(writes).toEqual(["user", "connection", "session"])
+      // The validated issuance, not just the state string: this locks the ABA revision into the callback.
+      expect(consumed).toEqual([["state", "r1"]])
     } finally {
       globalThis.fetch = originalFetch
     }

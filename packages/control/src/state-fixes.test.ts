@@ -8,7 +8,17 @@ import type { Hub as HubClass } from "./hub"
 // The Worker and Hub import `cloudflare:workers`, so the mock must be registered before either module loads. A static
 // import cannot be ordered after `mock.module`, which is why the adapter is loaded dynamically.
 mock.module("cloudflare:workers", () => ({ DurableObject: class {} }))
-const { Hub } = await import("./hub")
+const { Hub, initialRelayId } = await import("./hub")
+
+describe("relay ids", () => {
+  test("a fresh Hub starts in a random 31-bit range, never at the old low ids", () => {
+    expect(initialRelayId(0)).toBe(1)
+    for (const value of [1, 1_000_000, 0x7ffffffe, 0xfffffffe, 0xffffffff]) {
+      expect(initialRelayId(value)).toBeGreaterThanOrEqual(1)
+      expect(initialRelayId(value)).toBeLessThanOrEqual(0x7ffffffe)
+    }
+  })
+})
 
 const START = Date.parse("2026-01-01T00:00:00.000Z")
 const HOUR = 60 * 60 * 1000

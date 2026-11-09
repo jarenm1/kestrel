@@ -165,6 +165,14 @@ const newPairingCode = (): string =>
  */
 
 const BOX_TAG = "box"
+
+/** Highest relay id allocated before a fresh random range starts. Keeps ids positive and below 2^31. */
+const RELAY_ID_MAX = 0x7ffffffe
+
+/** Maps a 32-bit random value into `[1, RELAY_ID_MAX]`; the random start makes a hibernated Hub miss old ids. */
+export const initialRelayId = (value: number): number => (value % RELAY_ID_MAX) + 1
+
+const relayIdStart = (): number => initialRelayId(crypto.getRandomValues(new Uint32Array(1))[0]!)
 const NEST_HOST_TAG = "nest-host"
 
 /** Longest an automation call waits for a Nest box to report `running`, and how often it checks. */
@@ -328,7 +336,11 @@ export class Hub extends DurableObject<Env> {
   private readonly pending = new Map<number, PendingHttp>()
   private readonly streams = new Map<number, WebSocket>()
   private readonly waitlistAttempts = new Map<string, number[]>()
-  private nextId = 1
+  /**
+   * A fresh Hub instance starts in a random 31-bit id range. Box sockets survive hibernation and keep their recent-id
+   * state, so restarting at 1 would make a new request look like a retry to the box on the other side.
+   */
+  private nextId = relayIdStart()
 
   private readonly nest: NestFleet
 
@@ -2376,7 +2388,7 @@ export class Hub extends DurableObject<Env> {
 
   private allocId(): number {
     const id = this.nextId
-    this.nextId = id >= 0xffffffff ? 1 : id + 1
+    this.nextId = id >= RELAY_ID_MAX ? relayIdStart() : id + 1
     return id
   }
 }
