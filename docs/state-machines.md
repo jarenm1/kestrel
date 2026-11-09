@@ -185,8 +185,12 @@ releasing the GPU; only the host's `none`/`detaching` (or an explicit release re
 the delivery filter reads as “already delivered”. Cancellation is terminal; a later re-dispatch must clear or replace
 the terminal flags deliberately.
 
-**Remaining gaps:** an ack before the 2 s delivery sweep permanently suppresses the result; re-dispatch repoints
-`parentRunId` but keeps `cancelledAt`/`resultAcknowledged`; delivery is gated by three derived predicates.
+**Wave 1 status:** delivery is decided by the deterministic result message, not the acknowledgement flag, so an ack
+before the 2 s sweep no longer suppresses the result; `hasPendingDelegations` also waits for delivery, including a
+settled continuation.
+
+**Remaining gaps:** re-dispatch repoints `parentRunId` but keeps `cancelledAt`/`resultAcknowledged`; delivery is still
+gated by derived predicates across the run, its children and the continuation.
 
 ### 6. Auth and capability tokens
 
@@ -282,11 +286,11 @@ current branch already fixed it; the row stays as the record of what was checked
 
 | Machine | Encoding | Risk |
 |---|---|---|
-| Task status | literal + 9 writers | H |
-| Run status | literal + 5 writers | H |
-| Pending ask / live answer | `pendingAsks` + `liveAsks` + status | M-H |
+| Task status | literal; `transitionTask` writer + documented exceptions | H |
+| Run status | literal; `settleRun` owns the end state | H |
+| Pending ask / live answer | `pendingAsks` + message-id-keyed `liveAsks` + token-guarded `askInFlight` | M-H |
 | Recovery arms | `usageLimitResume` / `autoRetry` + `examined` + `settledRuns` | H |
-| Delegation | optional fields + message ids | H |
+| Delegation | optional fields + message ids; delivery and ack separate | H |
 | Session resume | `runSessions` + provider/harness/continuation | M |
 | Uploads | `uploads[]` + bytes | M |
 | Storage quota | two in-memory maps + derived `overStorage` | M |
