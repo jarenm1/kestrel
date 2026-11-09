@@ -77,7 +77,12 @@ import {
   ensureAutomationFiresTable,
   type AutomationFireRow,
 } from "./automation-fires-table"
-import { applyDeliveryEvent, firePhaseOf } from "./delivery-state"
+import {
+  applyDeliveryEvent,
+  firePhaseOf,
+  transitionPrActivity,
+  transitionWebhook,
+} from "./delivery-state"
 import { ensurePrWatchTables } from "./pr-watches-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, FILE_TOKEN_HEADER, isAllowedLogin, type Env } from "./env"
@@ -1528,9 +1533,8 @@ export class Hub extends DurableObject<Env> {
     const sql = this.ctx.storage.sql
     const now = Date.now()
     const claimed = this.ctx.storage.transactionSync(() => {
-      if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) {
-        return null
-      }
+      const seen = sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0
+      if (transitionWebhook({ seen }, { _tag: "deliver" }).action !== "insert") return null
       sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
       sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
       const rows = sql
@@ -1589,7 +1593,8 @@ export class Hub extends DurableObject<Env> {
 
   async githubActivity(deliveryId: string, activity: { repo: string; numbers: readonly number[]; kind: string; headSha?: string }): Promise<{ duplicate: boolean; queued: number }> {
     const sql = this.ctx.storage.sql
-    if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) return { duplicate: true, queued: 0 }
+    const seen = sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0
+    if (transitionWebhook({ seen }, { _tag: "deliver" }).action !== "insert") return { duplicate: true, queued: 0 }
     const rows = sql.exec<{ login: string; taskId: string; number: number }>(
       "SELECT login, task_id AS taskId, pr_number AS number FROM pr_watches WHERE repo = ? COLLATE NOCASE", activity.repo,
     ).toArray()
@@ -1604,17 +1609,22 @@ export class Hub extends DurableObject<Env> {
     }
     const now = Date.now()
     const inserted = this.ctx.storage.transactionSync(() => {
-      if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) return false
+      const alreadySeen = sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0
+      if (transitionWebhook({ seen: alreadySeen }, { _tag: "deliver" }).action !== "insert") return false
       sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
       sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
       for (const row of matching) {
         const stillWatching = sql.exec("SELECT 1 FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, activity.repo, row.number).toArray().length > 0
         if (!stillWatching) continue
+        const claim = transitionPrActivity(
+          { attempts: 0, deliveryId: null, dueAt: null },
+          { _tag: "claimed", deliveryId, dueAt: now + 3000 },
+        )
         sql.exec(
         `INSERT INTO pr_activity_queue (login, task_id, repo, pr_number, kind, delivery_id, due_at) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(login, task_id, repo, pr_number, kind) DO UPDATE SET
            delivery_id = excluded.delivery_id, due_at = excluded.due_at, attempts = 0`,
-        row.login, row.taskId, activity.repo, row.number, activity.kind, deliveryId, now + 3000,
+        row.login, row.taskId, activity.repo, row.number, activity.kind, claim.phase.deliveryId, claim.phase.dueAt,
         )
       }
       return true
@@ -1690,31 +1700,44 @@ export class Hub extends DurableObject<Env> {
       // A newer event can replace the row during the box call. Never delete or postpone that event.
       const key = "login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ? AND kind = ?"
       const keyArgs = [row.login, row.taskId, row.repo, row.number, row.kind]
-      if (result.ok) this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
-      else if (result.status === 404 || result.status === 409) {
-        this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, row.repo, row.number)
+      const permanent = PR_ACTIVITY_PERMANENT.has(result.status)
+      const attempt = row.attempts + 1
+      const event = result.ok
+        ? { _tag: "delivered" as const }
+        : result.status === 404 || result.status === 409 || permanent
+          ? { _tag: "dropped" as const }
+          : {
+              _tag: "retry" as const,
+              attempt,
+              dueAt: Date.now() + prActivityRetryMs(attempt),
+              maxAttempts: PR_ACTIVITY_ATTEMPTS,
+            }
+      const transition = transitionPrActivity(
+        { attempts: row.attempts, deliveryId: row.deliveryId, dueAt: null },
+        event,
+      )
+      if (transition.action === "delete") {
+        if (result.status === 404 || result.status === 409) {
+          this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, row.repo, row.number)
+        }
         this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
-      } else if (PR_ACTIVITY_PERMANENT.has(result.status)) {
-        this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
-        console.error(
-          `dropping PR activity for ${row.login}/${row.taskId} ${row.repo}#${row.number}: box answered ${result.status}`,
-        )
-      } else {
-        const attempts = row.attempts + 1
-        if (attempts >= PR_ACTIVITY_ATTEMPTS) {
-          this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
+        if (permanent) {
           console.error(
-            `dropping PR activity for ${row.login}/${row.taskId} ${row.repo}#${row.number} after ${attempts} attempts`,
+            `dropping PR activity for ${row.login}/${row.taskId} ${row.repo}#${row.number}: box answered ${result.status}`,
           )
-        } else {
-          this.ctx.storage.sql.exec(
-            `UPDATE pr_activity_queue SET due_at = ?, attempts = ? WHERE ${key} AND delivery_id = ?`,
-            Date.now() + prActivityRetryMs(attempts),
-            attempts,
-            ...keyArgs,
-            row.deliveryId,
+        } else if (!result.ok && result.status !== 404 && result.status !== 409) {
+          console.error(
+            `dropping PR activity for ${row.login}/${row.taskId} ${row.repo}#${row.number} after ${attempt} attempts`,
           )
         }
+      } else if (transition.action === "update") {
+        this.ctx.storage.sql.exec(
+          `UPDATE pr_activity_queue SET due_at = ?, attempts = ? WHERE ${key} AND delivery_id = ?`,
+          transition.phase.dueAt,
+          transition.phase.attempts,
+          ...keyArgs,
+          row.deliveryId,
+        )
       }
     }
     await this.rearm()

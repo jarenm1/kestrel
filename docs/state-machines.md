@@ -78,9 +78,12 @@ or the hunk is supplied by the core owner.
 
 ## Wave 2
 
-**Status:** Wave 1 is merged. Wave 2 extracts the remaining transition modules and migrates one writer per PR. It does
-not change a call site's behaviour; when a migration exposes an illegal edge, the PR names the edge and either handles
-it explicitly or leaves it as a documented log-and-continue until Wave 3.
+**Status:** Wave 2 writers are centralized once #373–#377 land. The remaining gaps below are product/architectural
+decisions (session-expiry sweeps, NVENC policy, box-side fire idempotency, client ordering), not unmigrated phase
+writes.
+
+Wave 2 changed call-site behaviour only where a PR named the edge (for example #370 stopped setting `createFailed` on
+a live VM, and #376 changed when the failed-create claim is released). An unhandled illegal edge logs and continues.
 
 **Pattern.** A pure `transitionX(phase, event)` lives in `packages/protocol/src` when the record is shared by the web
 and phone clients; otherwise it lives in the owning package. It returns
@@ -267,6 +270,10 @@ operation that removes the control-plane row.
 **Wave 1 status:** a fire is claimed with a stable key in the same transaction that advances `next_run_at`, the claim's
 lease alarm is armed before the external call and rearmed on cold start, and a webhook delivery is written with its
 fires. The PR queue has capped backoff and a terminal drop after five failures, and unwatch clears the box mark.
+
+**Wave 2 status:** fire start/terminal, the webhook dedupe decision and PR activity claim/retry/drop go through
+`applyDeliveryEvent`/`transitionWebhook`/`transitionPrActivity`. Webhook retention is a raw age delete; PR watch remains
+a registry operation.
 
 **Remaining gaps:** a crash between the box call and the recorded outcome can duplicate an external task start; the fire
 is then failed after its lease instead of re-fired. Closing that fully needs an idempotency key on the box's
