@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { NEST_LAPSE_REFUSAL, type NestHostCommand } from "@cloudagents/protocol"
+import { NEST_LAPSE_REFUSAL, type NestHostCommand, type NestVmReport } from "@cloudagents/protocol"
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { VmRecord } from "./schema"
@@ -248,6 +248,8 @@ const internals = (manager: VmManager) =>
     destroy: (command: NestHostCommand) => Promise<void>
     evict: (command: NestHostCommand) => Promise<void>
     releaseVm: (vm: VmRecord) => Promise<VmRecord>
+    finish: (vm: VmRecord, state: VmRecord["state"], patch: Partial<VmRecord>) => VmRecord
+    report: (vm: VmRecord) => NestVmReport
   }
 
 describe("recovery and volume safety", () => {
@@ -263,21 +265,6 @@ describe("recovery and volume safety", () => {
     expect(recovered).toMatchObject({ state: "parked", frozen: false })
     const persisted = JSON.parse(readFileSync(vmPaths(stateLayout(stateDir), frozen.boxId).record, "utf8")) as VmRecord
     expect(persisted).toMatchObject({ state: "parked", frozen: false })
-  })
-
-  test("a state entered after the wall clock stepped back still reports a later since than the state it left", async () => {
-    const { manager } = fixture()
-    const internalsOf = internals(manager)
-    // The VM entered `running` an hour "ahead" of the current clock: the host clock has since been stepped back.
-    const running = recordOf({ state: "running", since: Date.now() + 3_600_000 })
-    internalsOf.records.set(running.boxId, running)
-
-    await internalsOf.recover(running)
-
-    // Control drops a report whose `since` is older than the last one it applied, so the parked state must order after.
-    const recovered = internalsOf.records.get(running.boxId)!
-    expect(recovered.state).toBe("parked")
-    expect(recovered.since).toBeGreaterThan(running.since)
   })
 
   test("a higher-epoch resume with no backup refuses and keeps the local volume", async () => {
@@ -405,5 +392,67 @@ describe("recovery and volume safety", () => {
 
     expect(readFileSync(p.volume, "utf8")).toBe("the only copy")
     expect(existsSync(`${p.volume}.previous`)).toBe(false)
+  })
+})
+
+describe("a state entered after the wall clock stepped back", () => {
+  // The VM entered its current state an hour "ahead" of the clock: the host clock has since been stepped back.
+  const aheadOfClock = (): number => Date.now() + 3_600_000
+
+  /**
+   * Control drops a report whose `since` is older than the last one it applied, so the new state must report later than
+   * the one it left. The record's own `since` stays on the wall clock, so the host's park, idle and backup timers do not
+   * wait out the step.
+   */
+  const expectOrderedAfter = (manager: VmManager, entered: VmRecord, left: VmRecord): void => {
+    const internalsOf = internals(manager)
+    expect(internalsOf.report(entered).since).toBeGreaterThan(internalsOf.report(left).since)
+    expect(entered.since).toBeLessThanOrEqual(Date.now())
+  }
+
+  test("a finished operation reports after the state it left, with a wall-clock since", () => {
+    const { manager } = fixture()
+    const internalsOf = internals(manager)
+    const running = recordOf({ state: "running", since: aheadOfClock() })
+    internalsOf.records.set(running.boxId, running)
+
+    const suspended = internalsOf.finish(running, "suspended", {})
+
+    expect(suspended.state).toBe("suspended")
+    expectOrderedAfter(manager, suspended, running)
+    // A second transition orders after the first, not after the wall clock it fell behind.
+    const resumed = internalsOf.finish(suspended, "running", {})
+    expectOrderedAfter(manager, resumed, suspended)
+  })
+
+  test("recovery parks the VM with a since that reports after the state it left", async () => {
+    const { manager } = fixture()
+    const internalsOf = internals(manager)
+    const running = recordOf({ state: "running", since: aheadOfClock() })
+    internalsOf.records.set(running.boxId, running)
+
+    await internalsOf.recover(running)
+
+    const recovered = internalsOf.records.get(running.boxId)!
+    expect(recovered.state).toBe("parked")
+    expectOrderedAfter(manager, recovered, running)
+  })
+
+  test("a higher-epoch resume parks the VM with a since that reports after the state it left", async () => {
+    const { manager, stateDir } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    const internalsOf = internals(manager)
+    const suspended = recordOf({ state: "suspended", since: aheadOfClock(), ownerEpoch: 1, volumeRef: "vol-1" })
+    internalsOf.records.set(suspended.boxId, suspended)
+    // The restore cannot open its backup, so the resume stops right after committing the new epoch's parked record.
+    const tool = join(dirname(stateDir), "volume-tool-that-cannot-restore")
+    writeFileSync(tool, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    internalsOf.volume.tool = tool
+
+    await expect(internalsOf.resumeCommand(resumeCommand(2, "vol-2"))).rejects.toThrow()
+
+    const parked = internalsOf.records.get(suspended.boxId)!
+    expect(parked).toMatchObject({ state: "parked", ownerEpoch: 2 })
+    expectOrderedAfter(manager, parked, suspended)
   })
 })

@@ -61,6 +61,12 @@ export const VmRecord = Schema.Struct({
   ownerEpoch: NonNeg,
   state: NestVmState,
   since: NonNeg,
+  /**
+   * `since` as reported to control, which orders one VM's reports by it and drops an older one: it never decreases,
+   * even after the wall clock steps back (it then runs 1 ms past the previous state's). `since` itself stays the wall
+   * clock, which the host's own timers measure from. Absent (records written before this field) means `since`.
+   */
+  reportedSince: Schema.optional(NonNeg),
   /** The guest image the VM was cloned from. */
   imageId: Schema.String,
   publicUrl: Schema.String,

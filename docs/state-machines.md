@@ -178,7 +178,8 @@ its token.
 **Wave 2 status:** `applyNestBoxEvent` owns placement, the command/pending marker, `wakeWanted`, deadlines, result
 cleanup and the failed-create claim. A create refused or failed with no VM releases `hostId`; a timeout keeps the claim
 so a late running report still lands, and a VM report still provisioning also keeps it. Reports are ordered by `since`
-(an older one is dropped); the host never lets a VM's `since` go backwards, even across a wall-clock step back.
+(an older one is dropped); the host reports a VM's `reportedSince`, which never goes backwards even across a wall-clock
+step back, and keeps its own timers on the wall-clock `since`.
 
 **Remaining gaps:** `vm()` accepts an edge outside the table as log-and-continue; a parked box with a resume claim
 cannot move after its host is lost (the claim release is deliberately deferred until the backup can be proven clean).
