@@ -9,6 +9,7 @@ import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { ThreadGraphs } from "@/components/ThreadGraphs";
 import { embedEvent, initialViewerView, reduceViewer } from "@/lib/desktopViewer";
+import { applyDesktopStatus, type DesktopStatusValue } from "@/lib/desktopStatus";
 import { colors, fonts, radius, spacing } from "@/theme";
 import type { DesktopStatus } from "@cloudagents/protocol";
 
@@ -27,7 +28,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const desktop = useQuery(queries.desktop(taskId));
-  const status = desktop.data ?? null;
+  const status = desktop.data?.status ?? null;
   const [embed, setEmbed] = useState<{ taskId: string; url: string } | null>(null);
   const [viewer, dispatchViewer] = useReducer(reduceViewer, initialViewerView);
   // The embed is unmounted while the app is backgrounded, which closes its connections; it remounts on foreground.
@@ -44,7 +45,13 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       await api.stopDesktop(taskId);
       return api.getDesktop(taskId);
     },
-    onSuccess: (next, { api, taskId }) => queryClient.setQueryData(boxKeys(api.boxScope).desktop(taskId), next),
+    onMutate: ({ api, taskId }) =>
+      queryClient.getQueryData<DesktopStatusValue>(boxKeys(api.boxScope).desktop(taskId)),
+    onSuccess: (next, { api, taskId }, base) => {
+      const key = boxKeys(api.boxScope).desktop(taskId);
+      const current = queryClient.getQueryData<DesktopStatusValue>(key);
+      queryClient.setQueryData(key, applyDesktopStatus(current, next, "mutation", base));
+    },
   });
 
   useEffect(() => {
