@@ -1826,7 +1826,9 @@ export class Hub extends DurableObject<Env> {
       }
       const settled = this.runRow(id)
       if (settled !== null) return settled
-      return this.finishFire(fire, "failed", null, "fire was already settled")
+      if (fire.outcome === null) throw new Error(`automation fire ${id} was reported settled without an outcome`)
+      // No run row exists for an already-settled fire: project the stored outcome, task and error exactly.
+      return this.finishFire(fire, fire.outcome, fire.taskId, fire.error)
     }
     this.ctx.storage.sql.exec(
       "UPDATE automation_fires SET started_at = ?, attempts = ? WHERE id = ? AND outcome IS NULL",

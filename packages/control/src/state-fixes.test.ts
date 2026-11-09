@@ -24,6 +24,7 @@ describe("relay ids", () => {
 /** The private fire methods this suite drives directly; the cast is test-only and names the exact shape. */
 interface FireTestAccess {
   fireRow(id: string): AutomationFireRow | null
+  runFire(id: string): Promise<AutomationRun>
   finishFire(fire: AutomationFireRow, status: "started" | "failed", taskId: string | null, error: string | null): AutomationRun
 }
 const fireAccess = (hub: HubClass): FireTestAccess => hub as unknown as FireTestAccess
@@ -316,6 +317,31 @@ describe("automation fire intents", () => {
     ])
     // The stuck claim was failed without another box call; the reclaimable one reached the missing-automation check.
     expect(box).not.toHaveBeenCalled()
+  })
+
+  test("a settled fire without a run is projected with its stored outcome", async () => {
+    setSystemTime(new Date(START))
+    const { hub, db } = newHub()
+    db.run(
+      `INSERT INTO automation_fires (id, automation_id, fire_key, reason, claimed_at, started_at, outcome, task_id, error)
+       VALUES ('settled', 'gone', 'schedule:1', 'schedule', ?, ?, 'failed', 'task-stored', 'lease expired')`,
+      START,
+      START,
+    )
+
+    const run = await fireAccess(hub).runFire("settled")
+    expect(run).toEqual({
+      id: "settled",
+      automationId: "gone",
+      firedAt: new Date(START).toISOString(),
+      reason: "schedule",
+      status: "failed",
+      taskId: "task-stored",
+      error: "lease expired",
+    })
+    expect(db.query("SELECT status, task_id AS taskId, error FROM automation_runs WHERE id = 'settled'").all()).toEqual([
+      { status: "failed", taskId: "task-stored", error: "lease expired" },
+    ])
   })
 
   test("a late settlement with a stale fire snapshot keeps the lease failure", async () => {
