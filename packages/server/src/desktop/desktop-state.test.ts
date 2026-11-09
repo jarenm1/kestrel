@@ -22,9 +22,18 @@ test("a desktop starts only from stopped or failed", () => {
   }
 })
 
-test("the first config is the only starting -> running edge", () => {
-  expect(apply({ _tag: "configured" })._tag).toBe("transitioned")
-  for (const phase of [stopped, running, failed]) {
+test("a config moves starting to running and is a no-op on a running session", () => {
+  expect(apply({ _tag: "configured" })).toMatchObject({
+    _tag: "transitioned",
+    phase: { state: "running", error: null },
+    changed: true,
+  })
+  expect(apply({ _tag: "configured" }, running)).toEqual({
+    _tag: "transitioned",
+    phase: { state: "running", error: null },
+    changed: false,
+  })
+  for (const phase of [stopped, failed]) {
     expect(apply({ _tag: "configured" }, phase)).toEqual({ _tag: "illegal", reason: "not-active" })
   }
 })

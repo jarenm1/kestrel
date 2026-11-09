@@ -50,6 +50,10 @@ export const transitionDesktop = (phase: DesktopPhase, event: DesktopEvent): Des
       }
       return { _tag: "transitioned", phase: { state: "starting", error: null }, changed: true }
     case "configured":
+      // A config after an encoder restart is expected while the session is already running; it is the same phase.
+      if (phase.state === "running") {
+        return { _tag: "transitioned", phase: { state: "running", error: null }, changed: phase.error !== null }
+      }
       if (phase.state !== "starting") return { _tag: "illegal", reason: "not-active" }
       return { _tag: "transitioned", phase: { state: "running", error: null }, changed: true }
     case "failed":
