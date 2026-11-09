@@ -6,16 +6,7 @@ import {
   type PointerEvent,
   type TransitionEvent,
 } from "react"
-import {
-  AppWindow,
-  FolderTree,
-  GitCompare,
-  GitPullRequest,
-  Monitor,
-  PanelRightClose,
-  PanelRightOpen,
-  type LucideIcon,
-} from "lucide-react"
+import { PanelRightClose, PanelRightOpen } from "lucide-react"
 import { threadPullRequestsOf } from "@cloudagents/protocol"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
@@ -24,6 +15,7 @@ import type { ElementContext } from "@/components/Composer"
 import { DiffPanel } from "@/components/DiffPanel"
 import { FilesPanel } from "@/components/FilesPanel"
 import { PullRequestsPanel } from "@/components/pullRequests/PullRequestPanel"
+import { SIDEBAR_TABS, SidebarTabStrip, type SidebarTabId } from "@/components/SidebarTabs"
 import { ThreadBoxIndicator } from "@/components/ThreadBoxIndicator"
 import { ThreadRepoButton } from "@/components/ThreadRepoButton"
 import { FloatingNotice, FloatingNotices } from "@/components/FloatingNotice"
@@ -31,16 +23,6 @@ import { Button } from "@cloudagents/ui/button"
 import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
-
-type TabId = "desktop" | "preview" | "diff" | "files" | "pull-requests"
-
-// Add a sidebar tab by adding an entry here and a case in SidebarBody.
-const SIDEBAR_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = [
-  { id: "desktop", label: "Desktop", icon: Monitor },
-  { id: "preview", label: "Preview", icon: AppWindow },
-  { id: "diff", label: "Diff", icon: GitCompare },
-  { id: "files", label: "Files", icon: FolderTree },
-]
 
 /** The open sidebar's share of the thread's width, remembered across threads and reloads. */
 const SIDEBAR_SHARE_KEY = "kestrel.sidebarShare"
@@ -69,7 +51,9 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // resize handle stay instant. Closing, the panel stays mounted while it slides out; the transition's end clears this.
   const [sliding, setSliding] = useState(false)
   const animated = useSidebarAnimation()
-  const [tab, setTab] = useState<TabId>("desktop")
+  // The sidebar's open tabs, in the order they were opened, and the one showing (none once the last is closed).
+  const [tabs, setTabs] = useState<readonly SidebarTabId[]>(["desktop"])
+  const [tab, setTab] = useState<SidebarTabId | undefined>("desktop")
   // Elements picked in the preview, waiting in the composer to go with the next message.
   const [elements, setElements] = useState<readonly ElementContext[]>([])
   const gridRef = useRef<HTMLDivElement>(null)
@@ -81,8 +65,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // The agent opened the desktop: show it. Only a new count reopens, so a reconnect with a running desktop does not.
   useEffect(() => {
     if (state.desktopOpens === 0) return
-    setTab("desktop")
-    toggle(true)
+    openTab("desktop")
   }, [state.desktopOpens])
 
   function toggle(next: boolean) {
@@ -91,9 +74,18 @@ export function ThreadView({ taskId }: { taskId: string }) {
     setSliding(animated)
   }
 
-  function openTab(next: TabId) {
+  /** Shows a tab, opening it after the others if it is not open yet. */
+  function openTab(next: SidebarTabId) {
+    setTabs((current) => (current.includes(next) ? current : [...current, next]))
     setTab(next)
     toggle(true)
+  }
+
+  /** Closing the showing tab shows its right neighbour, or its left one when it was last. */
+  function closeTab(closed: SidebarTabId) {
+    const rest = tabs.filter((t) => t !== closed)
+    setTabs(rest)
+    if (tab === closed) setTab(rest[Math.min(tabs.indexOf(closed), rest.length - 1)])
   }
 
   function onSlideEnd(e: TransitionEvent<HTMLDivElement>) {
@@ -201,37 +193,15 @@ export function ThreadView({ taskId }: { taskId: string }) {
               style={{ width: `calc(${openWidth} - 0.5rem)` }}
             >
               <div className="flex items-center gap-1.5 p-2">
-                {SIDEBAR_TABS.map((t) => (
-                  <Button
-                    key={t.id}
-                    variant={tab === t.id ? "soft" : "ghost"}
-                    size="sm"
-                    aria-pressed={tab === t.id}
-                    onClick={() => setTab(t.id)}
-                  >
-                    <t.icon />
-                    {t.label}
-                  </Button>
-                ))}
-                <div className="ml-auto flex min-w-0 items-center gap-1">
-                  {pullRequests.length > 0 && (
-                    <Button
-                      variant={tab === "pull-requests" ? "soft" : "ghost"}
-                      size="sm"
-                      aria-pressed={tab === "pull-requests"}
-                      title={pullRequestLabel}
-                      onClick={() => setTab("pull-requests")}
-                    >
-                      <GitPullRequest />
-                      {pullRequests.length === 1 ? pullRequestLabel : "Pull requests"}
-                      {pullRequests.length > 1 && (
-                        <span className="rounded-full bg-white/10 px-1.5 text-[10px] tabular-nums">
-                          {pullRequests.length}
-                        </span>
-                      )}
-                    </Button>
-                  )}
-                </div>
+                <SidebarTabStrip
+                  tabs={tabs}
+                  active={tab}
+                  pullRequests={{ count: pullRequests.length, label: pullRequestLabel }}
+                  onSelect={setTab}
+                  onClose={closeTab}
+                  onOpen={openTab}
+                />
+                <div className="ml-auto" />
                 <ThreadRepoButton checkouts={checkouts} />
                 <Button variant="ghost" size="icon" aria-label="Collapse sidebar" onClick={() => toggle(false)}>
                   <PanelRightClose />
@@ -257,35 +227,39 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <Button variant="ghost" size="icon" aria-label="Expand sidebar" onClick={() => toggle(true)}>
                 <PanelRightOpen />
               </Button>
-              {SIDEBAR_TABS.map((t) => (
-                <Button
-                  key={t.id}
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t.label}
-                  title={t.label}
-                  onClick={() => openTab(t.id)}
-                >
-                  <t.icon />
-                </Button>
-              ))}
-              {pullRequests.length > 0 && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={pullRequestLabel}
-                  title={pullRequestLabel}
-                  onClick={() => openTab("pull-requests")}
-                >
-                  <span className="relative inline-flex">
-                    <GitPullRequest />
-                    {pullRequests.length > 1 && (
-                      <span className="absolute -top-1.5 -right-2 rounded-full bg-white/15 px-1 text-[9px] leading-4 tabular-nums">
-                        {pullRequests.length}
+              {SIDEBAR_TABS.map((t) =>
+                t.id === "pull-requests" ? (
+                  pullRequests.length > 0 && (
+                    <Button
+                      key={t.id}
+                      variant="ghost"
+                      size="icon"
+                      aria-label={pullRequestLabel}
+                      title={pullRequestLabel}
+                      onClick={() => openTab(t.id)}
+                    >
+                      <span className="relative inline-flex">
+                        <t.icon />
+                        {pullRequests.length > 1 && (
+                          <span className="absolute -top-1.5 -right-2 rounded-full bg-white/15 px-1 text-[9px] leading-4 tabular-nums">
+                            {pullRequests.length}
+                          </span>
+                        )}
                       </span>
-                    )}
-                  </span>
-                </Button>
+                    </Button>
+                  )
+                ) : (
+                  <Button
+                    key={t.id}
+                    variant="ghost"
+                    size="icon"
+                    aria-label={t.label}
+                    title={t.label}
+                    onClick={() => openTab(t.id)}
+                  >
+                    <t.icon />
+                  </Button>
+                ),
               )}
               {/* Bottom of the rail, under the tabs and pull requests. */}
               <div className="mt-auto">
@@ -306,13 +280,15 @@ function SidebarBody({
   previewPort,
   onSelectElement,
 }: {
-  tab: TabId
+  tab: SidebarTabId | undefined
   taskId: string
   archived: boolean
   previewPort: number | undefined
   onSelectElement: (element: ElementContext) => void
 }) {
   switch (tab) {
+    case undefined:
+      return <p className="p-4 text-sm text-muted-foreground">No tabs open. Open one with +.</p>
     case "desktop":
       if (archived) {
         return <p className="p-4 text-sm text-muted-foreground">The desktop is off while this thread is archived.</p>
