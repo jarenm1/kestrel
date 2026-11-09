@@ -12,7 +12,7 @@ export const testLimits = { maxVcpus: 2, maxMemoryBytes: 2 * GIB, gpu: "none" as
 
 export const destroyCommand = (ownerEpoch: number): NestHostCommand => ({ _tag: "destroy", boxId: "box-1", ownerEpoch })
 
-export const resumeCommand = (ownerEpoch: number): NestHostCommand => ({
+export const resumeCommand = (ownerEpoch: number, volumeRef: string | null = null): NestHostCommand => ({
   _tag: "resume",
   boxId: "box-1",
   userId: "user-1",
@@ -20,7 +20,7 @@ export const resumeCommand = (ownerEpoch: number): NestHostCommand => ({
   ownerEpoch,
   limits: testLimits,
   publicUrl: "https://box-1.example.test",
-  volumeRef: null,
+  volumeRef,
   enrollToken: null,
 })
 
@@ -66,6 +66,7 @@ export const newTestManager = (): TestManager => {
     volumeStore: "file:///unused",
     volumeKeyFile: null,
     capacity: { vcpus: 4, memoryBytes: 8 * GIB },
+    template: { maxVcpus: 4, maxMemoryBytes: 8 * GIB },
     gpus: [],
   } as unknown as HostConfig
   const manager = new VmManager(config, layout, events)

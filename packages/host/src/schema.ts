@@ -89,6 +89,12 @@ export const VmRecord = Schema.Struct({
   snapshotGen: Schema.NullOr(NonNeg),
   /** The clone id the running guest was configured with; a resent `create` reconfigures that guest with it. */
   cloneId: Schema.NullOr(Schema.String),
+  /**
+   * Why a `deleted` record is a tombstone. `evict` leaves the backup for the box's new owner, so no `destroy` may wipe
+   * it; absent (records written before this field) means a destroy, whose wipe a resent command may finish. `evict`
+   * writes this before it releases the VM, so a crash mid-evict recovers with the cause intact.
+   */
+  tombstone: Schema.optional(Schema.NullOr(Schema.Literal("destroy", "evict"))),
   operation: Schema.NullOr(Operation),
   lastError: Schema.NullOr(Schema.String),
 })

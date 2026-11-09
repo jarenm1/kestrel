@@ -209,9 +209,29 @@ const createNewRecord = (fields: {
   volumeProcess: null,
   snapshotGen: null,
   cloneId: null,
+  tombstone: null,
   operation: null,
   lastError: null,
 })
+
+/** Removes a lazy restore destination that never became the VM's volume. */
+const clearLazyDestination = (p: VmPathSet): void => {
+  rmSync(p.volume, { force: true })
+  rmSync(`${p.volume}.bitmap`, { force: true })
+  rmSync(`${p.volume}.lock`, { force: true })
+}
+
+/**
+ * Rolls back a volume replacement interrupted after the local copy was moved to `volume.raw.previous`: the local copy
+ * is put back over a destination that never became the VM's volume. Returns whether a local copy is at `volume` now.
+ */
+const restorePreviousVolume = (p: VmPathSet): boolean => {
+  const previous = `${p.volume}.previous`
+  if (!existsSync(previous)) return existsSync(p.volume)
+  clearLazyDestination(p)
+  renameSync(previous, p.volume)
+  return true
+}
 
 /** A command that ran (or was answered from the store), with the box's report after it. */
 export interface ExecutedCommand {
@@ -787,6 +807,7 @@ export class VmManager {
         backedUpAt: null,
         localRef: null,
         localDirty: false,
+        tombstone: "destroy",
         lastError: errorMessage(error),
       })
       return
@@ -885,8 +906,11 @@ export class VmManager {
       })
     } else if (cmd.ownerEpoch > current.ownerEpoch) {
       // The local volume is the previous owner's copy: the new owner's backup (cmd.volumeRef) is the only source.
+      // Refuse before releasing or deleting anything when there is no source, or the only copy would be lost.
+      if (cmd.volumeRef === null) {
+        throw new HostError(`cannot resume box ${cmd.boxId} at epoch ${cmd.ownerEpoch}: no volume backup to restore`)
+      }
       const released = await this.releaseVm(current)
-      rmSync(this.paths(cmd.boxId).volume, { force: true })
       vm = this.commit({
         ...released,
         state: "parked",
@@ -928,16 +952,30 @@ export class VmManager {
   private async resumeParked(vm: VmRecord, enrollToken: string | null): Promise<void> {
     const p = this.paths(vm.boxId)
     let cur = this.begin(vm, "resume", "parked")
+    // A crash may have left the only local copy at `volume.raw.previous`; put it back before deciding what is usable.
+    const hadLocal = restorePreviousVolume(p)
     // Unbacked local changes make the local volume the only copy. Otherwise it is usable only when it matches the backup this command restores.
-    const usableLocal = existsSync(p.volume) && (cur.localDirty || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
+    const usableLocal = hadLocal && (cur.localDirty || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
     if (!usableLocal) {
       if (cur.volumeRef === null) throw new HostError("no local volume and no backup to restore it from")
-      rmSync(p.volume, { force: true })
+      // Keep the only local copy until the lazy restore has opened its source: a manifest can be missing or unreadable,
+      // and the restore fails before it serves a byte. Only a successful open makes the backup authoritative.
+      const previous = `${p.volume}.previous`
+      rmSync(`${p.volume}.bitmap`, { force: true })
+      rmSync(`${p.volume}.lock`, { force: true })
+      if (hadLocal) renameSync(p.volume, previous)
       const lazy = await startLazyVolume(
         this.volume,
         { ref: cur.volumeRef, boxId: cur.boxId, dest: p.volume, logPath: join(p.dir, "volume.log") },
         LAZY_VOLUME_TIMEOUT_MS,
-      )
+      ).catch((error: unknown) => {
+        // The restore never opened the backup (for example its manifest is gone). Revert the destination and put the
+        // local copy back: it is still the only data.
+        clearLazyDestination(p)
+        if (hadLocal) renameSync(previous, p.volume)
+        throw error
+      })
+      rmSync(previous, { recursive: true, force: true })
       cur = this.commit({ ...cur, volumeProcess: lazy })
     } else if (cur.volumeProcess !== null) {
       cur = this.commit({ ...cur, volumeProcess: null })
@@ -1160,11 +1198,13 @@ export class VmManager {
   private async destroy(cmd: Command<"destroy">): Promise<void> {
     const vm = this.records.get(cmd.boxId)
     if (vm === undefined) return
-    // A tombstone that still holds its backup ref was interrupted mid-destroy (recovery marks it deleted): finish the wipe.
+    // A tombstone that still holds its backup ref was either interrupted mid-destroy (finish the wipe) or left by
+    // `evict`, which keeps the backup for the box's new owner. A tombstone from `evict` is never wiped by a destroy,
+    // whatever epoch the command carries: a late duplicate from the old epoch matches the tombstone's own epoch.
     if (vm.state === "deleted") {
-      if (vm.volumeRef !== null) {
+      if (vm.volumeRef !== null && vm.tombstone !== "evict" && vm.ownerEpoch === cmd.ownerEpoch) {
         await deleteVolumeStore(this.volume, cmd.boxId)
-        this.finish(vm, "deleted", { volumeRef: null, backedUpAt: null })
+        this.finish(vm, "deleted", { volumeRef: null, backedUpAt: null, tombstone: "destroy" })
       }
       return
     }
@@ -1175,7 +1215,13 @@ export class VmManager {
     cur = await this.releaseVm(cur)
     if (cur.volumeRef !== null) await deleteVolumeStore(this.volume, cmd.boxId)
     clearArtifacts(this.paths(cmd.boxId).dir)
-    this.finish(cur, "deleted", { volumeRef: null, backedUpAt: null, localRef: null, localDirty: false })
+    this.finish(cur, "deleted", {
+      volumeRef: null,
+      backedUpAt: null,
+      localRef: null,
+      localDirty: false,
+      tombstone: "destroy",
+    })
   }
 
   /** The box lives elsewhere now: drop local state, keep backups, and stop reporting it. */
@@ -1185,10 +1231,12 @@ export class VmManager {
     if (vm.ownerEpoch >= cmd.ownerEpoch) {
       throw new HostError(`evict epoch ${cmd.ownerEpoch} is not newer than this host's copy (${vm.ownerEpoch})`)
     }
-    let cur = this.begin(vm, "destroy", null)
+    // The cause is recorded before anything is released: a crash mid-evict must recover as an evict tombstone, whose
+    // backup belongs to the box's new owner, not as a destroy whose late resend may wipe it.
+    let cur = this.begin({ ...vm, tombstone: "evict" }, "destroy", null)
     cur = await this.releaseVm(cur)
     clearArtifacts(this.paths(cmd.boxId).dir)
-    this.finish(cur, "deleted", { localRef: null, localDirty: false })
+    this.finish(cur, "deleted", { localRef: null, localDirty: false, tombstone: "evict" })
   }
 
   /** The VM this host holds for a box at exactly the command's owner epoch; a command for any other epoch is refused. */
@@ -1608,6 +1656,9 @@ export class VmManager {
   /** Decides what survives a restart. Live VMMs are re-adopted; anything else rolls back to a resumable state. */
   private async recover(record: VmRecord): Promise<void> {
     const p = this.paths(record.boxId)
+    // A crash during a volume replacement can leave the only local copy at `volume.raw.previous` and a destination
+    // the restore never committed. Roll that back before the record is interpreted.
+    restorePreviousVolume(p)
     // A snapshot still under its staging name was never complete, so it is not a memory image.
     if (existsSync(p.dir)) for (const name of readdirSync(p.dir)) if (/^snapshot\.\d+\.tmp$/.test(name)) rmSync(join(p.dir, name), { recursive: true, force: true })
     const plan = recoverPlan(record, {
@@ -1620,7 +1671,8 @@ export class VmManager {
       await terminateProcess(record.volumeProcess.process, VOLUME_STOP_GRACE_MS)
     }
     if (plan.clearNetwork && record.network !== null) await tapDown(record.network)
-    if (plan.dropMemoryImages && record.snapshotGen !== null) {
+    // An adopted VMM may still be using its recorded image; only an image no process holds may be removed.
+    if (plan.dropMemoryImages && !plan.adoptVmm && record.snapshotGen !== null) {
       rmSync(p.snapshot(record.snapshotGen), { recursive: true, force: true })
     }
     // A suspend that died after renaming its next generation into place leaves an image nothing will adopt.
@@ -1633,6 +1685,8 @@ export class VmManager {
       process: plan.adoptVmm ? record.process : null,
       network: plan.clearNetwork ? null : record.network,
       volumeProcess: plan.killVolume ? null : record.volumeProcess,
+      // A stale freeze must not survive the restart: the written record must agree with the state recovery chose.
+      frozen: false,
       snapshotGen: plan.dropMemoryImages ? null : record.snapshotGen,
       gpus: plan.adoptVmm ? record.gpus : [],
       gpuAttachedAt: plan.adoptVmm ? record.gpuAttachedAt : null,

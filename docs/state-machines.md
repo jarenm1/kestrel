@@ -126,9 +126,14 @@ for inbound reports only.
 | any | destroy ok | forgotten | `ownerEpoch` still valid |
 | any report | epoch/host/vm match | report state | same-epoch report is truth |
 
-**Remaining gaps:** `vm()` accepts any state → any state; evict is sent with the reported epoch, which the host refuses
-as not strictly newer; a failed create keeps a host claim with no pending command; a parked box with a resume claim
-cannot move after its host is lost; `wakeWanted` and `pendingId` are separate retry mechanisms. PR #284 fixed the
+**Wave 1 status:** evict commits its cause (`tombstone: "evict"`) and operation before releasing the VM and sends the
+control epoch, so a crash in that window recovers without wiping the backup; an interrupted volume replacement is
+rolled back from `.previous` on recovery; a stale freeze is cleared on recovery; and a refused enrollment send keeps
+its token.
+
+**Remaining gaps:** `vm()` accepts any state → any state; a failed create keeps a host claim with no pending command; a
+parked box with a resume claim cannot move after its host is lost (the claim release is deliberately deferred until
+the backup can be proven clean); `wakeWanted` and `pendingId` are separate retry mechanisms. PR #284 fixed the
 hello/lease ordering, inventory/live-report ordering and park timeout; do not re-fix those.
 
 ### 3. Desktop session and encoder
@@ -271,7 +276,7 @@ current branch already fixed it; the row stays as the record of what was checked
 | In-flight command | four `pending_*` columns + deadline | H |
 | Host claim / epoch / vm id | `host_id`, `owner_epoch`, `vm_id` | H |
 | Wake / lease | `wake_wanted` + `validUntil` + generation guards | H |
-| Enrollment token | `enroll_hash` + `enroll_expires_at` | M |
+| Enrollment token | `enroll_hash` + `enroll_expires_at`; retained on a refused send | M |
 
 ### Server core
 
@@ -337,8 +342,8 @@ current branch already fixed it; the row stays as the record of what was checked
 |---|---|---|
 | VM record / reported state | `state` + process/network/snapshot/volume fields | H |
 | Crash recovery plan | explicit `recoverPlan(record, facts)` | H (inputs/application) |
-| Operation marker | `operation{kind,from,startedAt}` | M |
-| Volume authority | `volumeRef/localRef/localDirty/backedUpAt` | H |
+| Operation marker | `operation{kind,from,startedAt}` + evict tombstone | M |
+| Volume authority | `volumeRef/localRef/localDirty/backedUpAt` + `.previous` rollback | H |
 | Freeze + snapshot generations | `frozen`, `snapshotGen` | H |
 | Lazy volume service | `volumeProcess` + device + lock | M |
 | GPU reservation / attach | `gpus[]`, `gpuAttachedAt`, in-memory reservations | M-H |
