@@ -22,6 +22,7 @@ import {
   type ModelHarness,
   type ModelProvider,
   type Run,
+  type RunEvent,
   type RouteHarness,
   type ServerEvent,
   type Task,
@@ -39,6 +40,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, applyTaskEvent, newId, nowIso } from "./state"
+import { applyRunEvent } from "./run-state"
 import { makeAcpDriver, type AcpRunInput } from "./acp"
 import { makeClaudeDriver } from "./claude-stream"
 import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
@@ -406,15 +408,16 @@ export const AgentHarnessLive = Layer.effect(
             if (settled._tag === "illegal") illegal = settled.reason
             else if (!settled.phase.pendingAsk) s.pendingAsks = s.pendingAsks.filter((ask) => ask.runId !== runId)
           }
-          run.endedAt = now
-          run.exitCode = settlement._tag === "ended" ? settlement.exitCode : null
-          if (settlement._tag === "ended") run.status = settlement.ok ? "succeeded" : "failed"
-          else if (settlement._tag === "cancelled") run.status = "cancelled"
-          else {
-            run.status = "failed"
-            // A shutdown run is a restart interruption, as a crash leaves it; an aborted one never started.
-            if (settlement._tag === "shutdown") run.interruptedByRestart = true
-          }
+          const runEvent: RunEvent =
+            settlement._tag === "ended"
+              ? { _tag: "settled", ok: settlement.ok, exitCode: settlement.exitCode }
+              : settlement._tag === "cancelled"
+                ? { _tag: "cancelled" }
+                : settlement._tag === "shutdown"
+                  ? { _tag: "interrupted" }
+                  : { _tag: "aborted" }
+          const runTransition = applyRunEvent(run, runEvent, now)
+          const runIllegal = runTransition._tag === "illegal" ? runTransition.reason : null
           task.updatedAt = now
           const text =
             settlement._tag === "ended"
@@ -434,13 +437,16 @@ export const AgentHarnessLive = Layer.effect(
                   createdAt: now,
                 }
           if (message !== null) s.messages.push(message)
-          return Either.right({ run: { ...run }, task: { ...task }, message, illegal })
+          return Either.right({ run: { ...run }, task: { ...task }, message, illegal, runIllegal })
         })
         if (outcome === null) return null
         // The run's settlement is truth even when the thread's phase refused the event; make that visible instead of
         // silently leaving a thread in a phase that disagrees with its run.
         if (outcome.illegal !== null) {
           yield* Effect.logWarning(`run ${runId}: settlement could not move its thread (${outcome.illegal})`)
+        }
+        if (outcome.runIllegal !== null) {
+          yield* Effect.logWarning(`run ${runId}: settlement could not move the run (${outcome.runIllegal})`)
         }
         if (outcome.message !== null) publish({ _tag: "message.created", message: outcome.message })
         publish({ _tag: "run.updated", run: outcome.run })
