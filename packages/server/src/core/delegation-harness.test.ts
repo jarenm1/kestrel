@@ -5,7 +5,6 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { Config, type ServerConfig } from "../config"
 import { CredentialBroker } from "../broker"
-import * as brokerModule from "../broker"
 import { CredentialStore } from "../credentials"
 import { CliAuth } from "../cliauth"
 import { DesktopManager } from "../desktop"
@@ -45,16 +44,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
   }
   const configLayer = Layer.succeed(Config, config)
-  /** #355 makes `expiresAt` required on `BrokerLease`; read its TTL when that lands, and the same 24 h value before. */
-  const brokerGrantTtl = (): number => {
-    if (!("BROKER_GRANT_TTL_MS" in brokerModule)) return 24 * 60 * 60_000
-    const ttl = brokerModule.BROKER_GRANT_TTL_MS
-    return typeof ttl === "number" ? ttl : 24 * 60 * 60_000
-  }
   const deps = Layer.mergeAll(
     configLayer, WorkspaceLive, StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))), EventHubLive,
     Layer.succeed(CredentialBroker, {
-      issue: () => Effect.succeed({ token: "test-only", base: "", env: {}, expiresAt: Date.now() + brokerGrantTtl() }), revoke: () => Effect.void,
+      issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }), revoke: () => Effect.void,
       grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
     }),
     Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), opencodeGoKey: () => Effect.succeed(null), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), cancelLogin: () => Effect.void, submitCode: () => Effect.die("unused"), submitKey: () => Effect.die("unused"), logout: () => Effect.void, selectAccount: () => Effect.die("unused"), discoverCommands: () => Effect.succeed([]), discoverModels: () => Effect.succeed({ models: [], sources: [] }), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),

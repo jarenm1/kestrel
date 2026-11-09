@@ -6,7 +6,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Checkout, Message, ModelProvider, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker, CredentialBrokerLive } from "../broker"
-import * as brokerModule from "../broker"
 import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
@@ -18,16 +17,6 @@ import { EventHub, EventHubLive } from "./events"
 import { CoreLive, CoreService } from "./service"
 import { StateLive, StateStore } from "./state"
 import { WorkspaceLive, WorkspaceService } from "./workspace"
-
-/**
- * #355 makes `expiresAt` required on `BrokerLease`. Read its TTL when that lands, and use the same 24 h value before
- * then, so this fake lease builds against both branches.
- */
-const brokerGrantTtl = (): number => {
-  if (!("BROKER_GRANT_TTL_MS" in brokerModule)) return 24 * 60 * 60_000
-  const ttl = brokerModule.BROKER_GRANT_TTL_MS
-  return typeof ttl === "number" ? ttl : 24 * 60 * 60_000
-}
 
 /**
  * A harness whose Claude CLI is `cli`, with its state under `root`. `loggedInDirs` runs at every launch; `gateways`
@@ -108,7 +97,7 @@ const harnessLayer = (
     options.realBroker
       ? CredentialBrokerLive.pipe(Layer.provide(Layer.merge(configLayer, credentialLayer)))
       : Layer.succeed(CredentialBroker, {
-          issue: () => Effect.succeed({ token: "test-only", base: "", env: {}, expiresAt: Date.now() + brokerGrantTtl() }),
+          issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }),
           revoke: () => Effect.void,
           grantForToken: () => Effect.succeed(null),
           onRevoke: () => () => undefined,

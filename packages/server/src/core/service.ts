@@ -1127,7 +1127,7 @@ export const CoreLive = Layer.effect(
      */
     const liveAsks = new Map<string, { readonly runId: string; readonly answer: Deferred.Deferred<AskOutcome> }>()
     /** Runs with an ask call between entry and the committed question; a second concurrent ask for the run is refused. */
-    const askInFlight = new Set<string>()
+    const askInFlight = new Map<string, object>()
     /** The call waiting on a run's question, if any. At most one question per task is pending. */
     const liveAskOfRun = (runId: string): { readonly messageId: string; readonly answer: Deferred.Deferred<AskOutcome> } | null => {
       for (const [messageId, waiter] of liveAsks) if (waiter.runId === runId) return { messageId, answer: waiter.answer }
@@ -2348,6 +2348,8 @@ export const CoreLive = Layer.effect(
         // The question's id is known before the write, so the waiter is registered against the row this call commits,
         // never against a run that may still have an older question.
         const messageId = newId()
+        // This call's ownership token for the run's in-flight slot; cleanup must not release another call's claim.
+        const claim = {}
         const answer = yield* Deferred.make<AskOutcome>()
         // Subscribed before posting, so a run that ends in the meantime cannot be missed.
         const unsubscribe = hub.subscribe(taskId, (event) => {
@@ -2362,7 +2364,8 @@ export const CoreLive = Layer.effect(
           if (askInFlight.has(runId) || liveAskOfRun(runId) !== null) {
             return yield* Effect.fail(new Conflict({ message: "a question is already waiting for an answer" }))
           }
-          askInFlight.add(runId)
+          // The token makes cleanup own the claim: a refused concurrent ask must not delete the marker held by A.
+          askInFlight.set(runId, claim)
           const attachments = yield* storeAttachments(input.attachments)
           const posted = yield* store.update(
             (s): Either.Either<{ task: Task; message: Message }, NotFound | Conflict> => {
@@ -2413,7 +2416,7 @@ export const CoreLive = Layer.effect(
           Effect.ensuring(
             Effect.sync(() => {
               unsubscribe()
-              askInFlight.delete(runId)
+              if (askInFlight.get(runId) === claim) askInFlight.delete(runId)
               if (liveAsks.get(messageId)?.answer === answer) liveAsks.delete(messageId)
             }),
           ),
