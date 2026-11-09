@@ -1,6 +1,15 @@
 import { QueryClient, queryOptions, type QueryKey } from "@tanstack/react-query";
-import type { AgentItem, AgentModel, Message, ModelProvider, Run, Task } from "@cloudagents/protocol";
+import {
+  mergeSnapshot as mergeLiveSnapshot,
+  type AgentItem,
+  type AgentModel,
+  type Message,
+  type ModelProvider,
+  type Run,
+  type Task,
+} from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
+import { applyDesktopStatus, type DesktopStatusValue } from "@/lib/desktopStatus";
 import { pendingSaves } from "@/lib/pendingSaves";
 
 /**
@@ -80,38 +89,69 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
   return next;
 }
 
-/** Fresh snapshots replace stale cache entries; only events written during the fetch override them. */
+/**
+ * Fresh snapshots replace stale cache entries; only events written during the fetch override them. The merge itself
+ * is `mergeSnapshot` from `@cloudagents/protocol`, shared with the web client so the two cannot drift apart.
+ *
+ * An entry that was cached before the fetch and is gone from the cache afterwards was removed while the snapshot was
+ * travelling. That removal is newer than the snapshot response (which may have been read before the event), so the
+ * snapshot may not resurrect the id.
+ */
 async function mergeSnapshot<T extends Keyed>(key: QueryKey, fetch: () => Promise<readonly T[]>): Promise<T[]> {
-  const before = new Set(queryClient.getQueryData<readonly T[]>(key) ?? []);
+  const before = queryClient.getQueryData<readonly T[]>(key) ?? [];
   const snapshot = await fetch();
-  const byId = new Map<string, T>();
-  for (const item of snapshot) byId.set(item.id, item);
-  for (const item of queryClient.getQueryData<readonly T[]>(key) ?? []) {
-    if (!byId.has(item.id) || !before.has(item)) byId.set(item.id, item);
-  }
-  return [...byId.values()];
+  const cached = queryClient.getQueryData<readonly T[]>(key) ?? [];
+  const merged = mergeLiveSnapshot(snapshot, cached, new Set(before));
+  const present = new Set(cached.map((item) => item.id));
+  const removed = new Set(before.filter((item) => !present.has(item.id)).map((item) => item.id));
+  return removed.size === 0 ? merged : merged.filter((item) => !removed.has(item.id));
 }
 
 /**
  * Fetches one task, keeping the task live events wrote while the fetch was in flight: it is newer than the snapshot.
  * A task always has a cache entry from an earlier visit, so identity, not presence, is what says an event landed
  * during the fetch: a thread opened while its run reports context would otherwise show the snapshot read before it.
+ * A snapshot older than an event that landed before the fetch started is ignored the same way; equal timestamps are
+ * the same write.
  */
 export async function fetchTaskSnapshot(key: QueryKey, fetch: () => Promise<Task>): Promise<Task> {
   const before = queryClient.getQueryData<Task>(key);
   const task = await fetch();
   const current = queryClient.getQueryData<Task>(key);
-  return current !== undefined && current !== before ? current : task;
+  if (current !== undefined && current !== before) return current;
+  if (current !== undefined && task.updatedAt < current.updatedAt) return current;
+  return task;
 }
 
 /**
  * Writes a task into the cache: its own entry, and the thread list if that is loaded. A list that is not loaded
- * stays unloaded; its query fetches it, so no partial list is ever cached.
+ * stays unloaded; its query fetches it, so no partial list is ever cached. Writes are monotonic in `updatedAt`: an
+ * event older than either cached copy (an out-of-order frame after a reconnect) is ignored; equal timestamps land.
  */
 export function storeTask(client: QueryClient, task: Task, scope: string): void {
   const scoped = boxKeys(scope);
+  const cached = client.getQueryData<Task>(scoped.task(task.id));
+  const listed = client
+    .getQueryData<readonly Task[]>(scoped.tasks)
+    ?.find((candidate) => candidate.id === task.id);
+  const newest =
+    cached === undefined || (listed !== undefined && listed.updatedAt > cached.updatedAt) ? listed : cached;
+  if (newest !== undefined && task.updatedAt < newest.updatedAt) return;
   client.setQueryData(scoped.task(task.id), task);
-  client.setQueryData(scoped.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task));
+  client.setQueryData(scoped.tasks, (list: readonly Task[] | undefined) =>
+    list === undefined ? list : upsert(list, task)
+  );
+}
+
+/**
+ * Invalidates the cached run item lists on (re)connect. `runItems(runId)` lives outside the task prefix, so a
+ * reconnect that only invalidates the task never refetches the items an `agent.item` event missed while disconnected.
+ */
+export function invalidateRunItems(client: QueryClient, runIds: readonly string[], scope: string): void {
+  const scoped = boxKeys(scope);
+  for (const runId of runIds) {
+    void client.invalidateQueries({ queryKey: scoped.runItems(runId), exact: true });
+  }
 }
 
 export function createQueries(api: ApiClient) {
@@ -138,7 +178,12 @@ export function createQueries(api: ApiClient) {
         queryKey: keys.automationRuns(automationId),
         queryFn: () => api.listAutomationRuns(automationId),
       }),
-    tasks: () => queryOptions({ queryKey: scoped.tasks, queryFn: () => api.listTasks(), refetchInterval: TASK_POLL_MS }),
+    tasks: () =>
+      queryOptions({
+        queryKey: scoped.tasks,
+        queryFn: () => mergeSnapshot(scoped.tasks, () => api.listTasks()),
+        refetchInterval: TASK_POLL_MS,
+      }),
     task: (taskId: string) =>
       queryOptions({
         queryKey: scoped.task(taskId),
@@ -166,7 +211,15 @@ export function createQueries(api: ApiClient) {
         refetchInterval: running ? DIFF_POLL_MS : false,
       }),
     desktop: (taskId: string) =>
-      queryOptions({ queryKey: scoped.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
+      queryOptions({
+        queryKey: scoped.desktop(taskId),
+        queryFn: async (): Promise<DesktopStatusValue> =>
+          applyDesktopStatus(
+            queryClient.getQueryData<DesktopStatusValue>(scoped.desktop(taskId)),
+            await api.getDesktop(taskId),
+            "event"
+          ),
+      }),
     usage: () => queryOptions({ queryKey: scoped.usage, queryFn: () => api.usage() }),
     providerUsage: () => queryOptions({ queryKey: scoped.providerUsage, queryFn: () => api.providerUsage() }),
     capabilities: () => queryOptions({ queryKey: scoped.capabilities, queryFn: () => api.capabilities() }),

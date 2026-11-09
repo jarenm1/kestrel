@@ -221,14 +221,20 @@ the box mark.
 **Machines:** snapshot merge (pure helper `mergeSnapshot`), task event cache, stream reconnect, desktop `RtcState`
 (`idle | connecting | live | retrying | unsupported`), viewer intent (`wanted | paused`), token cache.
 
-**Contract:** every cache write that can lose a race carries a monotonic guard (`Task.updatedAt` for a task; server order
-for items). Reconnect re-snapshots every collection the stream can have missed, including `runItems`. One owner writes
-`keys.desktop(taskId)`; the WebSocket status path is the only writer of `DesktopStatus`, and the RTC state is derived
-from its own events. There is one retry loop per viewer, not a 2 s outer loop wrapping a 1→30 s backoff.
+**Contract:** every cache write that can lose a race carries a monotonic guard: `Task.updatedAt` is wall-clock (equal
+timestamps land, and a delete leaves no tombstone), while item lists follow server order. Reconnect re-snapshots every
+collection the stream can have missed, including `runItems`. One owner writes `keys.desktop(taskId)`: status frames
+while a viewer's socket is delivering them, `desktop.updated` and REST snapshots otherwise, and a mutation response
+only when nothing wrote after its `onMutate`. The RTC state is derived from its own events. There is one retry loop per
+viewer: the stream layer reconnects a closed signalling socket at the later of the negotiation deadline and the 2 s
+fallback, not an immediate loop that resets a 1→30 s backoff.
 
-**Remaining gaps:** `task.updated` is written without an `updatedAt` guard; reconnect does not recover `runItems`; three
-writers share the desktop cache; the two retry layers reset each other; mobile has no 401 listener and reimplements the
-merge helpers.
+**Wave 1 status (mobile and Electron):** mobile task writes and snapshots carry the same monotonic guards, reconnect
+invalidates cached `runItems`, the desktop cache has one reducer, `/api/me` results and late 401s are guarded by the
+session generation, and the Electron handoff/queue is single-flight and serialized.
+
+**Remaining gaps:** `DesktopStatus` carries no timestamp or version, so between two events, or two stream frames, the
+later arrival wins; ordering is guaranteed only against the documented races above.
 
 ## Machine register
 
@@ -379,15 +385,15 @@ current branch already fixed it; the row stays as the record of what was checked
 
 | Machine | Encoding | Risk |
 |---|---|---|
-| Mobile auth session | cookie × user × loading × error; no expiry | H |
+| Mobile auth session | cookie × user × generation; expiry is a reported state | H |
 | Mobile active box | `activeBoxId` × boxes × managed | M |
-| Mobile live cache | duplicate merge helpers | H |
+| Mobile live cache | shared `mergeSnapshot` + `Task.updatedAt` guard | H |
 | Mobile settings queue | `saveState` + global pendingSaves | M |
 | Mobile CLI login | login/expired/code/completed/polling | M |
 | Mobile desktop viewer | embed/foreground/error + refresh | M |
 | Mobile token caches | per-kind slots + timestamps | M |
-| Electron handoff | nonce/return/pendingCallback | H |
-| Desktop session stores | file + in-memory copy | H |
+| Electron handoff | single-use nonce + serial queue | H |
+| Desktop session stores | file + in-memory copy under one serial queue | H |
 | Transcript bridge | epoch/seq/patch | M |
 | Window/updater/launch route | nullable window + library phases | M |
 

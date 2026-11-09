@@ -1,8 +1,22 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-import { connectedModelProviders, type Connection, type Run, type Task, type TextGenerationSettings } from "@cloudagents/protocol";
+import {
+  connectedModelProviders,
+  mergeSnapshot,
+  type Connection,
+  type Run,
+  type Task,
+  type TextGenerationSettings,
+} from "@cloudagents/protocol";
 import { createApiClient } from "./client";
-import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
+import {
+  boxKeys,
+  createQueries,
+  fetchTaskSnapshot,
+  invalidateRunItems,
+  queryClient,
+  storeTask,
+} from "./queries";
 import { trackSave, trackSaveQueue } from "@/lib/pendingSaves";
 import { createSaveQueue } from "@/lib/saveQueue";
 
@@ -47,6 +61,48 @@ test("a live turn ending during a reconnect fetch wins over its older snapshot",
   expect((await fetching).map(({ id, status }) => [id, status])).toEqual([
     ["turn", "succeeded"], ["new", "running"],
   ]);
+});
+
+test("the mobile list merge is the protocol's mergeSnapshot, so the clients cannot diverge", async () => {
+  // The web client and the phone client must agree on which entries survive a snapshot. This pins the phone path to
+  // the shared helper rather than a second copy of the algorithm.
+  const response = Promise.withResolvers<Run[]>();
+  const started = Promise.withResolvers<void>();
+  const api = {
+    ...createApiClient("https://control.example", "session", null),
+    listRuns: () => { started.resolve(); return response.promise; },
+  };
+  const query = createQueries(api).runs("same-id");
+  const before = [run("ended", "running"), run("missed", "running")];
+  queryClient.setQueryData(query.queryKey, before);
+  const fetching = queryClient.fetchQuery(query);
+  await started.promise;
+  const during = [run("ended", "succeeded"), run("new", "running")];
+  queryClient.setQueryData(query.queryKey, during);
+  const snapshot = [run("ended", "running"), run("snapshot-only", "succeeded")];
+  response.resolve(snapshot);
+  const merged = await fetching;
+  expect(merged).toEqual(mergeSnapshot(snapshot, during, new Set(before)));
+});
+
+test("a stale snapshot cannot resurrect an entry deleted while it was in flight", async () => {
+  const response = Promise.withResolvers<Run[]>();
+  const started = Promise.withResolvers<void>();
+  const api = {
+    ...createApiClient("https://control.example", "session", null),
+    listRuns: () => {
+      started.resolve();
+      return response.promise;
+    },
+  };
+  const query = createQueries(api).runs("same-id");
+  queryClient.setQueryData(query.queryKey, [run("gone", "running"), run("kept", "succeeded")]);
+  const fetching = queryClient.fetchQuery(query);
+  await started.promise;
+  // A delete landed while the snapshot was travelling. The response still carries the id: the server read it first.
+  queryClient.setQueryData(query.queryKey, [run("kept", "succeeded")]);
+  response.resolve([run("gone", "running"), run("kept", "succeeded"), run("new", "running")]);
+  expect((await fetching).map(({ id }) => id)).toEqual(["kept", "new"]);
 });
 
 test("box clients isolate caches even for identical task and run IDs", () => {
@@ -202,6 +258,67 @@ test("the snapshot replaces a task cached before the fetch started", async () =>
   const key = ["test-task"];
   queryClient.setQueryData(key, taskUsing(300));
   expect((await fetchTaskSnapshot(key, async () => taskUsing(350))).context?.usedTokens).toBe(350);
+});
+
+test("a snapshot older than the cached task is refused", async () => {
+  const key = ["older-task"];
+  const current = { ...taskUsing(350), updatedAt: "2026-01-01T00:00:05.000Z" };
+  queryClient.setQueryData(key, current);
+  const older = { ...taskUsing(300), updatedAt: "2026-01-01T00:00:01.000Z" };
+  expect(await fetchTaskSnapshot(key, async () => older)).toBe(current);
+});
+
+const taskAt = (updatedAt: string, status: Task["status"] = "idle"): Task => ({
+  ...task("thread"),
+  status,
+  updatedAt,
+});
+
+test("a task event older than the cached copy is ignored, equal timestamps still land", () => {
+  const client = new QueryClient();
+  const scoped = boxKeys("ordering-box");
+  const newest = taskAt("2026-01-01T00:00:05.000Z");
+  storeTask(client, newest, "ordering-box");
+  storeTask(client, taskAt("2026-01-01T00:00:01.000Z"), "ordering-box");
+  expect(client.getQueryData<Task>(scoped.task("same-id"))).toBe(newest);
+
+  const sameTick = taskAt(newest.updatedAt, "done");
+  storeTask(client, sameTick, "ordering-box");
+  expect(client.getQueryData<Task>(scoped.task("same-id"))?.status).toBe("done");
+});
+
+test("a task missing from its own entry is still rejected against a newer list copy", () => {
+  const client = new QueryClient();
+  const scoped = boxKeys("ordering-box");
+  const newest = taskAt("2026-01-01T00:00:05.000Z");
+  // The list was written while the single entry was absent (cache eviction, a fresh QueryClient hydration).
+  client.setQueryData(scoped.tasks, [newest]);
+  storeTask(client, taskAt("2026-01-01T00:00:01.000Z"), "ordering-box");
+
+  expect(client.getQueryData<Task>(scoped.task("same-id"))).toBeUndefined();
+  expect(client.getQueryData<readonly Task[]>(scoped.tasks)).toEqual([newest]);
+});
+
+test("the thread list keeps a newer task when a stale event arrives", () => {
+  const client = new QueryClient();
+  const scoped = boxKeys("ordering-box");
+  client.setQueryData(scoped.tasks, []);
+  const newest = taskAt("2026-01-01T00:00:05.000Z");
+  storeTask(client, newest, "ordering-box");
+  storeTask(client, taskAt("2026-01-01T00:00:01.000Z"), "ordering-box");
+  expect(client.getQueryData<readonly Task[]>(scoped.tasks)).toEqual([newest]);
+});
+
+test("run item invalidation is scoped to the runs a reconnect covers", () => {
+  const client = new QueryClient();
+  const scoped = boxKeys("runs-box");
+  client.setQueryData(scoped.runItems("run-1"), [{ id: "item-1" }]);
+  client.setQueryData(scoped.runItems("run-2"), [{ id: "item-2" }]);
+
+  invalidateRunItems(client, ["run-1"], "runs-box");
+
+  expect(client.getQueryState(scoped.runItems("run-1"))?.isInvalidated).toBe(true);
+  expect(client.getQueryState(scoped.runItems("run-2"))?.isInvalidated).toBe(false);
 });
 
 test("settings reads wait for a closed form's save so a reopened form cannot hydrate pre-save values", async () => {

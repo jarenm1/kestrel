@@ -24,13 +24,13 @@ export function boxLabel(box: ActiveBox | null, boxes: readonly UserBox[], manag
  * Kestrel box when neither a chosen box nor an assigned one applies.
  */
 export function useBoxSources(): BoxSource[] {
-  const { serverUrl, sessionCookie, boxes, managedBox, activeBox } = useAuth();
+  const { serverUrl, sessionCookie, sessionEpoch, boxes, managedBox, activeBox } = useAuth();
   return useMemo(() => {
     const url = serverUrl ?? "";
     const source = (label: string, box: ActiveBox | null): BoxSource => ({
       label,
       box,
-      api: createApiClient(url, sessionCookie, box),
+      api: createApiClient(url, sessionCookie, box, sessionEpoch),
     });
     const sources: BoxSource[] = [];
     if (managedBox !== null) sources.push(source(KESTREL_BOX, { id: managedBox.id, url: managedBox.url }));
@@ -39,5 +39,5 @@ export function useBoxSources(): BoxSource[] {
     }
     if (activeBox === null && managedBox === null) sources.push(source(KESTREL_BOX, null));
     return sources;
-  }, [serverUrl, sessionCookie, boxes, managedBox, activeBox]);
+  }, [serverUrl, sessionCookie, sessionEpoch, boxes, managedBox, activeBox]);
 }

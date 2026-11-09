@@ -48,8 +48,10 @@ export interface DesktopServer {
   takePendingReturn(): string
   /** Sets the one-time sign-in nonce before redirecting to GitHub. */
   setPendingNonce(nonce: string): void
-  /** One-time sign-in nonce the desktop app set before redirecting to GitHub; null once taken or cleared. */
-  takePendingNonce(): string | null
+  /** The sign-in nonce waiting for its callback, without consuming it. */
+  pendingNonce(): string | null
+  /** Consumes the pending nonce only when it matches, so a stray callback cannot burn the real one. */
+  claimPendingNonce(nonce: string): boolean
 }
 
 const cookie = (header: string | undefined, name: string): string | null => {
@@ -107,8 +109,19 @@ export const startDesktopServer = async (options: DesktopServerOptions): Promise
   })
   proxy.on("proxyRes", (proxyRes, req) => {
     if (req.url?.startsWith("/auth/logout") === true && proxyRes.statusCode === 204) {
+      const previous = session
       session = null
-      void options.clearSession()
+      // Keep the in-memory copy and the file in step: if the file cannot be cleared it still holds a session, so
+      // memory must not claim the user is signed out (and a restart must not silently disagree with this run).
+      void options.clearSession().catch((error: unknown) => {
+        // A sign-in that completed while the clear was pending owns the session now; a failed older logout must not
+        // overwrite it. Only a still-signed-out proxy may roll back to the session the file still holds.
+        if (session === null) session = previous
+        console.error(
+          "desktop session could not be cleared:",
+          error instanceof Error ? error.message : String(error),
+        )
+      })
     }
   })
   proxy.on("error", (error, _req, res) => {
@@ -226,10 +239,11 @@ export const startDesktopServer = async (options: DesktopServerOptions): Promise
     setPendingNonce: (nonce) => {
       pendingNonce = nonce
     },
-    takePendingNonce: () => {
-      const nonce = pendingNonce
+    pendingNonce: () => pendingNonce,
+    claimPendingNonce: (nonce) => {
+      if (pendingNonce === null || pendingNonce !== nonce) return false
       pendingNonce = null
-      return nonce
+      return true
     },
   }
 }

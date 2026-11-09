@@ -2,7 +2,9 @@ import { BrowserWindow, Menu, app, dialog, shell, type MenuItemConstructorOption
 import { autoUpdater } from "electron-updater"
 import { randomBytes } from "node:crypto"
 import { join, resolve } from "node:path"
-import { CALLBACK_SCHEME, callbackPath, loginUrl, parseCallback, safeLocalPath, type CallbackPath } from "./auth"
+import { CALLBACK_SCHEME, callbackPath, loginUrl, safeLocalPath, type CallbackPath } from "./auth"
+import { acceptCallback } from "./handoff"
+import { createSerialQueue } from "./queue"
 import { startDesktopServer, type DesktopServer } from "./server"
 import { SessionStore } from "./session"
 
@@ -86,24 +88,40 @@ const createWindow = async (): Promise<void> => {
   await window.loadURL(`${server.origin}${server.bootstrapPath}`)
 }
 
-const handleCallback = async (value: string): Promise<void> => {
-  const parsed = parseCallback(value)
-  if (parsed === null) return
+/**
+ * Sign-in callbacks and sign-out share one queue: the nonce is single-use, and both write the session file and the
+ * proxy's in-memory copy, so overlapping them could roll one back with the other.
+ */
+const enqueue = createSerialQueue((error: unknown) => {
+  console.error("desktop auth task failed:", error instanceof Error ? error.message : String(error))
+})
+
+const handleCallback = (value: string): Promise<void> => enqueue(() => processCallback(value))
+
+const processCallback = async (value: string): Promise<void> => {
   if (server === null || store === null) {
     pendingCallback = value
     return
   }
-  // Reject callbacks that were not preceded by a sign-in initiated from this desktop instance.
-  if (parsed.state === null || parsed.state !== server.takePendingNonce()) return
-  await store.set(parsed.session)
-  server.setSession(parsed.session)
-  const path = server.takePendingReturn()
+  const desktop = server
+  const sessionStore = store
+  const outcome = await acceptCallback(value, {
+    pendingNonce: () => desktop.pendingNonce(),
+    claimPendingNonce: (nonce) => desktop.claimPendingNonce(nonce),
+    readSession: () => sessionStore.get(),
+    storeSession: (session) => sessionStore.set(session),
+    clearSession: () => sessionStore.clear(),
+  })
+  if (outcome._tag !== "signed-in") return
+  // The session reached the file before the proxy learned it: memory never claims a sign-in the disk lacks.
+  desktop.setSession(outcome.session)
+  const path = desktop.takePendingReturn()
   if (window === null) await createWindow()
   focusWindow()
-  await window?.loadURL(`${server.origin}${path}`)
+  await window?.loadURL(`${desktop.origin}${path}`)
 }
 
-const signOut = async (): Promise<void> => {
+const processSignOut = async (): Promise<void> => {
   const id = await store?.get()
   if (id !== null && id !== undefined) {
     await fetch(`${CONTROL_URL}/auth/logout`, { method: "POST", headers: { cookie: `session=${id}` } }).catch(
@@ -114,6 +132,8 @@ const signOut = async (): Promise<void> => {
   server?.setSession(null)
   window?.reload()
 }
+
+const signOut = (): Promise<void> => enqueue(processSignOut)
 
 const checkForUpdates = async (manual: boolean): Promise<void> => {
   if (!app.isPackaged) {

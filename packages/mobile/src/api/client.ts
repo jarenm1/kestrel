@@ -48,6 +48,7 @@ import {
 } from "@cloudagents/protocol";
 import { fetchCredentials } from "@/auth/session";
 import { ApiError, responseError } from "./errors";
+import { createTokenCache } from "./tokenCache";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -81,6 +82,22 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 /** The desktop viewer page on the app host. Its ws URL and task id travel in the fragment, which the server never sees. */
 const DESKTOP_EMBED_PATH = "/embed/desktop";
+
+type UnauthorizedListener = (sessionEpoch: number) => void;
+const unauthorizedListeners = new Set<UnauthorizedListener>();
+
+/**
+ * Fires whenever a control-plane call (including a relayed box call) is rejected with 401: the session is missing or
+ * expired. The listener receives the epoch of the session the client was created under, so a late 401 from a session
+ * that has already been replaced cannot expire the newer one. A direct box refusing a box token is not a session
+ * expiry and never fires this.
+ */
+export function onUnauthorized(listener: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener);
+  return () => {
+    unauthorizedListeners.delete(listener);
+  };
+}
 
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
@@ -205,87 +222,69 @@ async function send<A, I>(
   }
 }
 
-/** Creates an API client bound to one server URL, session cookie and active box (`null` for the relayed Kestrel box). */
+/**
+ * Creates an API client bound to one server URL, session cookie and active box (`null` for the relayed Kestrel box).
+ * `sessionEpoch` identifies the session the caller is on; a 401 reports it so the owner can ignore a late answer from
+ * a session it has already replaced.
+ */
 export function createApiClient(
   serverUrl: string,
   sessionCookie: string | null,
-  activeBox: ActiveBox | null
+  activeBox: ActiveBox | null,
+  sessionEpoch = 0
 ): ApiClient {
+  const epoch = sessionEpoch;
   const cookieHeaders: Record<string, string> = sessionCookie ? { Cookie: `session=${sessionCookie}` } : {};
 
-  // The user's box token, single-flight: concurrent callers share one mint, and a failed mint is not kept.
-  let boxToken: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } | null = null;
+  // Tokens are cached per key and invalidated as a unit below: a mint that was already running when a token was
+  // refused must not store its result afterwards. The desktop tokens are per task, so two viewers can coexist.
+  const boxTokens = createTokenCache<{ token: string; expiresAt: number }>();
+  const fileTokens = createTokenCache<FileToken>();
+  const desktopTokens = createTokenCache<FileToken>();
+
+  function invalidateTokens(): void {
+    boxTokens.invalidate();
+    fileTokens.invalidate();
+    desktopTokens.invalidate();
+  }
+
   function mintBoxToken(box: ActiveBox, fresh = false): Promise<{ token: string; expiresAt: number }> {
-    if (fresh) boxToken = null;
-    if (boxToken && Date.now() < boxToken.refreshAt) return boxToken.minted;
-    const entry: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } = {
-      refreshAt: Number.POSITIVE_INFINITY,
-      minted: request(BoxToken, "POST", ControlPaths.userBoxToken(box.id)).then(
-        (minted) => {
-          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
-          return { token: minted.token, expiresAt: Date.parse(minted.expiresAt) };
-        },
-        (error: unknown) => {
-          if (boxToken === entry) boxToken = null;
-          throw error;
-        }
-      ),
-    };
-    boxToken = entry;
-    return entry.minted;
+    return boxTokens.get(box.id, async () => {
+      const minted = await request(BoxToken, "POST", ControlPaths.userBoxToken(box.id));
+      const expiresAt = Date.parse(minted.expiresAt);
+      return { value: { token: minted.token, expiresAt }, refreshAt: expiresAt - TOKEN_REFRESH_MARGIN_MS };
+    }, { fresh });
   }
 
-  // A file token for the relayed box, single-flight in the same way: reused until a minute before it expires.
-  let fileToken: { minted: Promise<FileToken>; refreshAt: number } | null = null;
   function mintFileToken(): Promise<FileToken> {
-    if (fileToken && Date.now() < fileToken.refreshAt) return fileToken.minted;
-    const entry: { minted: Promise<FileToken>; refreshAt: number } = {
-      refreshAt: Number.POSITIVE_INFINITY,
-      minted: request(FileToken, "POST", ControlPaths.fileToken).then(
-        (minted) => {
-          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
-          return minted;
-        },
-        (error: unknown) => {
-          if (fileToken === entry) fileToken = null;
-          throw error;
-        }
-      ),
-    };
-    fileToken = entry;
-    return entry.minted;
+    return fileTokens.get("file", async () => {
+      const minted = await request(FileToken, "POST", ControlPaths.fileToken);
+      return { value: minted, refreshAt: Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS };
+    });
   }
 
-  // A desktop token for the relayed box, single-flight per task in the same way.
-  let desktopToken: { taskId: string; minted: Promise<FileToken>; refreshAt: number } | null = null;
   function mintDesktopToken(taskId: string, fresh: boolean): Promise<FileToken> {
-    if (!fresh && desktopToken?.taskId === taskId && Date.now() < desktopToken.refreshAt) return desktopToken.minted;
-    const entry: { taskId: string; minted: Promise<FileToken>; refreshAt: number } = {
-      taskId,
-      refreshAt: Number.POSITIVE_INFINITY,
-      minted: request(FileToken, "POST", ControlPaths.desktopToken(taskId)).then(
-        (minted) => {
-          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
-          return minted;
-        },
-        (error: unknown) => {
-          if (desktopToken === entry) desktopToken = null;
-          throw error;
-        }
-      ),
-    };
-    desktopToken = entry;
-    return entry.minted;
+    return desktopTokens.get(taskId, async () => {
+      const minted = await request(FileToken, "POST", ControlPaths.desktopToken(taskId));
+      return { value: minted, refreshAt: Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS };
+    }, { fresh });
   }
 
-  // Control plane (served by the Worker): authenticated by the session cookie.
+  // Control plane (served by the Worker): authenticated by the session cookie. A 401 is the session missing or
+  // expired, so it drops every token minted from that session before telling the app to route to sign-in.
   function request<A, I>(
     schema: Schema.Schema<A, I, never>,
     method: Method,
     path: string,
     body?: unknown
   ): Promise<A> {
-    return send(schema, method, `${serverUrl}${path}`, cookieHeaders, body);
+    return send(schema, method, `${serverUrl}${path}`, cookieHeaders, body).catch((error: unknown) => {
+      if (error instanceof ApiError && error.status === 401) {
+        invalidateTokens();
+        unauthorizedListeners.forEach((listener) => listener(epoch));
+      }
+      throw error;
+    });
   }
 
   // Box-served paths: the relayed Kestrel box goes through the Worker with the session; a direct box takes a bearer token.
@@ -308,9 +307,11 @@ export function createApiClient(
     try {
       return await attempt();
     } catch (error) {
-      // The box rejected the token (for example, its secret rotated): drop it and mint once more. This is not a sign-out.
+      // The box rejected the token (for example, its secret rotated): drop it, and every token minted from it, then
+      // mint once more. A mint already in flight is invalidated too, so its late success cannot restore the refusal.
       if (!(error instanceof ApiError) || error.status !== 401) throw error;
-      boxToken = null;
+      boxTokens.invalidate(box.id);
+      desktopTokens.invalidate();
       return attempt();
     }
   }

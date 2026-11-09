@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
-import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
+import { Paths, type AgentItem, type Message, type Run } from "@cloudagents/protocol";
 import { openTaskEvents } from "@/api/events";
-import { createQueries, boxKeys, storeTask, upsert } from "@/api/queries";
+import { createQueries, boxKeys, invalidateRunItems, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { threadErrors } from "@/hooks/threadErrors";
+import { applyDesktopStatus, type DesktopStatusValue } from "@/lib/desktopStatus";
 
 const MAX_LOG_LINES = 2000;
 const RECONNECT_MS = 2000;
@@ -53,6 +54,13 @@ export function useTaskState(taskId: string) {
           setDisconnected(false);
           // Prefix invalidation refreshes task, messages and runs, including events missed while disconnected.
           void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });
+          // Run items live under the run, outside the task prefix, so a reconnect refetches each cached run's items.
+          const cachedRuns = queryClient.getQueryData<readonly Run[]>(keys.runs(taskId)) ?? [];
+          invalidateRunItems(
+            queryClient,
+            cachedRuns.map((run) => run.id),
+            api.boxScope
+          );
         },
         onEvent: (event) => {
           switch (event._tag) {
@@ -83,9 +91,11 @@ export function useTaskState(taskId: string) {
               break;
             case "desktop.updated": {
               // Only a move into "running" counts as the agent opening it.
-              const previous = queryClient.getQueryData<DesktopStatus>(keys.desktop(taskId));
-              queryClient.setQueryData(keys.desktop(taskId), event.desktop);
-              if (previous && previous.state !== "running" && event.desktop.state === "running") {
+              const previous = queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId));
+              const next = applyDesktopStatus(previous, event.desktop, "event");
+              if (next === previous) break;
+              queryClient.setQueryData(keys.desktop(taskId), next);
+              if (previous !== undefined && previous.status.state !== "running" && next.status.state === "running") {
                 setDesktopOpens((n) => n + 1);
               }
               break;
