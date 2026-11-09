@@ -26,13 +26,14 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 | macOS | `brew install lima`, then the same `curl … \| sh` (or `npx`): `install` creates the `kestrel-box` VM (Apple virtualization, Ubuntu LTS, half the CPUs and memory by default; `--cpus`, `--memory`), provisions it, and forwards port 8787 to the Mac |
 
 1. `kestrel-box login` prints a pairing code and opens `/pair?code=…` in the app. Approve it there (name and URL are
-   editable; "Use this box now" makes it your active box). The CLI then writes
+   editable; "Use this box now" makes it your active box, and is ticked for you only when the box already answers at
+   that URL). The CLI then writes
    `~/.config/kestrel-box/config.json` (mode 600) with the box id and secret. The secret is never shown.
 2. `kestrel-box install` runs `doctor`, copies itself to `~/.local/bin`, builds the desktop helper (`xdamage-capture`;
    needs a C compiler and the X11/Xdamage/Xfixes headers, otherwise the desktop is off), writes and starts the systemd
    user unit `kestrel-box.service`, and enables linger so it outlives logout. On macOS it does the same inside the VM.
 3. The box listens on `127.0.0.1:8787` and is used from the same machine at `http://localhost:8787`. To use it from
-   elsewhere (the mobile app, another computer), make that port reachable over HTTPS: a Cloudflare Tunnel, a reverse proxy on your own domain, or [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve). Those forward every path they are given, so do not point them at the box port directly. Point them at a local proxy that answers `/mcp` and `/broker` with 404 (the rules in `deploy/box-ingress.nix`; Caddy does this in a few lines). Then set that proxy's URL on the box in Settings › Boxes.
+   elsewhere (the mobile app, another computer), make that port reachable over HTTPS: a Cloudflare Tunnel, a reverse proxy on your own domain, or [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) (`tailscale serve --bg http://127.0.0.1:8787`). Point them straight at the box port: the agent-only routes (`/mcp`, `/broker`, `/gh/`) are served on a separate loopback port, never on this one. Then set the box's URL in Settings › Boxes, which shows whether the box answers there, accepts its secret and is recent enough for the app.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
