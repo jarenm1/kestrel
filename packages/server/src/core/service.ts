@@ -1332,10 +1332,9 @@ export const CoreLive = Layer.effect(
           let task: Task | undefined
           for (const t of s.tasks) {
             if (!ids.has(t.id)) continue
-            if (t.archivedAt === undefined) {
-              t.archivedAt = now
-              t.updatedAt = now
-            }
+            const wasArchived = t.archivedAt !== undefined
+            applyTaskEvent(s, t, { _tag: "archive" })
+            if (!wasArchived) t.updatedAt = now
             const copy = { ...t }
             tree.push(copy)
             if (t.id === id) task = copy
@@ -1357,7 +1356,7 @@ export const CoreLive = Layer.effect(
           if (Either.isLeft(found)) return Either.left(found.left)
           const task = found.right
           if (task.archivedAt !== undefined) {
-            delete task.archivedAt
+            applyTaskEvent(s, task, { _tag: "unarchive" })
             task.updatedAt = nowIso()
           }
           return Either.right({ ...task })
