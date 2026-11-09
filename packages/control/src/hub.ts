@@ -1815,12 +1815,23 @@ export class Hub extends DurableObject<Env> {
     if (recorded !== null) return recorded
     let fire = this.fireRow(id)
     if (fire === null) throw new Error(`no automation fire ${id}`)
-    if (fire.attempts >= FIRE_START_ATTEMPTS) {
-      return this.finishFire(fire, "failed", null, `fire did not start after ${FIRE_START_ATTEMPTS} attempts`)
+    const start = applyDeliveryEvent(firePhaseOf(fire), {
+      _tag: "start",
+      at: Date.now(),
+      maxAttempts: FIRE_START_ATTEMPTS,
+    })
+    if (start._tag === "illegal") {
+      if (start.reason === "attempts-exhausted") {
+        return this.finishFire(fire, "failed", null, `fire did not start after ${FIRE_START_ATTEMPTS} attempts`)
+      }
+      const settled = this.runRow(id)
+      if (settled !== null) return settled
+      return this.finishFire(fire, "failed", null, "fire was already settled")
     }
     this.ctx.storage.sql.exec(
-      "UPDATE automation_fires SET started_at = ?, attempts = attempts + 1 WHERE id = ? AND outcome IS NULL",
-      Date.now(),
+      "UPDATE automation_fires SET started_at = ?, attempts = ? WHERE id = ? AND outcome IS NULL",
+      start.phase.startedAt,
+      start.phase.attempts,
       id,
     )
     fire = this.fireRow(id) ?? fire
