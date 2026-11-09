@@ -2,7 +2,8 @@ import { BrowserWindow, Menu, app, dialog, shell, type MenuItemConstructorOption
 import { autoUpdater } from "electron-updater"
 import { randomBytes } from "node:crypto"
 import { join, resolve } from "node:path"
-import { CALLBACK_SCHEME, callbackPath, loginUrl, parseCallback, safeLocalPath, type CallbackPath } from "./auth"
+import { CALLBACK_SCHEME, callbackPath, loginUrl, safeLocalPath, type CallbackPath } from "./auth"
+import { acceptCallback } from "./handoff"
 import { startDesktopServer, type DesktopServer } from "./server"
 import { SessionStore } from "./session"
 
@@ -86,21 +87,43 @@ const createWindow = async (): Promise<void> => {
   await window.loadURL(`${server.origin}${server.bootstrapPath}`)
 }
 
-const handleCallback = async (value: string): Promise<void> => {
-  const parsed = parseCallback(value)
-  if (parsed === null) return
+let callbackQueue: Promise<void> = Promise.resolve()
+
+/**
+ * Sign-in callbacks are serialized: the nonce is single-use, and two deliveries of the same URL must not both store
+ * a session before either consumes the nonce.
+ */
+const handleCallback = (value: string): Promise<void> => {
+  callbackQueue = callbackQueue.then(() => processCallback(value)).catch((error: unknown) => {
+    console.error(
+      "desktop sign-in callback failed:",
+      error instanceof Error ? error.message : String(error),
+    )
+  })
+  return callbackQueue
+}
+
+const processCallback = async (value: string): Promise<void> => {
   if (server === null || store === null) {
     pendingCallback = value
     return
   }
-  // Reject callbacks that were not preceded by a sign-in initiated from this desktop instance.
-  if (parsed.state === null || parsed.state !== server.takePendingNonce()) return
-  await store.set(parsed.session)
-  server.setSession(parsed.session)
-  const path = server.takePendingReturn()
+  const desktop = server
+  const sessionStore = store
+  const outcome = await acceptCallback(value, {
+    pendingNonce: () => desktop.pendingNonce(),
+    claimPendingNonce: (nonce) => desktop.claimPendingNonce(nonce),
+    readSession: () => sessionStore.get(),
+    storeSession: (session) => sessionStore.set(session),
+    clearSession: () => sessionStore.clear(),
+  })
+  if (outcome._tag !== "signed-in") return
+  // The session reached the file before the proxy learned it: memory never claims a sign-in the disk lacks.
+  desktop.setSession(outcome.session)
+  const path = desktop.takePendingReturn()
   if (window === null) await createWindow()
   focusWindow()
-  await window?.loadURL(`${server.origin}${path}`)
+  await window?.loadURL(`${desktop.origin}${path}`)
 }
 
 const signOut = async (): Promise<void> => {
