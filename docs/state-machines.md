@@ -139,9 +139,9 @@ run and its thread, using `StateStore.updateOutcome` where the spawn must follow
 through `transitionTask`; `finish`, `stopRun` and `abort` share `settleRun`; an askless `needs_input` is normalized at
 startup and `recordSession` ignores settled runs.
 
-**Known exceptions:** a delegated thread whose assignment could not be dispatched (`service.ts` `delegate`) and the
-reconcile fallbacks in `state.ts` (an orphan `running` thread, an askless `needs_input`, a delegation that never
-reserved a run) still write `status` directly. Everything else goes through the target writers above.
+**Known exceptions:** a delegated thread whose assignment could not be dispatched (`service.ts` `delegate`) still
+writes `status` directly. Startup reconcile now sends explicit repair events through `transitionTask` and interrupts
+persisted runs through `applyRunEvent`; everything else goes through the target writers above.
 
 ### 2. Nest VM, command and claim
 

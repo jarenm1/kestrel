@@ -17,6 +17,8 @@ describe("task phase", () => {
       pendingAsk: false,
       runLive: false,
       delegationCancelled: false,
+      delegationPresent: false,
+      delegationDispatched: false,
     })
   })
 
@@ -110,6 +112,36 @@ describe("task phase", () => {
     expect(
       run({ _tag: "restartReconcile" }, phase({ status: "needs_input", pendingAsk: true, runLive: true })),
     ).toMatchObject({ _tag: "transitioned", phase: { status: "needs_input", runLive: false } })
+  })
+
+  test("startup repairs only the inconsistent persisted shapes", () => {
+    expect(run({ _tag: "reconcileAskless" }, phase({ status: "needs_input" }))).toMatchObject({
+      _tag: "transitioned",
+      phase: { status: "idle" },
+    })
+    expect(run({ _tag: "reconcileAskless" }, phase({ status: "needs_input", pendingAsk: true }))).toMatchObject({
+      _tag: "transitioned",
+      phase: { status: "needs_input" },
+      changed: false,
+    })
+    expect(run({ _tag: "reconcileOrphan" }, phase({ status: "running" }))).toMatchObject({
+      _tag: "transitioned",
+      phase: { status: "failed" },
+    })
+    expect(run({ _tag: "reconcileOrphan" }, phase({ status: "running", runLive: true }))).toMatchObject({
+      _tag: "transitioned",
+      phase: { status: "running" },
+      changed: false,
+    })
+    expect(
+      run({ _tag: "reconcileUndispatchedDelegation" }, phase({ delegationPresent: true })),
+    ).toMatchObject({ _tag: "transitioned", phase: { status: "failed" } })
+    expect(
+      run(
+        { _tag: "reconcileUndispatchedDelegation" },
+        phase({ delegationPresent: true, delegationDispatched: true }),
+      ),
+    ).toMatchObject({ _tag: "transitioned", changed: false })
   })
 
   test("archive gates user work and reports without changing status", () => {
