@@ -68,7 +68,7 @@ import { formatHandoff, HANDOFF_HISTORY_LIMIT } from "./handoff"
 import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
-import { newId, nowIso, StateStore, type RunSession, type StoreState } from "./state"
+import { newId, nowIso, StateStore, applyTaskEvent, type RunSession, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName, uploadOperationId } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
@@ -1708,7 +1708,6 @@ export const CoreLive = Layer.effect(
             // Any message of the user settles the task's question: it is the answer, or it is ignored once the question's
             // run is gone. Another agent's message leaves the question to the user.
             const ask = from === null ? (s.pendingAsks.find((a) => a.taskId === taskId) ?? null) : null
-            if (from === null) s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
             const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
@@ -1726,7 +1725,13 @@ export const CoreLive = Layer.effect(
                 ...sent,
               }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
-              if (task.status === "needs_input" && from === null) task.status = "running"
+              if (from === null) {
+                // The user's message answers the question or supersedes it; either way it is the thread's next turn.
+                const answered = applyTaskEvent(s, task, { _tag: ask === null ? "userMessage" : "answer" })
+                if (answered._tag === "transitioned" && !answered.phase.pendingAsk) {
+                  s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
+                }
+              }
               task.updatedAt = now
               s.messages.push(message)
               return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false, title: titleRequest })
@@ -1788,7 +1793,14 @@ export const CoreLive = Layer.effect(
               ...(autoRetryAttempt === undefined ? {} : { autoRetryAttempt }),
             }
             const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
-            task.status = "running"
+            if (from === null) {
+              // The user's message starts the thread's next turn and clears a question the previous run left.
+              const sentTurn = applyTaskEvent(s, task, { _tag: "userMessage" })
+              if (sentTurn._tag === "transitioned" && !sentTurn.phase.pendingAsk) {
+                s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
+              }
+            }
+            applyTaskEvent(s, task, { _tag: "runStarted" })
             task.updatedAt = now
             // The new run supersedes whatever the failed run armed: a usage-limit notice or a retry timer is about a
             // run that no longer is the thread's latest. Clearing them here keeps the notice off a running thread
@@ -2174,7 +2186,7 @@ export const CoreLive = Layer.effect(
               // A cancelled delegated thread must not wake at a usage-limit reset or retry for a parent that stopped it.
               delete task.usageLimitResume
               delete task.autoRetry
-              if (task.status === "needs_input") task.status = "idle"
+              applyTaskEvent(s, task, { _tag: "cancelDelegation" })
               task.updatedAt = nowIso()
               changed.push({ ...task })
             }
@@ -2208,12 +2220,14 @@ export const CoreLive = Layer.effect(
         return yield* delegatedStatus(parentTaskId, childTaskId)
       })
 
+    // An acknowledgement says the parent's agent has the result, not that the result reached the parent: delivery is
+    // the deterministic result message's existence. The two are independent, so an ack before the sweep cannot
+    // suppress the delivery; the message id still makes a repeated delivery harmless.
     const acknowledgeDelegation: CoreShape["acknowledgeDelegation"] = (parentTaskId, childTaskId) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
       yield* delegatedStatus(parentTaskId, childTaskId)
       const acknowledged = yield* store.update((s) => {
         const child = s.tasks.find((t) => t.id === childTaskId)!
-        const delivered = s.messages.some((m) => m.taskId === parentTaskId && m.id === `delegation-result:${childTaskId}`)
-        if (delivered || child.delegation!.resultAcknowledged) return Either.right(null)
+        if (child.delegation!.resultAcknowledged) return Either.right(null)
         child.delegation = { ...child.delegation!, resultAcknowledged: true }
         return Either.right({ ...child })
       })
@@ -2245,11 +2259,10 @@ export const CoreLive = Layer.effect(
         const parent = state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child.owner)
         const parentRun = state.runs.find((r) => r.id === d.parentRunId)
         return (d.cancelledAt !== undefined || (run !== undefined && run.status !== "running" && (run.status === "cancelled" || (!hasPendingDelegations(state, run.id) && usageLimitWait(state, child, run) === null))) || (run === undefined && child.status === "failed")) && parent !== undefined && parent.archivedAt === undefined &&
-          !d.resultAcknowledged && parent.delegation?.cancelledAt === undefined && parentRun?.status !== "cancelled" && !holdsDelegationMail(state, parent) && !state.messages.some((m) => m.taskId === parent.id && m.id === `delegation-result:${child.id}`)
+          parent.delegation?.cancelledAt === undefined && parentRun?.status !== "cancelled" && !holdsDelegationMail(state, parent) && !state.messages.some((m) => m.taskId === parent.id && m.id === `delegation-result:${child.id}`)
       })
       yield* Effect.forEach(pending, (child) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
         const latest = yield* store.read
-        if (latest.tasks.find((t) => t.id === child.id)?.delegation?.resultAcknowledged) return
         const status = yield* delegatedStatus(child.delegation!.parentTaskId, child.id)
         if (status.task.delegation?.cancelledAt === undefined && (status.task.status === "needs_input" || status.run?.status === "running" || status.waitingForChildren || status.usageLimit !== null)) return
         const parent = latest.tasks.find((t) => t.id === child.delegation!.parentTaskId)
@@ -2326,6 +2339,13 @@ export const CoreLive = Layer.effect(
           }
         })
         return yield* Effect.gen(function* () {
+          // The waiting call is in-memory bookkeeping: claim it before the write, so a failed write cannot leave a
+          // phantom waiter behind and a concurrent ask cannot replace a question whose call is still waiting. The
+          // persisted ask row remains the question's truth; this only says whether a call is waiting on it.
+          if (liveAsks.has(runId)) {
+            return yield* Effect.fail(new Conflict({ message: "a question is already waiting for an answer" }))
+          }
+          liveAsks.set(runId, answer)
           const attachments = yield* storeAttachments(input.attachments)
           const posted = yield* store.update(
             (s): Either.Either<{ task: Task; message: Message }, NotFound | Conflict> => {
@@ -2335,11 +2355,13 @@ export const CoreLive = Layer.effect(
               if (!run || run.taskId !== taskId || run.status !== "running") {
                 return Either.left(new Conflict({ message: `run ${runId} is not the running run of task ${taskId}` }))
               }
-              // A question is replaced only when its call has gone (the call was dropped); a waiting one blocks.
+              // A question is replaced only when its call has gone (the call was dropped); a waiting one blocks. The
+              // only claim this call can see for its own run is its own, since a foreign one refused above.
               const pending = s.pendingAsks.find((a) => a.taskId === taskId)
-              if (pending && (pending.runId !== runId || liveAsks.has(runId))) {
+              if (pending && (pending.runId !== runId || liveAsks.get(runId) !== answer)) {
                 return Either.left(new Conflict({ message: "a question is already waiting for an answer" }))
               }
+              if (pending) s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
               const task = found.right
               const now = nowIso()
               const message: Message = {
@@ -2352,14 +2374,13 @@ export const CoreLive = Layer.effect(
                 options: [...input.options],
                 attachments,
               }
+              const asked = applyTaskEvent(s, task, { _tag: "ask" })
+              if (asked._tag === "illegal") {
+                return Either.left(new Conflict({ message: `cannot ask a question: ${asked.reason}` }))
+              }
               s.messages.push(message)
-              s.pendingAsks = [
-                ...s.pendingAsks.filter((a) => a.taskId !== taskId),
-                { taskId, runId, messageId: message.id },
-              ]
-              task.status = "needs_input"
+              s.pendingAsks.push({ taskId, runId, messageId: message.id })
               task.updatedAt = now
-              liveAsks.set(runId, answer)
               return Either.right({ task: { ...task }, message })
             },
           )
@@ -2916,7 +2937,9 @@ export const CoreLive = Layer.effect(
               }
               const task = found.right
               const now = nowIso()
-              task.status = input.status
+              // The live run's outcome wins: a report is advisory. Only `needs_input` names a phase, and only while a
+              // question is actually pending; any terminal report is just a message until the run settles.
+              applyTaskEvent(s, task, { _tag: "report", status: input.status })
               task.updatedAt = now
               const trimmed = input.message.trim()
               let message: Message | null = null

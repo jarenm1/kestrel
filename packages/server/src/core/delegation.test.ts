@@ -137,13 +137,17 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
         run.endedAt = now
         return Either.right(undefined)
       })
+      // An acknowledgement is not a delivery: it records that the parent's agent has the result, but the automatic
+      // result message must still reach the thread. The stable message id keeps a repeated delivery harmless.
       expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(true)
       expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(false)
       yield* Effect.sleep("2500 millis")
       const answeredResults = (yield* store.read).messages.filter((m) => m.id === `delegation-result:${blocked.id}`)
       expect(answeredResults).toHaveLength(1)
       expect(answeredResults[0]?.text).toContain("Finished using option A")
-      expect((yield* store.read).messages.filter((m) => m.id === `delegation-result:${second.id}`)).toHaveLength(0)
+      const acknowledgedResult = (yield* store.read).messages.filter((m) => m.id === `delegation-result:${second.id}`)
+      expect(acknowledgedResult).toHaveLength(1)
+      expect(acknowledgedResult[0]?.text).toContain("finished with status succeeded")
       const nestedParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "nested-parent" })
       const nestedRunId = nestedParent.delegation!.runId!
       const grandchild = yield* core.delegate(nestedParent.id, nestedRunId, { ...input, requestId: "grandchild" })

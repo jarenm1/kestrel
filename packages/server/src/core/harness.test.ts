@@ -160,6 +160,9 @@ test("an agent exiting early reports its failed turn to the control plane", asyn
         yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
         yield* harness.stopAll()
+        const settled = yield* store.read
+        expect(settled.runs.find((r) => r.id === run.id)).toMatchObject({ status: "failed" })
+        expect(settled.tasks.find((t) => t.id === task.id)?.status).toBe("failed")
         expect(reports).toEqual([{ failures: [{ tool: "agent:claude", signature: "exited before turn finished: Error: rate limit exceeded for <path>: exit code 1", count: 1 }] }])
       } finally {
         unsubscribe()
@@ -249,8 +252,8 @@ test("a delegated child's reported 'needs input' ends with its run unless a ques
         expect(yield* finish("reported-child", (_, run) => ({ delegation: { ...delegation, runId: run.id } }), false)).toBe("done")
         // A question the user has not answered yet still holds it.
         expect(yield* finish("asking-child", (_, run) => ({ delegation: { ...delegation, runId: run.id } }), true)).toBe("needs_input")
-        // A thread of the user's own keeps the state its agent reported until the user replies.
-        expect(yield* finish("top-level", () => ({}), false)).toBe("needs_input")
+        // `needs_input` without a question is now only a report: the settled run ends the thread normally.
+        expect(yield* finish("top-level", () => ({}), false)).toBe("done")
       } finally {
         yield* harness.stopAll()
       }
@@ -259,6 +262,78 @@ test("a delegated child's reported 'needs input' ends with its run unless a ques
     await rm(root, { recursive: true, force: true })
   }
 }, 30_000)
+
+test("a successful run settles its thread done with the run's own outcome", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-settle-done-"))
+  const cli = join(root, "cli.ts")
+  await writeFile(cli, 'process.stdin.once("data", () => console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Finished." })))')
+  const { config, layer } = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const { task, run } = runningTask("settle-done")
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const finished = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        const state = yield* store.read
+        expect(state.runs.find((r) => r.id === run.id)).toMatchObject({ status: "succeeded", exitCode: 0 })
+        expect(state.runs.find((r) => r.id === run.id)?.endedAt).not.toBeNull()
+        expect(state.tasks.find((t) => t.id === task.id)?.status).toBe("done")
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 12_000)
+
+test("a session line that reaches a run after it settled is not recorded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-late-session-"))
+  const cli = join(root, "cli.ts")
+  // Names its session only when the box talks to it again, then finishes so its stdin-closed turn exits.
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+createInterface({ input: process.stdin }).on("line", () => {
+  console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "late-session" }))
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "late" }))
+})
+`)
+  const { config, layer } = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const { task, run } = runningTask("late-session")
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
+        // The run never starts an agent: settling it first is what the later session line must be checked against.
+        yield* harness.abort(run.id, "test: never started")
+        expect((yield* store.read).runs.find((r) => r.id === run.id)?.status).toBe("failed")
+        yield* harness.steer(run.id, "name the session now")
+        for (let i = 0; i < 100 && (yield* harness.activeRunCount()) > 0; i++) yield* Effect.sleep("50 millis")
+        // The session line was processed while the run was already failed; the record must not exist.
+        yield* store.flush
+        expect((yield* store.read).runSessions.filter((session) => session.runId === run.id)).toEqual([])
+      } finally {
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 12_000)
 
 test("Claude finishes a queued turn after EOF without the process-exit grace killing it", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-queued-turn-"))
