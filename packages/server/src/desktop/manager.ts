@@ -1067,8 +1067,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         const s = sessions.get(taskId)
         if (!s) return
         sessions.delete(taskId)
-        s.state = "stopped"
-        s.error = null
+        applyDesktopEvent(s, { _tag: "stopped" })
         detachEncoder(s)
         Deferred.unsafeDone(s.ready, Effect.fail(new DesktopError({ message: "desktop stopped" })))
         publish(s)
