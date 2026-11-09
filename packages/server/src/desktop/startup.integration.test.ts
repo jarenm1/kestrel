@@ -3,7 +3,8 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
-import { DesktopError, DesktopManager, DesktopManagerLive } from "./manager"
+import type { DesktopStatus } from "@cloudagents/protocol"
+import { DesktopError, DesktopManager, DesktopManagerLive, type DesktopSink } from "./manager"
 import { desktopNamespace, sandboxSettingsOf, stopTaskHolder } from "../sandbox"
 
 /** The sandbox settings of the task namespace holder (level off: a bwrap holder). */
@@ -93,4 +94,66 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a stalled NVENC pr
     process.env.PATH = originalPath
     rmSync(dir, { recursive: true, force: true })
   }
+}, 30_000)
+
+// Real time is the subject here: the encoder's 15 s linger is production timing, so a fake clock would not exercise it.
+test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a watcher sees streaming turn off when the live encoder lingers out", async () => {
+  const taskId = "linger-streaming-test"
+  const program = Effect.gen(function* () {
+    const desktop = yield* DesktopManager
+    const seen: DesktopStatus[] = []
+    const unwatch = yield* desktop.watchStatus((status) => seen.push(status))
+    yield* Effect.gen(function* () {
+      const status = yield* desktop.start(taskId, {
+        ipcNamespace: desktopNamespace(holderSettings, taskId).pipe(
+          Effect.mapError((e) => new DesktopError({ message: e.message })),
+        ),
+        terminal: (display) => Effect.succeed({ file: "xterm", args: [], env: { ...process.env, DISPLAY: display } as Record<string, string>, cwd: process.cwd() }),
+      })
+      expect(status.streaming).toBe(true)
+      const deadline = Date.now() + 40_000
+      while (!seen.some((s) => s.state === "running" && s.streaming === false)) {
+        if (Date.now() > deadline) {
+          throw new Error(`streaming never flipped off: ${JSON.stringify(seen.map((s) => [s.state, s.streaming]))}`)
+        }
+        yield* Effect.sleep(100)
+      }
+    }).pipe(Effect.ensuring(desktop.stopAll()), Effect.ensuring(Effect.sync(() => stopTaskHolder(taskId))))
+    yield* unwatch
+  })
+  await Effect.runPromise(program.pipe(Effect.provide(DesktopManagerLive)))
+}, 45_000)
+
+test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a failed session refuses a viewer instead of parking it", async () => {
+  const taskId = "failed-attach-test"
+  const originalPath = process.env.PATH
+  const restore = Effect.sync(() => {
+    process.env.PATH = originalPath
+    stopTaskHolder(taskId)
+  })
+  const program = Effect.gen(function* () {
+    const desktop = yield* DesktopManager
+    // No desktop tools on PATH: the boot fails and the session stays in the map as `failed`.
+    process.env.PATH = ""
+    const started = yield* Effect.either(
+      desktop.start(taskId, {
+        ipcNamespace: desktopNamespace(holderSettings, taskId).pipe(
+          Effect.mapError((e) => new DesktopError({ message: e.message })),
+        ),
+        terminal: (display) => Effect.succeed({ file: "xterm", args: [], env: { ...process.env, DISPLAY: display } as Record<string, string>, cwd: process.cwd() }),
+      }),
+    )
+    process.env.PATH = originalPath
+    expect(started._tag).toBe("Left")
+
+    const status = yield* desktop.status(taskId)
+    expect(status.state).toBe("failed")
+    expect(status.display).toBeNull()
+    expect(status.streaming).toBe(false)
+
+    const sink: DesktopSink = { baselineOnly: false, onStatus: () => {}, onMedia: () => {}, onAudio: () => {} }
+    const subscribed = yield* Effect.either(desktop.subscribe(taskId, sink))
+    expect(subscribed._tag).toBe("Left")
+  }).pipe(Effect.ensuring(restore))
+  await Effect.runPromise(program.pipe(Effect.provide(DesktopManagerLive)))
 }, 30_000)

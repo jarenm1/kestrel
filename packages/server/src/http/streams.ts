@@ -3,7 +3,7 @@ import { DesktopInput, DesktopRtcClientMessage, type DesktopRtcServerMessage, ty
 import { Config } from "../config"
 import { EventHub } from "../core/events"
 import { CoreService } from "../core/service"
-import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, sessionIceServers } from "../desktop"
+import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, sessionIceServers, viewerConfig, viewerConfigStep } from "../desktop"
 import { TaskStatsService } from "../stats"
 import { ActivityTracker } from "../platform/tracker"
 
@@ -175,11 +175,7 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     }
     // Sent once per running desktop session on this socket, ahead of its status: the viewer holds the ICE servers
     // before it offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
-    let configSent = false
-    // A request that arrives before the first config is answered when the desktop is running, not dropped.
-    let configRequested = false
-    // A stop, a failure or a restart starts a new desktop session, whose ICE config must not be reused.
-    let lastState: DesktopStatus["state"] | null = null
+    let viewer = viewerConfig()
     const sendConfig = async (): Promise<void> => {
       const resolved = await sessionIceServers(config.webrtc, managed, taskId)
       if (socketClosed) return
@@ -205,8 +201,9 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
         }
         const signal = message.right
         if (signal._tag === "rtc.config.request") {
-          if (configSent) enqueue(sendConfig)
-          else configRequested = true
+          const step = viewerConfigStep(viewer, { _tag: "config-request" })
+          viewer = step.config
+          if (step.sendConfig) enqueue(sendConfig)
           return
         }
         yield* Effect.promise(() => rtc.handle(signal))
@@ -219,27 +216,17 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
         return rtc.baselineOnly
       },
       onStatus: (status) => {
-        // Entering running after anything else (a restart's starting, a stop, a failure) is a new session.
-        if (status.state !== "running" || lastState !== "running") configSent = false
-        lastState = status.state
-        if (status.state !== "running") {
-          enqueue(async () => sendStatus(status))
-          return
-        }
-        if (!configSent) {
-          configSent = true
-          configRequested = false
+        // A stop, a failure or a restart starts a new session; a request before its first config is answered by it.
+        const step = viewerConfigStep(viewer, { _tag: "status", state: status.state })
+        viewer = step.config
+        if (step.sendConfig) {
           enqueue(async () => {
             await sendConfig()
-            sendStatus(status)
+            if (step.sendStatus) sendStatus(status)
           })
-          return
+        } else if (step.sendStatus) {
+          enqueue(async () => sendStatus(status))
         }
-        if (configRequested) {
-          configRequested = false
-          enqueue(sendConfig)
-        }
-        enqueue(async () => sendStatus(status))
       },
       onMedia: (unit) => {
         tap.push(unit)

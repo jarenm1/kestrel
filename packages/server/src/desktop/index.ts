@@ -16,3 +16,4 @@ export {
   type SessionIceServers,
 } from "./turn"
 export * from "./rtp"
+export { viewerConfig, viewerConfigStep, type ViewerConfig, type ViewerConfigEvent, type ViewerConfigStep } from "./viewer-config"

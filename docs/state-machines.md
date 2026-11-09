@@ -68,8 +68,8 @@ owner of that file rather than editing it.
 | `host-nest-correctness` | `packages/host/**`, `packages/control/src/nest-*` | host VM record/recovery/volume/GPU reservation; Nest VM, command, claim, wake, enrollment |
 | `control-plane` | `packages/control/src/**` except `nest-*` | sessions, OAuth, pairing, capability tokens, TURN, relay/box sockets, fleet placement, automation, PR delivery, meter, hooks |
 | `server-run-authority` | `packages/server/src/core/{service,harness,state,run-recovery,transcript}.ts` | task, run, ask, recovery arms, delegation, session resume, archive, admission, run entry, checkouts, uploads, quota |
-| `server-desktop-gpu` | `packages/server/src/{desktop,platform,sandbox}/**` | desktop session, encoder, GPU wish/link, WebRTC, RTP, viewer refcount, holders, systemd, audio |
-| `server-tools` | `packages/server/src/{broker,mcp,cliauth,direct,relay,http}/**` | broker grant, MCP session, CLI login/accounts, stream adapters, direct auth (incl. offline), model discovery |
+| `server-desktop-gpu` | `packages/server/src/{desktop,platform,sandbox}/**`, `packages/server/src/http/streams.ts` | desktop session, encoder, GPU wish/link, WebRTC, RTP, viewer refcount, holders, systemd, audio |
+| `server-tools` | `packages/server/src/{broker,mcp,cliauth,direct,relay,http}/**` except `http/streams.ts` | broker grant, MCP session, CLI login/accounts, stream adapters, direct auth (incl. offline), model discovery |
 | `app-sync` | `packages/app/src/**` | live cache, reconnect, snapshot merge, desktop connection, pairing page, token cache, roster, settings queue |
 | `mobile-desktop-clients` | `packages/mobile/src/**`, `packages/desktop/src/**` | mobile session/cache/tokens, Electron handoff and session stores, transcript bridge |
 

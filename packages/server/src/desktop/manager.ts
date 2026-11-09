@@ -647,6 +647,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       if (enc === null) return
       detachEncoder(s)
       if (enc.child) void terminate([enc.child])
+      // Encoder presence changed while `state` did not: watchers must see `streaming: false` (e.g. after the linger).
+      publish(s)
     }
 
     /** Starts the linger countdown once the last viewer has left a live encoder. */
@@ -762,6 +764,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onExit: (reason) => onEncoderExit(s, enc, reason),
       })
       s.encoder = enc
+      // Encoder presence changed; `state` may not have (a viewer woke an idle running desktop).
+      publish(s)
       if (kind === "nvenc") {
         enc.startupTimer = setTimeout(() => {
           if (s.encoder !== enc || enc.initialized || (s.state !== "starting" && s.state !== "running")) return

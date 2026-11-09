@@ -52,6 +52,7 @@ const view = (subscribe: (sink: DesktopSink) => Effect.Effect<Effect.Effect<void
     },
     onText(listener) {
       onText = listener
+      wake()
     },
   }
   const layer = Layer.mergeAll(
@@ -86,6 +87,7 @@ const view = (subscribe: (sink: DesktopSink) => Effect.Effect<Effect.Effect<void
     frames,
     closed,
     waitFor,
+    textHandlerReady: () => onText !== null,
     send: (data: string) => onText?.(data),
     close: () => {
       socket.close()
@@ -113,13 +115,18 @@ describe("desktop viewer stream", () => {
         return Effect.void
       }),
     )
-    await viewer.waitFor(() => sink !== null)
+    await viewer.waitFor(() => sink !== null && viewer.textHandlerReady())
     viewer.send(JSON.stringify({ _tag: "rtc.config.request" }))
     // The listener runs on a forked fiber; let it reach the handler before the status arrives.
     await Promise.resolve()
     sink!.onStatus(running)
     await viewer.waitFor(() => viewer.frames.some((frame) => frame.taskId === "task" && frame.state === "running"))
     expect(viewer.frames.filter((frame) => frame._tag === "rtc.config")).toHaveLength(1)
+
+    // A request while the current config is sent is answered with a fresh one.
+    viewer.send(JSON.stringify({ _tag: "rtc.config.request" }))
+    await viewer.waitFor(() => viewer.frames.filter((frame) => frame._tag === "rtc.config").length === 2)
+    expect(viewer.frames.filter((frame) => frame._tag === "rtc.config")).toHaveLength(2)
     await viewer.close()
   })
 
