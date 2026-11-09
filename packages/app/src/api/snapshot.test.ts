@@ -36,6 +36,16 @@ describe("fetchSnapshot", () => {
     expect(statuses(await merging)).toEqual(["r1:succeeded"])
   })
 
+  test("an entry removed while the snapshot is in flight is not resurrected", async () => {
+    const client = new QueryClient()
+    client.setQueryData(key, [run("r1", "running")])
+    const { promise, resolve } = Promise.withResolvers<Run[]>()
+    const merging = fetchSnapshot(client, key, () => promise)
+    client.setQueryData(key, [])
+    resolve([run("r1", "succeeded")])
+    expect(statuses(await merging)).toEqual([])
+  })
+
   test("entries the snapshot lacks stay, after the snapshot's", async () => {
     const client = new QueryClient()
     client.setQueryData(key, [run("r2", "running")])
