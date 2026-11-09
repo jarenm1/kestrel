@@ -11,17 +11,23 @@ export type PairingPhase =
 
 /**
  * The approval page's phase. Approval wins over whichever code it came from; a code is expired at its `expiresAt`
- * (the control plane's TTL) or as soon as the server answers 404, so the form is never left editable past it.
+ * (the control plane's TTL) or as soon as the server answers 404, and a 409 means it was already approved elsewhere.
  */
 export function pairingPhase(
   pending: PendingPairing | undefined,
   approved: boolean,
   now: number,
   gone = false,
+  conflict = false,
 ): PairingPhase | undefined {
-  if (approved) return { _tag: "approved" }
+  if (approved || conflict) return { _tag: "approved" }
   if (pending === undefined) return undefined
   return gone || Date.parse(pending.expiresAt) <= now ? { _tag: "expired" } : { _tag: "pending", pending }
+}
+
+/** A successful approval belongs to the exact code it was sent for; editing the code must clear the terminal state. */
+export function pairingApproved(approvedCode: string | null, code: string): boolean {
+  return approvedCode !== null && approvedCode === code
 }
 
 /**

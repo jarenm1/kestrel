@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import type { PendingPairing } from "@cloudagents/protocol"
 import { ApiError } from "@/api/errors"
-import { PAIRING_POLL_MS, pairingPhase, pairingPollMs } from "./pairing"
+import { PAIRING_POLL_MS, pairingApproved, pairingPhase, pairingPollMs } from "./pairing"
 
 const EXPIRES = "2026-11-01T00:10:00.000Z"
 const pending: PendingPairing = {
@@ -15,6 +15,13 @@ test("a pending code becomes approved without waiting for its expiry", () => {
   expect(pairingPhase(pending, false, Date.parse(EXPIRES) - 1)?._tag).toBe("pending")
   expect(pairingPhase(pending, true, Date.parse(EXPIRES) - 1)?._tag).toBe("approved")
   expect(pairingPhase(pending, true, Date.parse(EXPIRES) + 1)?._tag).toBe("approved")
+})
+
+test("approval belongs to its code, and a 409 is the terminal approved phase", () => {
+  expect(pairingApproved("ABCD-EFGH", "ABCD-EFGH")).toBe(true)
+  expect(pairingApproved("ABCD-EFGH", "ZZZZ-ZZZZ")).toBe(false)
+  expect(pairingApproved(null, "ABCD-EFGH")).toBe(false)
+  expect(pairingPhase(pending, false, Date.parse(EXPIRES) - 1, false, true)?._tag).toBe("approved")
 })
 
 test("a pending code is expired at expiresAt, so the form cannot stay editable", () => {
