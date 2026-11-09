@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
-import type { Run, Task } from "@cloudagents/protocol"
-import { isTaskAwaitingUser, isTaskWorking } from "./taskStatus"
+import type { Run, Task } from "./src/index"
+import { isTaskAwaitingUser, isTaskWorking } from "./src/task-status"
 
 const task = (status: Task["status"]): Task => ({
   id: "task-1",

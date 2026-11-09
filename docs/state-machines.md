@@ -78,9 +78,9 @@ or the hunk is supplied by the core owner.
 
 ## Wave 2
 
-**Status:** Wave 2 writers are centralized once #373–#377 land. The remaining gaps below are product/architectural
-decisions (session-expiry sweeps, NVENC policy, box-side fire idempotency, client ordering), not unmigrated phase
-writes.
+**Status:** Wave 1 and Wave 2 are merged; their phase writers are centralized. The remaining gaps below are
+product/architectural decisions (session-expiry sweeps, NVENC policy, box-side fire idempotency, client ordering), not
+unmigrated phase writes.
 
 Wave 2 changed call-site behaviour only where a PR named the edge (for example #370 stopped setting `createFailed` on
 a live VM, and #376 changed when the failed-create claim is released). An unhandled illegal edge logs and continues.
@@ -109,8 +109,11 @@ the run and delegation modules sequentially in `server-run-authority`; Nest, des
 on disjoint files. Keep `state.ts`'s task loop before its run loop: `taskPhaseOf` reads `run.status === "running"`, so
 reordering it makes `restartReconcile` a no-op and breaks the restart tests.
 
-Wave 3 remains client convergence: one reconnect owner, one desktop-cache writer, one working predicate, duplicate
-merge helpers deleted. It starts after these modules land.
+**Wave 3 status:** client convergence is complete. `applyDesktopStatus`, `mergeSnapshot` (including the removed-id
+rule) and `isTaskWorking`/`isTaskAwaitingUser` live in `packages/protocol`; the web and phone clients use them, the
+mobile duplicate desktop-cache module and local merge policy are gone, and the app keeps only its viewer authority.
+The desktop connection still has one retry owner. The remaining ordering gap is that `DesktopStatus` carries no wire
+version, so two events or two frames are ordered by arrival.
 
 ## Contract machines
 
