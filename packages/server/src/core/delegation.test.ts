@@ -12,7 +12,7 @@ import { GitHub } from "../github/api"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { EventHubLive } from "./events"
 import { CoreLive, CoreService, type CoreShape } from "./service"
-import { StateLive, StateStore, type StoreShape } from "./state"
+import { StateLive, StateStore, type StoreShape, type StoreState } from "./state"
 import { WorkspaceService } from "./workspace"
 import { BOX_USER_HEADER } from "@cloudagents/protocol"
 import { makeWebHandler } from "../http/router"
@@ -227,6 +227,24 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(afterCancel.runs.find((r) => r.id === cancelParent.delegation!.runId)?.status).toBe("cancelled")
       expect(afterCancel.runs.find((r) => r.id === cancelChild.delegation!.runId)?.status).toBe("cancelled")
       expect(afterCancel.tasks.find((t) => t.id === cancelChild.id)?.delegation?.cancelledAt).toBeDefined()
+      // Let the cancelled result settle before the new parent run repeats the request.
+      yield* Effect.sleep("2500 millis")
+      const resultMessages = (state: Readonly<StoreState>) => state.messages.filter((m) => m.id === `delegation-result:${cancelParent.id}`).length
+      const deliveredBeforeRelink = resultMessages(yield* store.read)
+      yield* store.update((s) => {
+        s.runs.push({ id: "parent-run-2", taskId: "parent", prompt: "again", status: "running", startedAt: now, endedAt: null, exitCode: null })
+        return Either.right(undefined)
+      })
+      const relinked = yield* core.delegate("parent", "parent-run-2", { ...input, requestId: "cancel-parent" })
+      expect(relinked.id).toBe(cancelParent.id)
+      const afterRelink = yield* store.read
+      const relinkedTask = afterRelink.tasks.find((t) => t.id === relinked.id)!
+      expect(relinkedTask.delegation?.cancelledAt).toBeDefined()
+      expect(relinkedTask.delegation?.parentRunId).toBe("parent-run-2")
+      expect(afterRelink.runs.find((r) => r.id === cancelParent.delegation!.runId)?.status).toBe("cancelled")
+      expect((yield* core.delegatedStatus("parent", relinked.id)).task.delegation?.cancelledAt).toBeDefined()
+      yield* Effect.sleep("2500 millis")
+      expect(resultMessages(yield* store.read)).toBe(deliveredBeforeRelink)
       // Questions survive reconciliation even though their runs are no longer live.
       const cancelQuestion = yield* core.delegate("parent", "parent-run", { ...input, requestId: "cancel-question" })
       const nestedQuestion = yield* core.delegate(cancelQuestion.id, cancelQuestion.delegation!.runId!, { ...input, requestId: "nested-question" })
@@ -266,7 +284,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(recovered?.runId).not.toBe("parent-run")
       const disk = yield* Effect.promise(() => readFile(config.stateFile, "utf8"))
       expect(disk).toContain('"requestId":"retry-key"')
-    })), 20_000)
+    })), 30_000)
 
 test("an acknowledgement does not let an ancestor's result overtake a descendant's continuation", () => withCore(({ store, core }) =>
   Effect.gen(function* () {

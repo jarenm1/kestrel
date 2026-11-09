@@ -233,8 +233,9 @@ the terminal flags deliberately.
 before the 2 s sweep no longer suppresses the result; `hasPendingDelegations` also waits for delivery, including a
 settled continuation.
 
-**Remaining gaps:** re-dispatch repoints `parentRunId` but keeps `cancelledAt`/`resultAcknowledged`; delivery is still
-gated by derived predicates across the run, its children and the continuation.
+**Remaining gaps:** delivery is still gated by derived predicates across the run, its children and the continuation.
+Run reservations, continuations and a re-link now go through the delegation writer; a re-link keeps cancellation and
+clears only the old parent's acknowledgement.
 
 ### 6. Auth and capability tokens
 

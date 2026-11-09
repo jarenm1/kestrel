@@ -1825,7 +1825,7 @@ export const CoreLive = Layer.effect(
             s.runs.push(run)
             s.messages.push(message)
             if (task.delegation !== undefined && task.delegation.runId === undefined) {
-              task.delegation = { ...task.delegation, runId: run.id }
+              applyDelegationEvent(task, { _tag: "dispatched", runId: run.id })
             } else if (task.delegation?.runId !== undefined && ask !== null &&
               task.delegation.cancelledAt === undefined && !task.delegation.resultAcknowledged &&
               delegationResultRun(s, taskId, task.delegation.runId) === ask.runId &&
@@ -1833,7 +1833,7 @@ export const CoreLive = Layer.effect(
               !s.messages.some((m) => m.id === `delegation-result:${taskId}`)) {
               // Answering a question preserved across restart continues the delegated
               // work, rather than leaving its result attached to the interrupted run.
-              task.delegation = { ...task.delegation, runId: run.id }
+              applyDelegationEvent(task, { _tag: "continued", runId: run.id })
             } else if (task.delegation?.runId !== undefined && task.delegation.cancelledAt === undefined &&
               !task.delegation.resultAcknowledged && supersededArm !== undefined &&
               supersededArm.runId === task.delegation.runId &&
@@ -1841,7 +1841,7 @@ export const CoreLive = Layer.effect(
               // The delegated run stopped on a usage limit and its result has not gone up yet (held for the resume, or
               // queued while the parent waits on its own limit). Whatever continues it now, the resume at the reset or
               // the user handing the work to another model, carries the delegation, auto-resume on or off.
-              task.delegation = { ...task.delegation, runId: run.id }
+              applyDelegationEvent(task, { _tag: "continued", runId: run.id })
             }
             const asked =
               question === null
@@ -2138,7 +2138,7 @@ export const CoreLive = Layer.effect(
           // and cancelling it reaches the child, instead of both staying on a run that already ended.
           const relinked = yield* store.update((s) => {
             const child = s.tasks.find((t) => t.id === existing.id)!
-            child.delegation = { ...child.delegation!, parentRunId }
+            applyDelegationEvent(child, { _tag: "relinked", parentRunId })
             child.updatedAt = nowIso()
             return Either.right({ ...child })
           })
