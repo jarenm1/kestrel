@@ -76,7 +76,7 @@ test("a failed create marks a provisioning box and releases a claim with no VM",
   expect(result(pending())).toEqual({
     _tag: "illegal",
     reason: "create-failed-on-live-vm",
-    phase: pending(),
+    phase: { ...pending(), pendingId: null, pendingKind: null, pendingCommand: null, pendingDeadline: null },
   })
 })
 
@@ -113,9 +113,9 @@ test("dispatch records the command and clears the wake flag", () => {
   ).toEqual({ _tag: "illegal", reason: "already-pending", phase: pending() })
 })
 
-test("a create deadline releases the claim; a resume deadline asks for a wake", () => {
+test("a create deadline marks failed but keeps the claim; a resume deadline asks for a wake", () => {
   expect(transitionNestBox(pending(), { _tag: "deadlineElapsed" })).toMatchObject({
-    phase: { pendingId: null, createFailed: true, hostId: null },
+    phase: { pendingId: null, createFailed: true, hostId: "host-a" },
   })
   expect(transitionNestBox(pending({ state: "suspended", pendingKind: "resume" }), { _tag: "deadlineElapsed" })).toMatchObject({
     phase: { pendingId: null, wakeWanted: true },

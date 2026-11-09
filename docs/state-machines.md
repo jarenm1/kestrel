@@ -170,8 +170,8 @@ rolled back from `.previous` on recovery; a stale freeze is cleared on recovery;
 its token.
 
 **Wave 2 status:** `applyNestBoxEvent` owns placement, the command/pending marker, `wakeWanted`, deadlines, result
-cleanup and the failed-create claim. A create refused, failed with no VM, or timed out releases `hostId`; a VM report
-still provisioning keeps it.
+cleanup and the failed-create claim. A create refused or failed with no VM releases `hostId`; a timeout keeps the claim
+so a late running report still lands, and a VM report still provisioning also keeps it.
 
 **Remaining gaps:** `vm()` accepts an edge outside the table as log-and-continue; a parked box with a resume claim
 cannot move after its host is lost (the claim release is deliberately deferred until the backup can be proven clean).

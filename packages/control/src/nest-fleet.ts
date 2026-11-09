@@ -32,7 +32,7 @@ import {
   type PlacementCandidate,
   withPlannedBoots,
 } from "./nest-control"
-import { applyNestBoxEvent } from "./nest-transition"
+import { applyNestBoxEvent, nestBoxPhaseOf, transitionNestBox } from "./nest-transition"
 import {
   deleteNestBox,
   insertNestBox,
@@ -501,18 +501,21 @@ export class NestFleet {
   private dispatch(row: NestBoxRow, command: NestHostCommand): boolean {
     if (row.hostId === null) return false
     const commandId = crypto.randomUUID()
-    if (!this.link.send(row.hostId, { _tag: "command", commandId, command })) return false
     const timeout = commandTimeoutMs(command._tag)
-    const transition = applyNestBoxEvent(row, {
-      _tag: "commandDispatched",
+    const event = {
+      _tag: "commandDispatched" as const,
       commandId,
       command: storedFormOf(command),
       deadline: timeout === null ? null : this.clock() + timeout,
-    })
-    if (transition._tag === "illegal") {
-      console.warn(`nest: ${transition.reason} dispatch for ${row.boxId}`)
+    }
+    // Check legality before the host sees the command; an illegal dispatch must never run.
+    const check = transitionNestBox(nestBoxPhaseOf(row), event)
+    if (check._tag === "illegal") {
+      console.warn(`nest: ${check.reason} dispatch for ${row.boxId}`)
       return false
     }
+    if (!this.link.send(row.hostId, { _tag: "command", commandId, command })) return false
+    applyNestBoxEvent(row, event)
     saveNestBox(this.sql, row)
     return true
   }

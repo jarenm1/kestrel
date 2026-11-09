@@ -158,9 +158,14 @@ export const transitionNestBox = (phase: NestBoxPhase, event: NestBoxEvent): Nes
       return next(phase, event.kind === "resume" ? { wakeWanted: true } : {})
     case "commandResult": {
       const kind = phase.pendingKind
-      if (phase.pendingId === null || kind === null) return { _tag: "illegal", reason: "not-pending", phase }
+      // A consumed result always clears its marker, even when the edge is illegal; otherwise a live VM keeps the box
+      // IN_FLIGHT until the deadline, and a later deadline can orphan it.
+      if (phase.pendingId === null) return { _tag: "illegal", reason: "not-pending", phase }
+      if (kind === null) {
+        return { _tag: "illegal", reason: "not-pending", phase: { ...phase, ...cleared(phase) } }
+      }
       if (kind === "create" && !event.owed && phase.state !== "provisioning") {
-        return { _tag: "illegal", reason: "create-failed-on-live-vm", phase }
+        return { _tag: "illegal", reason: "create-failed-on-live-vm", phase: { ...phase, ...cleared(phase) } }
       }
       const createFailedNow = kind === "create" && !event.owed
       return next(phase, {
@@ -173,9 +178,13 @@ export const transitionNestBox = (phase: NestBoxPhase, event: NestBoxEvent): Nes
     }
     case "deadlineElapsed": {
       const kind = phase.pendingKind
-      if (phase.pendingId === null || kind === null) return { _tag: "illegal", reason: "not-pending", phase }
+      if (phase.pendingId === null) return { _tag: "illegal", reason: "not-pending", phase }
+      if (kind === null) {
+        return { _tag: "illegal", reason: "not-pending", phase: { ...phase, ...cleared(phase) } }
+      }
       if (kind === "create") {
-        return next(phase, { ...cleared(phase), createFailed: true, hostId: null })
+        // A timeout does not prove the host made no VM: a late running report from the same host must still land.
+        return next(phase, { ...cleared(phase), createFailed: true })
       }
       if (kind === "resume") return next(phase, { ...cleared(phase), wakeWanted: true })
       return next(phase, {
