@@ -70,9 +70,9 @@ const BAND_FADE = [1, 0.84, 0.5, 0.16, 0] as const
 /**
  * Acrylic behind the dock: one translucent, blurred layer under the dock that carries on a short band above it, fading
  * out smoothly over the band so the thread blurs and darkens toward the dock with no visible edge. One layer on purpose:
- * stacked layers of different radii each draw a line where they meet. `tall` raises the band over the working indicator
- * while a turn runs. A sibling of the dock's content, never a filter on the dock: a filtered ancestor would keep the
- * composer's own blur from seeing the thread.
+ * stacked layers of different radii each draw a line where they meet, and the composer on top is only tinted, not
+ * blurred again. `tall` raises the band over the working indicator while a turn runs. A sibling of the dock's content,
+ * not a filter on the dock: the fade's mask would mask the composer too.
  */
 function DockBackdrop({ tall }: { tall: boolean }) {
   const band = tall ? "2.5rem" : "1.25rem"
