@@ -64,35 +64,27 @@ function WorkingIndicator({ run }: { run: Run }) {
   )
 }
 
-/** Blur radii (px) of the layers in the dock's fade band, weakest at its top edge, strongest against the dock. */
-const BAND_BLURS = [1, 2, 4, 8, 16] as const
-const BAND_STEP = 100 / (BAND_BLURS.length + 1)
+/** Opacity of the dock's acrylic across the band above it, from the dock's edge up: a smoothstep, so neither end shows. */
+const BAND_FADE = [1, 0.84, 0.5, 0.16, 0] as const
 
 /**
- * Acrylic behind the dock: under the dock itself a translucent, strongly blurred fill, and above it a band where the
- * thread blurs and darkens progressively toward the dock. One `backdrop-filter` has a single radius and so ends in a
- * visible edge; instead each layer is masked to an overlapping slice of the band, so the strength ramps up smoothly.
- * `tall` raises the band over the working indicator while a turn runs. Siblings of the dock's content, never a filter
- * on the dock: a filtered ancestor would keep the composer's own blur from seeing the thread.
+ * Acrylic behind the dock: one translucent, blurred layer under the dock that carries on a short band above it, fading
+ * out smoothly over the band so the thread blurs and darkens toward the dock with no visible edge. One layer on purpose:
+ * stacked layers of different radii each draw a line where they meet. `tall` raises the band over the working indicator
+ * while a turn runs. A sibling of the dock's content, never a filter on the dock: a filtered ancestor would keep the
+ * composer's own blur from seeing the thread.
  */
 function DockBackdrop({ tall }: { tall: boolean }) {
+  const band = tall ? "2.5rem" : "1.25rem"
+  const stops = BAND_FADE.map(
+    (alpha, i) => `rgb(0 0 0 / ${alpha}) calc(100% - ${band} * ${1 - i / (BAND_FADE.length - 1)})`,
+  )
   return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
-      <div className="absolute inset-0 bg-card/70 backdrop-blur-lg" />
-      <div className={cn("absolute inset-x-0 bottom-full", tall ? "h-10" : "h-5")}>
-        {BAND_BLURS.map((px, i) => (
-          <div
-            key={px}
-            className="absolute inset-0"
-            style={{
-              backdropFilter: `blur(${px}px)`,
-              maskImage: `linear-gradient(to bottom, transparent ${i * BAND_STEP}%, black ${(i + 1) * BAND_STEP}%, black ${(i + 2) * BAND_STEP}%, transparent ${(i + 3) * BAND_STEP}%)`,
-            }}
-          />
-        ))}
-        <div className="absolute inset-0 bg-linear-to-t from-card/70 to-transparent" />
-      </div>
-    </div>
+    <div
+      aria-hidden
+      className="pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/70 backdrop-blur-md"
+      style={{ top: `-${band}`, maskImage: `linear-gradient(to top, ${stops.join(", ")})` }}
+    />
   )
 }
 
