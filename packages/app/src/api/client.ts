@@ -27,6 +27,7 @@ import {
   DesktopStatus,
   DiffResponse,
   type FileRoot,
+  type ForkTaskBody,
   FilesResponse,
   MAX_RELAY_RESPONSE_BYTES,
   GithubRepo,
@@ -864,6 +865,13 @@ export const api = {
   },
   archiveTask: (taskId: string) => onTask(taskId, Task, "POST", Paths.taskArchive(taskId)),
   unarchiveTask: (taskId: string) => onTask(taskId, Task, "DELETE", Paths.taskArchive(taskId)),
+  /** A new thread on the same box with this thread's conversation up to and including agent reply `messageId`. */
+  forkTask: async (taskId: string, messageId: string): Promise<Task> => {
+    const target = await taskTarget(taskId)
+    const task = await run(boxCall(target, Task, "POST", Paths.taskFork(taskId), { messageId } satisfies ForkTaskBody))
+    taskBoxes.set(task.id, boxKeyOf(target))
+    return task
+  },
   /** Deletes the thread for good: its history, checkouts and files. */
   deleteTask: async (taskId: string): Promise<void> => {
     await onTask(taskId, Schema.Unknown, "DELETE", Paths.task(taskId))

@@ -2,7 +2,8 @@ import { useMemo, useState, type MouseEvent, type ReactNode } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { TranscriptHostProvider, type FileLink, type TranscriptHost } from "@cloudagents/ui/transcript/host"
-import { queries } from "@/api/queries"
+import { api } from "@/api/client"
+import { queries, storeTask } from "@/api/queries"
 import { threadPath } from "@/routes"
 
 /**
@@ -39,9 +40,19 @@ function useDesktopFileLink(taskId: string, path: string): FileLink {
 /** The shared transcript's view of the desktop app: the query cache for file URLs, the router for threads. */
 export function DesktopTranscriptHost({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const host = useMemo<TranscriptHost>(
-    () => ({ useFileLink: useDesktopFileLink, openExternal: undefined, openThread: (id) => navigate(threadPath(id)) }),
-    [navigate],
+    () => ({
+      useFileLink: useDesktopFileLink,
+      openExternal: undefined,
+      openThread: (id) => navigate(threadPath(id)),
+      forkThread: async (taskId, messageId) => {
+        const fork = await api.forkTask(taskId, messageId)
+        storeTask(queryClient, fork)
+        navigate(threadPath(fork.id))
+      },
+    }),
+    [navigate, queryClient],
   )
   return <TranscriptHostProvider value={host}>{children}</TranscriptHostProvider>
 }

@@ -21,6 +21,11 @@ export interface TranscriptHost {
   readonly openExternal: ((url: string) => void) | undefined
   /** Opens another of the user's threads in the app. */
   readonly openThread: (taskId: string) => void
+  /**
+   * Forks the thread at agent reply `messageId` into a new thread and opens it; rejects when the fork failed.
+   * Undefined: the transcript offers no fork.
+   */
+  readonly forkThread: ((taskId: string, messageId: string) => Promise<void>) | undefined
 }
 
 const UNRESOLVED: FileLink = { url: undefined, onError: () => {}, onOpen: () => {} }
@@ -29,6 +34,7 @@ const TranscriptHostContext = createContext<TranscriptHost>({
   useFileLink: () => UNRESOLVED,
   openExternal: undefined,
   openThread: () => {},
+  forkThread: undefined,
 })
 
 export const TranscriptHostProvider = TranscriptHostContext.Provider

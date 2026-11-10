@@ -20,6 +20,7 @@ import {
   DesktopStatus,
   DiffResponse,
   FileToken,
+  type ForkTaskBody,
   GithubRepo,
   Health,
   HarnessCommands,
@@ -148,6 +149,8 @@ export interface ApiClient {
   getTask(taskId: string): Promise<Task>;
   archiveTask(taskId: string): Promise<Task>;
   unarchiveTask(taskId: string): Promise<Task>;
+  /** A new thread with this thread's conversation up to and including agent reply `messageId`. */
+  forkTask(taskId: string, messageId: string): Promise<Task>;
   listMessages(taskId: string): Promise<readonly Message[]>;
   sendMessage(taskId: string, body: SendMessageBody): Promise<SendMessageResponse>;
   listRuns(taskId: string): Promise<readonly Run[]>;
@@ -432,6 +435,7 @@ export function createApiClient(
     getTask: (taskId) => boxRequest(Task, "GET", Paths.task(taskId)),
     archiveTask: (taskId) => boxRequest(Task, "POST", Paths.taskArchive(taskId)),
     unarchiveTask: (taskId) => boxRequest(Task, "DELETE", Paths.taskArchive(taskId)),
+    forkTask: (taskId, messageId) => boxRequest(Task, "POST", Paths.taskFork(taskId), { messageId } satisfies ForkTaskBody),
     listMessages: (taskId) => boxRequest(Schema.Array(Message), "GET", Paths.taskMessages(taskId)),
     sendMessage: (taskId, body) => boxRequest(SendMessageResponse, "POST", Paths.taskMessages(taskId), body),
     listRuns: (taskId) => boxRequest(Schema.Array(Run), "GET", Paths.taskRuns(taskId)),

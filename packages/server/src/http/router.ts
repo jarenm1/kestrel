@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_API, BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, CliSelectAccountBody, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
+import { BOX_API, BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, CliSelectAccountBody, Conflict, CreateTaskBody, ForkTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
 import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
@@ -408,6 +408,12 @@ export const makeRouter = (
     HttpRouter.del(
       "/api/tasks/:id/archive",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.unarchiveTask(user, id)))),
+    ),
+    HttpRouter.post(
+      "/api/tasks/:id/fork",
+      Effect.flatMap(pathId, (id) =>
+        respond(signedIn((user) => Effect.flatMap(jsonBody(ForkTaskBody), (body) => core.forkTask(user, id, body.messageId)))),
+      ),
     ),
     HttpRouter.get(
       "/api/tasks/:id/messages",

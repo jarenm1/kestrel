@@ -3,7 +3,7 @@ import { Linking, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus, type UsageLimitResume } from "@cloudagents/protocol";
 import type { ActiveBox } from "@/api/client";
-import { createQueries, boxKeys, upsert, type ThreadCall } from "@/api/queries";
+import { createQueries, boxKeys, storeTask, upsert, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
@@ -161,6 +161,13 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
     onSuccess: (run, { api, taskId }) =>
       queryClient.setQueryData<Run[]>(boxKeys(api.boxScope).runs(taskId), (list) => upsert(list, run)),
   });
+  const fork = useMutation({
+    mutationFn: ({ api, taskId, messageId }: ThreadCall & { messageId: string }) => api.forkTask(taskId, messageId),
+    onSuccess: (forked, { api }) => {
+      storeTask(queryClient, forked, api.boxScope);
+      nav.push({ name: "thread", taskId: forked.id, box });
+    },
+  });
   const latestRun = sortedRuns.at(-1);
   const activeRun = latestRun?.status === "running" ? latestRun : undefined;
 
@@ -179,11 +186,13 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
           onFileError={async () => void files.refetch()}
           openExternal={async (url) => void Linking.openURL(url)}
           openThread={async (id) => nav.push({ name: "thread", taskId: id, box })}
+          forkThread={async (id, messageId) => fork.mutate({ api, taskId: id, messageId })}
           onSwipe={async (direction) => onSwipe(direction)}
           dom={{ style: styles.transcript, containerStyle: styles.flex }}
         />
       )}
       <UsageLimitNotice task={task.data} />
+      {fork.error ? <Alert>Could not fork the thread: {errorText(fork.error)}</Alert> : null}
       {activeRun ? <WorkingIndicator run={activeRun} /> : null}
       {archivedTask ? (
         <ArchivedNotice task={archivedTask} />

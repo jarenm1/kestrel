@@ -804,6 +804,10 @@ export const CreateTaskBody = Schema.Struct({
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
 
+/** Fork a thread at one of its agent replies: the new thread starts with the conversation up to and including it. */
+export const ForkTaskBody = Schema.Struct({ messageId: Schema.String })
+export type ForkTaskBody = typeof ForkTaskBody.Type
+
 /** Whether the thread's armed usage-limit auto-resume should run at the provider's reset. */
 export const SetUsageLimitAutoResumeBody = Schema.Struct({ autoResume: Schema.Boolean })
 export type SetUsageLimitAutoResumeBody = typeof SetUsageLimitAutoResumeBody.Type
@@ -1119,6 +1123,8 @@ export const Paths = {
   task: (id: string) => `/api/tasks/${id}`,
   /** POST archives the thread (tears down its desktop and sandbox, keeps history); DELETE unarchives it. Both return the Task. */
   taskArchive: (id: string) => `/api/tasks/${id}/archive`,
+  /** POST `ForkTaskBody` -> Task: a new thread with this thread's messages up to the named agent reply. */
+  taskFork: (id: string) => `/api/tasks/${id}/fork`,
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
   /**
    * POST `SetPullRequestWatchingBody`: the control plane dropped this watch (the pull request closed). Clears the

@@ -9,6 +9,7 @@ import { cn } from "../cn"
 import { externalClick, isPlainClick, threadHref, useTranscriptHost } from "./host"
 import { Markdown } from "./Markdown"
 import { MessageAttachments } from "./MessageAttachments"
+import { ResponseActions } from "./ResponseActions"
 import { RunTranscript } from "./RunTranscript"
 import { RunSummary } from "./RunSummary"
 import { formatMessageTime } from "./time"
@@ -20,9 +21,17 @@ const STICK_PX = 80
 
 const NO_ITEMS: readonly AgentItem[] = []
 
-/** Under an agent reply: the time it was sent. */
-function MessageTime({ iso }: { iso: string }) {
-  return <div className="mt-1.5 text-[11px] text-muted-foreground"><time dateTime={iso}>{formatMessageTime(iso)}</time></div>
+/** Wraps one agent response (its run's output and footer) so hovering anywhere in it reveals its actions. */
+const RESPONSE_CLASS = "group/response flex flex-col gap-5"
+
+/** Under an agent reply: the time it was sent, and the reply's actions once its run is over. */
+function MessageTime({ message, actions }: { message: Message; actions: boolean }) {
+  return (
+    <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+      <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
+      {actions && <ResponseActions message={message} className="-my-1" />}
+    </div>
+  )
 }
 
 /** Sent messages preserve plain text while displaying both reference and model tokens as their composed chips. */
@@ -99,12 +108,15 @@ function ThreadItem({
   message,
   hideText = false,
   hideTime = false,
+  actions = false,
   children,
 }: {
   message: Message
   /** The run transcript already renders this text; only what hangs off the message stays. */
   hideText?: boolean
   hideTime?: boolean
+  /** Offer copy and fork next to the time of an agent reply. */
+  actions?: boolean
   children?: ReactNode
 }) {
   switch (message.role) {
@@ -130,10 +142,10 @@ function ThreadItem({
       // Keep the message clock unless the run transcript already supplies one.
       if (hideText && hideTime && (children === undefined || children === null)) return null
       return (
-        <div className={ENTER_CLASS}>
+        <div className={cn("group/response", ENTER_CLASS)}>
           {!hideText && <Markdown text={message.text} />}
           {children}
-          {!hideTime && <MessageTime iso={message.createdAt} />}
+          {!hideTime && <MessageTime message={message} actions={actions} />}
         </div>
       )
     }
@@ -173,6 +185,8 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
   const atEnd = useRef(true)
 
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const messagesById = new Map(sortedMessages.map((m) => [m.id, m] as const))
+  const runsById = new Map(runs.map((run) => [run.id, run] as const))
   // After each user message a run took comes what the run showed until its next one, so a message that steered the run
   // (or waited in its inbox) reads at the point of the transcript where it was sent.
   const segments = transcriptSegments(sortedMessages)
@@ -229,34 +243,45 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
             m.role === "agent" && m.options === undefined && m.runId !== null && (runItems[m.runId]?.length ?? 0) > 0
           const attachments = pending ? [] : (m.attachments ?? [])
           const summaryRun = summaries.get(m.id)
+          const ownRun = m.runId === null ? undefined : runsById.get(m.runId)
+          const item = (
+            <ThreadItem
+              message={m}
+              hideText={duplicate || pending}
+              hideTime={pending || summaryRun !== undefined || (duplicate && ownRun !== undefined)}
+              actions={ownRun?.status !== "running"}
+            >
+              {attachments.length > 0 ? (
+                <MessageAttachments
+                  taskId={taskId}
+                  attachments={attachments}
+                  className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
+                />
+              ) : null}
+            </ThreadItem>
+          )
+          const transcript = segment === undefined ? null : (
+            <RunTranscript
+              taskId={taskId}
+              runId={segment.runId}
+              items={runItems[segment.runId] ?? NO_ITEMS}
+              running={runs.some((run) => run.id === segment.runId && run.status === "running")}
+              from={segment.from}
+              to={segment.to}
+            />
+          )
+          // The run's footer, with the actions of its last reply; nothing while it runs.
+          const reply = summaryRun === undefined ? undefined : messagesById.get(lastReplies.get(summaryRun.id) ?? "")
+          const footer = summaryRun !== undefined && summaryRun.status !== "running" && (
+            <div className="flex items-start gap-2">
+              <RunSummary run={summaryRun} items={runItems[summaryRun.id] ?? NO_ITEMS} />
+              {reply !== undefined && <ResponseActions message={reply} className="-my-1" />}
+            </div>
+          )
           return (
             <Fragment key={m.id}>
-              <ThreadItem
-                message={m}
-                hideText={duplicate || pending}
-                hideTime={pending || summaryRun !== undefined || (duplicate && runs.some((run) => run.id === m.runId))}
-              >
-                {attachments.length > 0 ? (
-                  <MessageAttachments
-                    taskId={taskId}
-                    attachments={attachments}
-                    className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
-                  />
-                ) : null}
-              </ThreadItem>
-              {segment !== undefined && (
-                <>
-                  <RunTranscript
-                    taskId={taskId}
-                    runId={segment.runId}
-                    items={runItems[segment.runId] ?? NO_ITEMS}
-                    running={runs.some((run) => run.id === segment.runId && run.status === "running")}
-                    from={segment.from}
-                    to={segment.to}
-                  />
-                </>
-              )}
-              {summaryRun && <RunSummary run={summaryRun} items={runItems[summaryRun.id] ?? NO_ITEMS} />}
+              {footer && transcript === null ? <div className={RESPONSE_CLASS}>{item}{footer}</div> : item}
+              {transcript !== null && (footer ? <div className={RESPONSE_CLASS}>{transcript}{footer}</div> : transcript)}
             </Fragment>
           )
         })}

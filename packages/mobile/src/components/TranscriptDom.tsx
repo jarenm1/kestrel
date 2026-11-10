@@ -35,6 +35,8 @@ export interface TranscriptDomProps {
   /** Opens a URL in the system browser (native only; phone web follows the anchor). */
   openExternal: (url: string) => Promise<void>
   openThread: (taskId: string) => Promise<void>
+  /** Forks the thread at an agent reply and opens the fork; failures are the native side's to show. */
+  forkThread: (taskId: string, messageId: string) => Promise<void>
   /**
    * A horizontal swipe finished over the transcript. Native only: the WebView takes the touch, so the screen's own
    * swipe gestures never see it. On phone web the transcript is in the page, and those gestures see it directly.
@@ -55,6 +57,7 @@ export default function TranscriptDom({
   onFileError,
   openExternal,
   openThread,
+  forkThread,
   onSwipe,
 }: TranscriptDomProps) {
   const [state, setState] = useState<{ epoch: number; seq: number; data: TranscriptData }>(() => ({
@@ -64,8 +67,8 @@ export default function TranscriptDom({
   }))
   const latest = useRef(state)
   latest.current = state
-  const actions = useRef({ onResync, onFileError, openExternal, openThread, onSwipe })
-  actions.current = { onResync, onFileError, openExternal, openThread, onSwipe }
+  const actions = useRef({ onResync, onFileError, openExternal, openThread, forkThread, onSwipe })
+  actions.current = { onResync, onFileError, openExternal, openThread, forkThread, onSwipe }
   const swipe = useRef<SwipeTrack | null>(null)
 
   // A new epoch replaces everything, including patches applied on top of the previous one.
@@ -117,6 +120,7 @@ export default function TranscriptDom({
       },
       openExternal: IS_DOM ? (url) => void actions.current.openExternal(url) : undefined,
       openThread: (taskId) => void actions.current.openThread(taskId),
+      forkThread: (taskId, messageId) => actions.current.forkThread(taskId, messageId),
     }),
     [files],
   )

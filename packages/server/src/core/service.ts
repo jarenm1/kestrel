@@ -343,6 +343,15 @@ export interface CoreShape {
     delegation?: Delegation,
     spawnedByTaskId?: string,
   ) => Effect.Effect<Task, BadRequest | Conflict | NotFound | InternalError>
+  /**
+   * A new thread with `taskId`'s conversation up to and including its agent reply `messageId`. Runs, their items and
+   * the workspace stay behind: the fork's first run starts a fresh session with the copied conversation as context.
+   */
+  readonly forkTask: (
+    user: string,
+    taskId: string,
+    messageId: string,
+  ) => Effect.Effect<Task, BadRequest | Conflict | NotFound | InternalError>
   readonly getTask: (user: string, id: string) => Effect.Effect<Task, NotFound>
   /**
    * The commands the thread's next message can run, discovered from the authenticated harness in the thread
@@ -1574,6 +1583,54 @@ export const CoreLive = Layer.effect(
         return yield* requireTask(id)
       })
 
+    const forkTask: CoreShape["forkTask"] = (user, taskId, messageId) =>
+      Effect.gen(function* () {
+        const source = yield* ownedTask(user, taskId)
+        // Store order is the order the thread's runs read their history in (see `formatHandoff`).
+        const history = (yield* store.read).messages.filter((m) => m.taskId === taskId)
+        const end = history.findIndex((m) => m.id === messageId)
+        if (end === -1 || history[end]!.role !== "agent") {
+          return yield* Effect.fail(new BadRequest({ message: `message ${messageId} is not an agent reply of this thread` }))
+        }
+        // The workspace is not copied: the fork's agent is pointed at the source's repository and checks it out itself.
+        const repo = source.pickedRepo ?? source.checkouts[0]?.repo
+        const fork = yield* createTask(user, { title: `${source.title} fork`, ...(repo === undefined ? {} : { pickedRepo: repo }) })
+        // Attachment files belong to one thread (deleting it removes them), so the fork gets its own copies. Run ids,
+        // question options and transcript positions point into the source's runs and are dropped.
+        const files: { from: string; to: string }[] = []
+        const copied = history.slice(0, end + 1).map((m): Message => {
+          const attachments = (m.attachments ?? []).map((a) => {
+            const id = newId()
+            files.push({ from: a.id, to: id })
+            return { ...a, id }
+          })
+          return {
+            id: newId(),
+            taskId: fork.id,
+            role: m.role,
+            text: m.text,
+            runId: null,
+            createdAt: m.createdAt,
+            ...(attachments.length === 0 ? {} : { attachments }),
+            ...(m.fromThread === undefined ? {} : { fromThread: m.fromThread }),
+          }
+        })
+        const marker: Message = { id: newId(), taskId: fork.id, role: "system", text: `Forked from “${source.title}”`, runId: null, createdAt: nowIso() }
+        yield* Effect.gen(function* () {
+          yield* store.update((s): Either.Either<void, never> => {
+            s.messages.push(...copied, marker)
+            return Either.right(undefined)
+          })
+          yield* Effect.forEach(files, ({ from, to }) =>
+            Effect.tryPromise({
+              try: () => copyFile(join(config.attachmentsDir, from), join(config.attachmentsDir, to)),
+              catch: (e) => new InternalError({ message: `copy attachment ${from}: ${String(e)}` }),
+            }),
+          { discard: true })
+        }).pipe(Effect.tapError(() => deleteTask(fork.id).pipe(Effect.ignore)))
+        return fork
+      })
+
     /**
      * The text an agent reads for a message: the user's words with their uploads, or another agent's, framed as such.
      * Delegation mail is framed by what it is: an assignment whose result is delivered automatically, or an automatic
@@ -2587,6 +2644,7 @@ export const CoreLive = Layer.effect(
         ),
 
       createTask,
+      forkTask,
 
       delegate,
       delegatedStatus,
