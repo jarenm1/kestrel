@@ -302,24 +302,23 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
           runs={runs}
           runItems={runItems}
           pendingAskId={pendingAsk?.id}
-          className={cn("px-5 pt-4", activeRun ? "pb-[calc(var(--dock-h)+3.5rem)]" : "pb-[calc(var(--dock-h)+1rem)]")}
+          className={cn("px-5 pt-4", activeRun ? "pb-[calc(var(--dock-h)+2.5rem)]" : "pb-[calc(var(--dock-h)+1rem)]")}
         />
       )}
       <div ref={dockRef} className="absolute inset-x-0 bottom-0 z-10 flex flex-col items-center px-5 pt-2 pb-5">
         {/*
-          Acrylic behind the dock: a translucent, blurred layer that reaches a little above the dock's edge, past the
-          context bar's labels (which sit above the composer), and fades out there, so text scrolling under them
-          softens instead of clashing. While a turn runs it reaches higher, staying solid behind the working indicator
-          before fading, so the thread never shows sharply through the indicator's text. A sibling, not a filter on the
-          dock itself: a filtered ancestor would keep the composer's own blur from seeing the thread.
+          Acrylic behind the dock: a translucent, blurred layer that reaches just past whatever sits above the composer
+          (the context bar's labels, 6px above the dock's edge; while a turn runs, the working indicator, 28px above),
+          solid up to that text and then dropping off quickly over the last 0.75rem, so it keeps the text readable
+          without smearing the thread above it. A sibling, not a filter on the dock itself: a filtered ancestor would
+          keep the composer's own blur from seeing the thread.
         */}
         <div
           aria-hidden
           className={cn(
             "pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/40 backdrop-blur-xl backdrop-saturate-150",
-            activeRun
-              ? "-top-14 [mask-image:linear-gradient(to_top,black_calc(100%-1.4rem),transparent)]"
-              : "-top-5 [mask-image:linear-gradient(to_top,black_calc(100%-1.25rem),transparent)]",
+            "[mask-image:linear-gradient(to_top,black_calc(100%-0.75rem),rgb(0_0_0/0.35)_calc(100%-0.375rem),transparent)]",
+            activeRun ? "-top-10" : "-top-4.5",
           )}
         />
         {activeRun && <WorkingIndicator run={activeRun} />}
