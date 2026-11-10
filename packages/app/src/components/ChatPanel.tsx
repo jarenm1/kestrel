@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ChevronRight, CornerUpLeft, X } from "lucide-react"
@@ -266,17 +266,33 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
   })
   const latestRun = sortedRuns.at(-1)
   const activeRun = latestRun?.status === "running" ? latestRun : undefined
+  // The dock floats over the thread so text scrolls under its blur; `--dock-h` lets the thread's end clear it.
+  const panelRef = useRef<HTMLDivElement>(null)
+  const dockRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const panel = panelRef.current
+    const dock = dockRef.current
+    if (!panel || !dock) return
+    const measure = () => panel.style.setProperty("--dock-h", `${dock.offsetHeight}px`)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(dock)
+    return () => observer.disconnect()
+  }, [])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={panelRef} className="relative flex min-h-0 flex-1 flex-col">
       {task.data?.usageLimitResume !== undefined && (
         <div className="px-5 pt-10">
           <UsageLimitNotice task={task.data} />
         </div>
       )}
-      {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
+      {/*
+        The thread runs under the dock; its bottom padding clears the dock, plus the working indicator's band while a
+        turn runs, so its last lines can still scroll into the open.
+      */}
       {loadError ? (
-        <div role="alert" className="flex min-h-0 flex-1 items-center justify-center p-8 text-center text-sm text-muted-foreground">
+        <div role="alert" className="flex min-h-0 flex-1 items-center justify-center p-8 pb-[calc(var(--dock-h)+2rem)] text-center text-sm text-muted-foreground">
           {loadError}
         </div>
       ) : (
@@ -286,24 +302,27 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
           runs={runs}
           runItems={runItems}
           pendingAskId={pendingAsk?.id}
-          className={cn("px-5 pt-4", activeRun ? "pb-14" : "pb-4")}
+          className={cn("px-5 pt-4", activeRun ? "pb-[calc(var(--dock-h)+3.5rem)]" : "pb-[calc(var(--dock-h)+1rem)]")}
         />
       )}
-      <div className="relative flex flex-col items-center px-5 pt-2 pb-5">
-        {activeRun && <WorkingIndicator run={activeRun} />}
+      <div ref={dockRef} className="absolute inset-x-0 bottom-0 z-10 flex flex-col items-center px-5 pt-2 pb-5">
         {/*
-          A short fade up from the dock's edge, ending just past the context bar's labels (which sit above the
-          composer, over the thread), so text scrolling under them softens instead of clashing. While a turn runs it
-          is a taller band, solid behind the working indicator and fading out above it, so the thread never shows
-          through the indicator's text.
+          Acrylic behind the dock: a translucent, blurred layer that reaches a little above the dock's edge, past the
+          context bar's labels (which sit above the composer), and fades out there, so text scrolling under them
+          softens instead of clashing. While a turn runs it reaches higher, staying solid behind the working indicator
+          before fading, so the thread never shows sharply through the indicator's text. A sibling, not a filter on the
+          dock itself: a filtered ancestor would keep the composer's own blur from seeing the thread.
         */}
         <div
           aria-hidden
           className={cn(
-            "pointer-events-none absolute inset-x-0 bottom-full bg-linear-to-t from-card to-transparent",
-            activeRun ? "h-14 from-60%" : "h-5",
+            "pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/60 backdrop-blur-xl backdrop-saturate-150",
+            activeRun
+              ? "-top-14 [mask-image:linear-gradient(to_top,black_calc(100%-1.4rem),transparent)]"
+              : "-top-5 [mask-image:linear-gradient(to_top,black_calc(100%-1.25rem),transparent)]",
           )}
         />
+        {activeRun && <WorkingIndicator run={activeRun} />}
         {/*
           Above the composer, clear of the context bar's labels on its top edge. No key: ThreadPage remounts the panel
           per thread, and the Composer sibling already uses `taskId` as its key; a duplicate key makes React leave
