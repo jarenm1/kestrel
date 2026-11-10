@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { MOBILE_PAGE, serveAppPage, type Assets } from "./pages"
+import { MOBILE_PAGE, MOVED_PAGES, serveAppPage, type Assets } from "./pages"
 
 const PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
 const ANDROID_PHONE = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36"
@@ -72,6 +72,19 @@ describe("serveAppPage", () => {
       expect(response.headers.get("vary")).toBe("Accept-Encoding")
     }
   })
+
+  test("moved pages redirect permanently to their new path for every client, keeping the query", async () => {
+    for (const [from, to] of Object.entries(MOVED_PAGES)) {
+      for (const path of [from, `${from}/`]) {
+        for (const ua of [PHONE, DESKTOP]) {
+          const { response, fetched } = await serve(`${path}?x=1`, { ua })
+          expect(response.status).toBe(301)
+          expect(response.headers.get("location")).toBe(`https://app.kestrel-agent.com${to}?x=1`)
+          expect(fetched).toEqual([])
+        }
+      }
+    }
+  })
 })
 
 describe("wrangler.jsonc run_worker_first", () => {
@@ -87,10 +100,13 @@ describe("wrangler.jsonc run_worker_first", () => {
   const matches = (pattern: string, path: string) =>
     new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(path)
 
-  test("every mobile page runs the Worker first", async () => {
+  test("every mobile page and moved page runs the Worker first", async () => {
     const patterns = await workerFirst()
     for (const path of MOBILE_PATHS) {
       expect(MOBILE_PAGE.test(path)).toBe(true)
+      expect(patterns.some((pattern) => matches(pattern, path))).toBe(true)
+    }
+    for (const path of Object.keys(MOVED_PAGES).flatMap((from) => [from, `${from}/`])) {
       expect(patterns.some((pattern) => matches(pattern, path))).toBe(true)
     }
   })
@@ -99,8 +115,8 @@ describe("wrangler.jsonc run_worker_first", () => {
     expect((await workerFirst()).some((pattern) => matches(pattern, "/nest/hosts/connect"))).toBe(true)
   })
 
-  test("every Worker-first page route is a mobile page", async () => {
-    for (const pattern of (await workerFirst()).filter((p) => !NON_PAGE[p])) {
+  test("every Worker-first page route is a mobile page or a moved page", async () => {
+    for (const pattern of (await workerFirst()).filter((p) => !NON_PAGE[p] && !MOVED_PAGES[p.replace(/(.)\/$/, "$1")])) {
       expect(MOBILE_PAGE.test(pattern.replace(/\*/g, "x"))).toBe(true)
     }
   })

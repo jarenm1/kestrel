@@ -14,6 +14,16 @@ const PHONE_USER_AGENT = /Mobi/
  */
 export const MOBILE_PAGE = /^\/(?:c\/[^/]+|settings(?:\/[^/]+)?)?\/?$/
 
+/**
+ * App pages that moved, by old path. Answered with a permanent redirect before any app loads, so bookmarks and saved
+ * links reach the new URL on every client and the apps keep no routes for old paths. Each is a Worker-first route in
+ * wrangler.jsonc (pages.test.ts checks it).
+ */
+export const MOVED_PAGES: Record<string, string> = {
+  "/automations": "/settings/automations",
+  "/archived": "/settings/archived",
+}
+
 /** The static asset server (`env.ASSETS`). */
 export interface Assets {
   fetch(request: Request): Promise<Response>
@@ -24,6 +34,10 @@ export interface Assets {
  * SPA, on the same URLs: the mobile app opens the screen for the path itself. The site hosts' public pages stay.
  */
 export const serveAppPage = async (request: Request, assets: Assets, url: URL): Promise<Response> => {
+  const moved = MOVED_PAGES[url.pathname.replace(/(.)\/$/, "$1")]
+  if (moved !== undefined && (request.method === "GET" || request.method === "HEAD")) {
+    return Response.redirect(new URL(`${moved}${url.search}`, url).toString(), 301)
+  }
   const page =
     request.method === "GET" &&
     !SITE_HOSTS[url.hostname] &&
