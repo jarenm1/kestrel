@@ -53,7 +53,7 @@ import { type BoxSource, useBoxSources } from "@/hooks/useBoxSources";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
 import { errorText, formatAgo, repoShortName } from "@/lib/format";
 import { storage } from "@/lib/storage";
-import { groupThreads, matchesThreadQuery, threadKey } from "@/lib/threadLists";
+import { groupThreads, hasSubThreadAwaitingUser, matchesThreadQuery, threadKey } from "@/lib/threadLists";
 import { type Route, useNavigation } from "@/nav/navigation";
 import { colors, radius, shadows, spacing } from "@/theme";
 
@@ -246,7 +246,7 @@ function SubThreadRow({
 
 /**
  * A thread with its sub-threads, as on the web: the sub-threads stay folded under a chevron at the row's lower left
- * until the user opens them.
+ * until the user opens them. A group with a sub-thread waiting on the user opens on its own, so the question shows.
  */
 function ThreadGroup({
   entry,
@@ -261,7 +261,9 @@ function ThreadGroup({
   interactive: boolean;
   renderRow: (entry: ThreadEntry, sub: boolean, hasChildren: boolean) => ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() =>
+    hasSubThreadAwaitingUser(entry, childrenOf, (e) => e.source.api.boxScope)
+  );
   const children = childrenOf.get(threadKey(entry.source.api.boxScope, entry.task.id)) ?? [];
   const hasChildren = children.length > 0;
   return (

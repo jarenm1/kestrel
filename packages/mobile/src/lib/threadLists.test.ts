@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Task } from "@cloudagents/protocol";
-import { groupThreads, matchesThreadQuery, threadKey } from "./threadLists";
+import { groupThreads, hasSubThreadAwaitingUser, matchesThreadQuery, threadKey } from "./threadLists";
 
 type Entry = { task: Task; box?: string };
 
@@ -69,6 +69,23 @@ describe("groupThreads", () => {
     expect(threads).toEqual([]);
     expect(ids(working)).toEqual(["parent"]);
     expect(ids(children.get(threadKey("", "parent")) ?? [])).toEqual(["delegated", "spawned"]);
+  });
+
+  test("a sub-thread waiting on the user brings its settled or working parent into the needs-input group", () => {
+    const entries = [
+      { task: task("settled", "done", at(1)) },
+      { task: task("asking", "needs_input", at(2), { spawnedByTaskId: "settled" }) },
+      { task: task("busy", "running", at(3)) },
+      { task: task("middle", "done", at(4), { spawnedByTaskId: "busy" }) },
+      { task: task("deep-ask", "needs_input", at(5), { spawnedByTaskId: "middle" }) },
+      { task: task("quiet", "done", at(6)) },
+      { task: task("quiet-child", "failed", at(7), { spawnedByTaskId: "quiet" }) },
+    ];
+    const { awaiting, threads, working, children } = groupThreads(entries, scope);
+    expect(ids(awaiting)).toEqual(["busy", "settled"]);
+    expect(ids(threads)).toEqual(["quiet"]);
+    expect(working).toEqual([]);
+    expect(hasSubThreadAwaitingUser(threads[0], children, scope)).toBe(false);
   });
 
   test("a sub-thread only nests under a parent on its own box", () => {

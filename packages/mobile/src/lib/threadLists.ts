@@ -1,7 +1,10 @@
 import { isTaskAwaitingUser, isTaskWorking, type Task } from "@cloudagents/protocol";
 
 export interface ThreadGroups<E> {
-  /** Top-level threads waiting on the user (`needs_input`), newest first: the "Needs input" group. */
+  /**
+   * Top-level threads waiting on the user (`needs_input`), themselves or through a sub-thread, newest first: the
+   * "Needs input" group.
+   */
   awaiting: E[];
   /** The other settled top-level threads, newest first: the sidebar's list. */
   threads: E[];
@@ -22,6 +25,8 @@ export function threadKey(scope: string, taskId: string): string {
  * listed on the same box; it moves with its parent instead of getting its own row. A sub-thread whose parent is
  * archived, missing or part of a parent cycle stays at the top level. Top-level threads split into those waiting on
  * the user, the working dock (running, or with a live run) and the rest; each returns to the list when it settles.
+ * A thread with a sub-thread waiting on the user counts as waiting itself, even while it runs, so a question asked
+ * deep in a delegation never hides under a settled or working parent.
  * Every group stays newest first by `updatedAt`, the field the thread list sorts by until `Task` grows a
  * `lastMessageAt`. `scope` names an entry's box.
  */
@@ -44,12 +49,24 @@ export function groupThreads<E extends { task: Task }>(entries: readonly E[], sc
     children.set(parent, [...(children.get(parent) ?? []), entry]);
     return false;
   });
+  const awaits = (entry: E) => isTaskAwaitingUser(entry.task) || hasSubThreadAwaitingUser(entry, children, scope);
   return {
-    awaiting: roots.filter(({ task }) => isTaskAwaitingUser(task)),
-    threads: roots.filter(({ task }) => !isTaskWorking(task) && !isTaskAwaitingUser(task)),
-    working: roots.filter(({ task }) => isTaskWorking(task)),
+    awaiting: roots.filter(awaits),
+    threads: roots.filter((entry) => !awaits(entry) && !isTaskWorking(entry.task)),
+    working: roots.filter((entry) => !awaits(entry) && isTaskWorking(entry.task)),
     children,
   };
+}
+
+/** Whether a sub-thread of `entry`, at any depth, is waiting on the user (`needs_input`). */
+export function hasSubThreadAwaitingUser<E extends { task: Task }>(
+  entry: E,
+  children: ReadonlyMap<string, E[]>,
+  scope: (entry: E) => string
+): boolean {
+  return (children.get(threadKey(scope(entry), entry.task.id)) ?? []).some(
+    (child) => isTaskAwaitingUser(child.task) || hasSubThreadAwaitingUser(child, children, scope)
+  );
 }
 
 /** Walks up from `key`; a thread in a cycle reaches itself again. */
