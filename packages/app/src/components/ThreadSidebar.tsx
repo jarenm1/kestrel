@@ -280,7 +280,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           <div className="group/search relative min-w-0 flex-1">
             <Search
               aria-hidden="true"
-              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-foreground/70 group-focus-within/search:text-muted-foreground"
+              className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-foreground/70 group-focus-within/search:text-muted-foreground"
             />
             <Input
               type="search"
@@ -291,7 +291,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
               onKeyDown={(e) => {
                 if (e.key === "Escape") setSearch("")
               }}
-              className="h-8 bg-transparent pr-2.5 pl-8 text-[13px] text-foreground shadow-none placeholder:text-foreground/70 focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
+              className="h-8 bg-transparent pr-2.5 pl-9 text-sm text-foreground shadow-none placeholder:text-foreground/70 focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
             />
           </div>
           <NavLink
@@ -299,12 +299,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
             end
             aria-label="New thread"
             title="New thread"
-            className={({ isActive }) =>
-              cn(
-                "flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground",
-                isActive && "text-foreground",
-              )
-            }
+            className="flex size-8 shrink-0 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-white/[0.06] hover:text-foreground"
           >
             <SquarePen className="size-4" />
           </NavLink>
