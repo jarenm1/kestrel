@@ -7,6 +7,7 @@ import {
   GitPullRequest,
   PanelLeftClose,
   PanelLeftOpen,
+  Search,
   SquarePen,
   type LucideIcon,
 } from "lucide-react"
@@ -17,6 +18,7 @@ import { ThreadAvatar } from "@/components/ThreadAvatar"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
+import { Input } from "@/components/ui/input"
 import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { groupSubThreads } from "@/lib/subThreads"
@@ -106,6 +108,13 @@ function tabClass({ isActive }: { isActive: boolean }) {
   )
 }
 
+/** A thread matches when its title, a checkout's repository or branch, or one of its sub-threads does. */
+function matchesQuery(task: Task, query: string, childrenByParent: Map<string, Task[]>): boolean {
+  const fields = [task.title, ...task.checkouts.flatMap((c) => [c.repo, c.branch])]
+  if (fields.some((field) => field.toLowerCase().includes(query))) return true
+  return (childrenByParent.get(task.id) ?? []).some((child) => matchesQuery(child, query, childrenByParent))
+}
+
 interface Props {
   tasks: readonly Task[] | undefined
   error: unknown
@@ -134,6 +143,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
     if (dockCollapsed) localStorage.setItem(DOCK_COLLAPSED_KEY, "1")
     else localStorage.removeItem(DOCK_COLLAPSED_KEY)
   }, [dockCollapsed])
+  const [search, setSearch] = useState("")
 
   // TODO: order by the user's last message, not updatedAt (which also moves when a run finishes);
   // needs a `lastMessageAt` on Task from the server. The "ago" label has the same caveat.
@@ -143,6 +153,12 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
   const awaiting = roots.filter((task) => isTaskAwaitingUser(task))
   const threads = roots.filter((task) => !isTaskWorking(task) && !isTaskAwaitingUser(task))
   const working = roots.filter((task) => isTaskWorking(task))
+  // The search filters the expanded list only; the rail has no search box.
+  const query = search.trim().toLowerCase()
+  const shown = (list: Task[]) => (query ? list.filter((task) => matchesQuery(task, query, children)) : list)
+  const shownAwaiting = shown(awaiting)
+  const shownThreads = shown(threads)
+  const shownWorking = shown(working)
 
   function archiveThread(task: Task) {
     archive.mutate(task.id, {
@@ -259,38 +275,68 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           <BrandToggle label="Collapse threads" Icon={PanelLeftClose} onClick={onCollapse} />
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
+        <div className="flex items-center gap-1.5 pr-3 pb-2">
+          <div className="relative min-w-0 flex-1">
+            <Search
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              type="search"
+              aria-label="Search threads"
+              placeholder="Search threads"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setSearch("")
+              }}
+              className="h-8 pr-2.5 pl-8 text-[13px]"
+            />
+          </div>
+          <NavLink
+            to={APP_HOME}
+            end
+            aria-label="New thread"
+            title="New thread"
+            className={({ isActive }) =>
+              cn(
+                "flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground",
+                isActive && "text-foreground",
+              )
+            }
+          >
+            <SquarePen className="size-4" />
+          </NavLink>
+        </div>
         <motion.nav
           layoutScroll
           aria-label="Threads"
           className="relative flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto"
         >
-          <NavLink to={APP_HOME} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-            <SquarePen className="size-4 shrink-0" />
-            New thread
-          </NavLink>
           {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
           {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
-          {awaiting.length > 0 && (
+          {shownAwaiting.length > 0 && (
             <>
-              <h2 className="flex items-center gap-1.5 px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">
+              <h2 className="flex items-center gap-1.5 px-2.5 pt-2 pb-1 text-xs font-medium text-muted-foreground/80">
                 <StatusIcon status="needs_input" className="[&>svg]:size-3.5" />
                 Needs input
-                <span className="tabular-nums">{awaiting.length}</span>
+                <span className="tabular-nums">{shownAwaiting.length}</span>
               </h2>
               <AnimatePresence initial={false} mode="popLayout">
-                {awaiting.map(threadTab)}
+                {shownAwaiting.map(threadTab)}
               </AnimatePresence>
+              {shownThreads.length > 0 && <div aria-hidden="true" className="mt-2 mr-3 border-t border-border/60" />}
             </>
           )}
-          {threads.length > 0 && (
-            <h2 className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">Threads</h2>
-          )}
           <AnimatePresence initial={false} mode="popLayout">
-            {threads.map(threadTab)}
+            {shownThreads.map(threadTab)}
           </AnimatePresence>
+          {query && shownAwaiting.length + shownThreads.length + shownWorking.length === 0 && (
+            <p className="px-2.5 pt-2 text-xs text-muted-foreground">No threads match “{search.trim()}”</p>
+          )}
         </motion.nav>
         <AnimatePresence initial={false}>
-          {working.length > 0 && (
+          {shownWorking.length > 0 && (
             <motion.section
               key="working"
               aria-label="Working threads"
@@ -306,7 +352,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
               >
                 <StatusIcon status="running" className="[&>svg]:size-3.5" />
                 <span className="flex-1 text-left">Working</span>
-                <span className="tabular-nums">{working.length}</span>
+                <span className="tabular-nums">{shownWorking.length}</span>
                 <ChevronDown
                   aria-hidden="true"
                   className={cn("size-3.5 shrink-0 transition-transform", dockCollapsed && "-rotate-90")}
@@ -323,7 +369,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
                 className="relative flex min-h-0 flex-col gap-0.5 overflow-auto"
               >
                 <AnimatePresence initial={false} mode="popLayout">
-                  {working.map(threadTab)}
+                  {shownWorking.map(threadTab)}
                 </AnimatePresence>
               </motion.div>
             </motion.section>
