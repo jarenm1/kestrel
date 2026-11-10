@@ -1,7 +1,16 @@
-import { useMemo, useRef, type ReactNode } from "react"
+import { useRef, type ReactNode } from "react"
 import { ChevronRight } from "lucide-react"
-import { TokenLine, tokenizeDiff, useHighlighter, type ThemedToken } from "@cloudagents/ui/highlight"
-import { type DiffFile, type DiffFileStatus, type DiffLine, displayPath } from "@/lib/diff"
+import { FileDiff, type FileDiffProps } from "@pierre/diffs/react"
+import type { FileDiffMetadata } from "@pierre/diffs/types"
+import {
+  diffFileKey,
+  diffFileNotes,
+  diffFileStats,
+  diffFileStatus,
+  displayPath,
+  isRenamed,
+  type DiffFileStatus,
+} from "@/lib/pierreDiff"
 import { cn } from "@/lib/utils"
 
 /** Files with more changed lines than this start collapsed, so one huge file does not bury the rest. */
@@ -14,10 +23,25 @@ const STATUS: Record<DiffFileStatus, { letter: string; className: string; label:
   renamed: { letter: "R", className: "bg-info/15 text-info", label: "Renamed" },
 }
 
-/** Identifies a file within one parsed diff; the same path can appear under two repositories. */
-export const diffFileKey = (file: DiffFile): string => `${file.oldPath}\0${file.newPath}`
+/** The same dark rendering t3code uses. Kestrel has no light appearance, so no second theme is loaded. */
+const DIFF_OPTIONS: NonNullable<FileDiffProps<undefined, undefined>["options"]> = {
+  theme: "pierre-dark",
+  themeType: "dark",
+  diffStyle: "unified",
+  diffIndicators: "classic",
+  lineDiffType: "none",
+  overflow: "scroll",
+  disableFileHeader: true,
+  disableBackground: true,
+  preferredHighlighter: "highlights",
+  tokenizeMaxLineLength: 1000,
+  hunkSeparators: "simple",
+}
 
-export const isLargeDiffFile = (file: DiffFile): boolean => file.additions + file.deletions > LARGE_FILE_LINES
+export const isLargeDiffFile = (file: FileDiffMetadata): boolean => {
+  const stats = diffFileStats(file)
+  return stats.additions + stats.deletions > LARGE_FILE_LINES
+}
 
 /**
  * One parsed diff as a scrollable buffer with a collapsible section per file. The caller owns the open/closed state,
@@ -25,16 +49,19 @@ export const isLargeDiffFile = (file: DiffFile): boolean => file.additions + fil
  */
 export function DiffFileList({
   files,
+  binary,
   isCollapsed,
   onToggle,
   fileAction,
   emptyText = "No changes.",
 }: {
-  files: readonly DiffFile[]
-  isCollapsed: (file: DiffFile) => boolean
-  onToggle: (file: DiffFile) => void
+  files: readonly FileDiffMetadata[]
+  /** Names of files whose patches are binary; they get a note instead of a body. */
+  binary: ReadonlySet<string>
+  isCollapsed: (file: FileDiffMetadata) => boolean
+  onToggle: (file: FileDiffMetadata) => void
   /** Rendered beside a file's header, outside its toggle button (e.g. a Viewed checkbox). */
-  fileAction?: (file: DiffFile) => ReactNode
+  fileAction?: (file: FileDiffMetadata) => ReactNode
   emptyText?: string
 }) {
   return (
@@ -44,6 +71,7 @@ export function DiffFileList({
         <FileSection
           key={diffFileKey(file)}
           file={file}
+          binary={binary.has(file.name)}
           collapsed={isCollapsed(file)}
           onToggle={() => onToggle(file)}
           action={fileAction?.(file)}
@@ -55,19 +83,22 @@ export function DiffFileList({
 
 function FileSection({
   file,
+  binary,
   collapsed,
   onToggle,
   action,
 }: {
-  file: DiffFile
+  file: FileDiffMetadata
+  binary: boolean
   collapsed: boolean
   onToggle: () => void
   action: ReactNode
 }) {
   const section = useRef<HTMLElement>(null)
-  const status = STATUS[file.status]
+  const status = STATUS[diffFileStatus(file)]
   const path = displayPath(file)
   const slash = path.lastIndexOf("/")
+  const stats = diffFileStats(file)
 
   function onClick() {
     onToggle()
@@ -82,7 +113,7 @@ function FileSection({
           type="button"
           onClick={onClick}
           aria-expanded={!collapsed}
-          title={file.status === "renamed" ? `${file.oldPath} → ${file.newPath}` : path}
+          title={isRenamed(file) ? `${file.prevName ?? path} → ${path}` : path}
           className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-3 text-left outline-none focus-visible:shadow-glow"
         >
           <ChevronRight
@@ -95,36 +126,28 @@ function FileSection({
             {status.letter}
           </span>
           <span className="min-w-0 flex-1 truncate">
-            {file.status === "renamed" && <span className="text-muted-foreground">{file.oldPath} → </span>}
+            {isRenamed(file) && <span className="text-muted-foreground">{file.prevName} → </span>}
             <span className="text-muted-foreground">{path.slice(0, slash + 1)}</span>
             <span className="font-medium text-foreground">{path.slice(slash + 1)}</span>
           </span>
-          {file.binary ? (
+          {binary ? (
             <span className="shrink-0 text-muted-foreground">binary</span>
           ) : (
             <span className="shrink-0 font-mono">
-              <span className="text-success">+{file.additions}</span>{" "}
-              <span className="text-destructive">−{file.deletions}</span>
+              <span className="text-success">+{stats.additions}</span>{" "}
+              <span className="text-destructive">−{stats.deletions}</span>
             </span>
           )}
         </button>
         {action}
       </div>
-      {!collapsed && <FileBody file={file} />}
+      {!collapsed && <FileBody file={file} binary={binary} />}
     </section>
   )
 }
 
-function FileBody({ file }: { file: DiffFile }) {
-  const highlighter = useHighlighter()
-  const tokens = useMemo(() => tokenizeDiff(highlighter, file.hunks, { path: displayPath(file) }), [highlighter, file])
-  const notes: string[] = []
-  if (file.modeChange) notes.push(`Mode ${file.modeChange.from} → ${file.modeChange.to}`)
-  if (file.binary) notes.push("Binary file not shown.")
-  else if (file.hunks.length === 0 && file.status === "renamed") notes.push("Renamed without changes.")
-  else if (file.hunks.length === 0 && file.status === "added") notes.push("Empty file.")
-  else if (file.hunks.length === 0 && file.status === "deleted") notes.push("Empty file deleted.")
-
+function FileBody({ file, binary }: { file: FileDiffMetadata; binary: boolean }) {
+  const notes = diffFileNotes(file, binary)
   return (
     <div className="overflow-x-auto">
       {notes.map((note) => (
@@ -132,49 +155,7 @@ function FileBody({ file }: { file: DiffFile }) {
           {note}
         </p>
       ))}
-      {file.hunks.length > 0 && (
-        <table className="min-w-full border-collapse">
-          {file.hunks.map((hunk, i) => (
-            <tbody key={i}>
-              <tr>
-                <td colSpan={4} className="bg-info/[0.07] px-3 py-0.5 whitespace-pre text-info/80">
-                  {hunk.range}
-                  {hunk.section && <span className="text-muted-foreground"> {hunk.section}</span>}
-                </td>
-              </tr>
-              {hunk.lines.map((line, j) => (
-                <LineRow key={j} line={line} tokens={tokens?.get(line)} />
-              ))}
-            </tbody>
-          ))}
-        </table>
-      )}
+      {file.hunks.length > 0 && <FileDiff fileDiff={file} options={DIFF_OPTIONS} disableWorkerPool />}
     </div>
-  )
-}
-
-const LINE_STYLE: Record<DiffLine["kind"], { row: string; gutter: string; marker: string }> = {
-  add: { row: "bg-success/10", gutter: "bg-success/10 text-success/60", marker: "+" },
-  del: { row: "bg-destructive/10", gutter: "bg-destructive/10 text-destructive/60", marker: "-" },
-  context: { row: "", gutter: "text-muted-foreground/50", marker: " " },
-}
-
-function LineRow({ line, tokens }: { line: DiffLine; tokens: readonly ThemedToken[] | undefined }) {
-  const style = LINE_STYLE[line.kind]
-  const gutter = cn("w-px select-none px-2 text-right align-top whitespace-nowrap", style.gutter)
-  return (
-    <tr className={style.row}>
-      <td className={gutter}>{line.oldLine ?? ""}</td>
-      <td className={gutter}>{line.newLine ?? ""}</td>
-      <td className={cn("w-px select-none pl-2 align-top", line.kind === "context" ? "" : style.gutter)}>
-        {style.marker}
-      </td>
-      <td className="pr-4 pl-1 whitespace-pre text-foreground/90">
-        <TokenLine tokens={tokens} fallback={line.text} />
-        {line.noNewline && (
-          <span className="ml-2 font-sans text-[10px] text-muted-foreground select-none">no newline at end of file</span>
-        )}
-      </td>
-    </tr>
   )
 }

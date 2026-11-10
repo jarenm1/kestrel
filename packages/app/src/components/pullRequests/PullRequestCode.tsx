@@ -1,12 +1,12 @@
 import { useEffect, useId, useMemo, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import type { DiffFile } from "@/lib/diff"
-import { displayPath, parseDiff } from "@/lib/diff"
+import type { FileDiffMetadata } from "@pierre/diffs/types"
 import { queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { diffFileKey, DiffFileList, isLargeDiffFile } from "@/components/DiffFiles"
+import { DiffFileList, isLargeDiffFile } from "@/components/DiffFiles"
+import { diffFileKey, displayPath, parseDiff, patchCacheKey } from "@/lib/pierreDiff"
 import { errorText } from "@/util"
 
 /** Viewed files live per pull request head: a new push makes every file unviewed again. */
@@ -40,7 +40,14 @@ export function PullRequestCode({
   active: boolean
 }) {
   const diff = useQuery({ ...queries.pullRequestDiff(taskId, repo, number), enabled: active })
-  const files = useMemo(() => (diff.data === undefined ? [] : parseDiff(diff.data.patch)), [diff.data])
+  const parsed = useMemo(
+    () =>
+      diff.data === undefined
+        ? { files: [], binary: new Set<string>() }
+        : parseDiff(diff.data.patch, patchCacheKey(`pr:${repo}#${number}@${headRef}`, diff.data.patch)),
+    [diff.data, repo, number, headRef],
+  )
+  const files = parsed.files
   const storageKey = viewedStorageKey(repo, number, headRef)
   const [viewed, setViewed] = useState<ReadonlySet<string>>(() => readViewed(storageKey))
   const [collapsedByKey, setCollapsedByKey] = useState<ReadonlyMap<string, boolean>>(new Map())
@@ -51,9 +58,9 @@ export function PullRequestCode({
     setCollapsedByKey(new Map())
   }, [storageKey])
 
-  const isCollapsed = (file: DiffFile): boolean => collapsedByKey.get(diffFileKey(file)) ?? isLargeDiffFile(file)
+  const isCollapsed = (file: FileDiffMetadata): boolean => collapsedByKey.get(diffFileKey(file)) ?? isLargeDiffFile(file)
 
-  function toggleViewed(file: DiffFile, next: boolean) {
+  function toggleViewed(file: FileDiffMetadata, next: boolean) {
     const key = diffFileKey(file)
     const updated = new Set(viewed)
     if (next) updated.add(key)
@@ -83,6 +90,7 @@ export function PullRequestCode({
       {diff.data !== undefined && (
         <DiffFileList
           files={files}
+          binary={parsed.binary}
           isCollapsed={isCollapsed}
           onToggle={(file) =>
             setCollapsedByKey((prev) => new Map(prev).set(diffFileKey(file), !isCollapsed(file)))

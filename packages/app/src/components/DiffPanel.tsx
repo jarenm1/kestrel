@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import type { CheckoutDiff } from "@cloudagents/protocol"
+import type { FileDiffMetadata } from "@pierre/diffs/types"
 import { queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
-import { diffFileKey, DiffFileList, isLargeDiffFile } from "@/components/DiffFiles"
-import { type DiffFile, parseDiff } from "@/lib/diff"
+import { DiffFileList, isLargeDiffFile } from "@/components/DiffFiles"
+import { diffFileKey, diffFileStats, parseDiff, patchCacheKey } from "@/lib/pierreDiff"
 import { errorText } from "@/util"
 
 /**
@@ -44,20 +45,24 @@ export function DiffPanel({ taskId }: { taskId: string }) {
  * in the panel, because the same file path can appear under two repositories.
  */
 function CheckoutDiffSection({ checkout }: { checkout: CheckoutDiff }) {
-  const files = useMemo(() => parseDiff(checkout.diff), [checkout.diff])
+  const parsed = useMemo(
+    () => parseDiff(checkout.diff, patchCacheKey(`checkout:${checkout.checkoutId}`, checkout.diff)),
+    [checkout.diff, checkout.checkoutId],
+  )
+  const files = parsed.files
   // Explicit open/closed choices by file; files without one use their default (large files closed).
   const [collapsedByKey, setCollapsedByKey] = useState<ReadonlyMap<string, boolean>>(new Map())
 
-  const isCollapsed = (file: DiffFile): boolean => collapsedByKey.get(diffFileKey(file)) ?? isLargeDiffFile(file)
+  const isCollapsed = (file: FileDiffMetadata): boolean => collapsedByKey.get(diffFileKey(file)) ?? isLargeDiffFile(file)
   const anyExpanded = files.some((f) => !isCollapsed(f))
-  const additions = files.reduce((n, f) => n + f.additions, 0)
-  const deletions = files.reduce((n, f) => n + f.deletions, 0)
+  const additions = files.reduce((n, f) => n + diffFileStats(f).additions, 0)
+  const deletions = files.reduce((n, f) => n + diffFileStats(f).deletions, 0)
 
   function setAll(collapsed: boolean) {
     setCollapsedByKey(new Map(files.map((f) => [diffFileKey(f), collapsed])))
   }
 
-  function toggle(file: DiffFile) {
+  function toggle(file: FileDiffMetadata) {
     setCollapsedByKey((prev) => new Map(prev).set(diffFileKey(file), !isCollapsed(file)))
   }
 
@@ -79,7 +84,12 @@ function CheckoutDiffSection({ checkout }: { checkout: CheckoutDiff }) {
           </Button>
         )}
       </div>
-      <DiffFileList files={files} isCollapsed={isCollapsed} onToggle={toggle} />
+      <DiffFileList
+        files={files}
+        binary={parsed.binary}
+        isCollapsed={isCollapsed}
+        onToggle={toggle}
+      />
     </section>
   )
 }

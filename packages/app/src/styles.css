@@ -6,6 +6,14 @@
 /* The shared composer editor keeps the desktop Tailwind treatment; scan its source so those utilities are emitted. */
 @source "../../../composer/src";
 
+/* @pierre/diffs renders in shadow roots; these custom properties inherit into them. */
+:root {
+  --diffs-font-family: var(--font-mono, ui-monospace, monospace);
+  --diffs-header-font-family: var(--font-sans, system-ui, sans-serif);
+  --diffs-font-size: 12px;
+  --diffs-line-height: 17px;
+}
+
 /* App-only animations; the shared tokens live in @cloudagents/ui/theme.css. */
 @theme inline {
   /* The desktop's boot bar: a third-width segment sweeping across its track. */
