@@ -41,7 +41,9 @@
   --radius-2xl: calc(var(--radius) + 8px);
   /* Depth instead of outlines: a faint top highlight plus a soft drop shadow. */
   --shadow-soft: inset 0 1px 0 0 rgb(255 255 255 / 0.04), 0 8px 24px -12px rgb(0 0 0 / 0.7);
-  --shadow-glow: 0 0 0 1px rgb(255 255 255 / 0.14), 0 0 22px -4px rgb(255 255 255 / 0.22);
+  /* Leads with an empty inset shadow so it eases in from `shadow-well` and `shadow-soft`: a box-shadow only
+     interpolates when each position is inset in both shadows or in neither; otherwise the glow snaps in. */
+  --shadow-glow: inset 0 0 #0000, 0 0 0 1px rgb(255 255 255 / 0.14), 0 0 22px -4px rgb(255 255 255 / 0.22);
   --shadow-well: inset 0 1px 3px 0 rgb(0 0 0 / 0.6);
   /* A live label (a working thread's title, a running tool): a bright band sweeping across muted text. The band starts
      and ends just outside the text when the gradient is 250% wide, so the loop has no visible jump. */

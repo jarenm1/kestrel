@@ -276,7 +276,8 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
         <div className="flex items-center gap-1.5 pt-2 pr-3 pb-2">
-          {/* Transparent and flat with softened text at rest; focused, it takes the usual grey input look. */}
+          {/* Transparent and flat with softened text at rest; focused, it takes the usual grey input look. The flat shadow
+              is an empty inset one rather than `shadow-none`, so the focus glow eases in (see `--shadow-glow`). */}
           <div className="group/search relative min-w-0 flex-1">
             <Search
               aria-hidden="true"
@@ -291,7 +292,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
               onKeyDown={(e) => {
                 if (e.key === "Escape") setSearch("")
               }}
-              className="h-8 bg-transparent pr-2.5 pl-9 text-sm text-foreground shadow-none placeholder:text-foreground/70 hover:bg-white/[0.06] focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
+              className="h-8 bg-transparent pr-2.5 pl-9 text-sm text-foreground shadow-[inset_0_0_#0000] placeholder:text-foreground/70 hover:bg-white/[0.06] focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
             />
           </div>
           <NavLink

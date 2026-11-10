@@ -21,7 +21,7 @@ function Slider({
       </SliderPrimitive.Track>
       <SliderPrimitive.Thumb
         aria-label={thumbLabel}
-        className="block size-4 rounded-full bg-foreground shadow-soft outline-none focus-visible:shadow-glow"
+        className="block size-4 rounded-full bg-foreground shadow-soft outline-none transition-shadow duration-200 ease-out focus-visible:shadow-glow"
       />
     </SliderPrimitive.Root>
   )

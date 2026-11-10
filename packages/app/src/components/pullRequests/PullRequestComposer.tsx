@@ -76,7 +76,7 @@ export function PullRequestComposer({
             value={verdict}
             onChange={(e) => setVerdict(e.target.value as Verdict)}
             disabled={pending}
-            className="h-7 rounded-md bg-input px-2 text-xs text-foreground shadow-well outline-none focus-visible:shadow-glow disabled:cursor-not-allowed disabled:opacity-50 [&>option]:bg-secondary"
+            className="h-7 rounded-md bg-input px-2 text-xs text-foreground shadow-well outline-none transition-shadow duration-200 ease-out focus-visible:shadow-glow disabled:cursor-not-allowed disabled:opacity-50 [&>option]:bg-secondary"
           >
             <option value="comment">Comment</option>
             <option value="approve">Approve</option>

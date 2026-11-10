@@ -113,7 +113,7 @@ function FileSection({
           onClick={onClick}
           aria-expanded={!collapsed}
           title={isRenamed(file) ? `${file.prevName ?? path} → ${path}` : path}
-          className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-3 text-left outline-none focus-visible:shadow-glow"
+          className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-3 text-left outline-none transition-shadow duration-200 ease-out focus-visible:shadow-glow"
         >
           <ChevronRight
             className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", !collapsed && "rotate-90")}

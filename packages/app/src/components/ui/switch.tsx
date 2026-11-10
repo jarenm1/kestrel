@@ -7,7 +7,7 @@ function Switch({ className, ...props }: ComponentProps<typeof SwitchPrimitive.R
     <SwitchPrimitive.Root
       data-slot="switch"
       className={cn(
-        "inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-input p-0.5 shadow-well transition-colors duration-200 outline-none focus-visible:shadow-glow disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary",
+        "inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-input p-0.5 shadow-well transition-[color,background-color,box-shadow] duration-200 ease-out outline-none focus-visible:shadow-glow disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary",
         className,
       )}
       {...props}

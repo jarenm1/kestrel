@@ -102,7 +102,7 @@ export function ThinkingPicker({
             <span className="text-xs font-medium text-muted-foreground">Thinking</span>
             <span className="text-sm font-semibold">{selected.label}</span>
           </div>
-          <div className="relative flex h-8 items-center rounded-full bg-input transition-shadow has-focus-visible:shadow-glow">
+          <div className="relative flex h-8 items-center rounded-full bg-input transition-shadow duration-200 ease-out has-focus-visible:shadow-glow">
             <div
               className="pointer-events-none absolute left-1 h-6 rounded-full bg-primary/20"
               style={{ width: `calc(${offset(selectedIndex)} + 0.5rem)` }}

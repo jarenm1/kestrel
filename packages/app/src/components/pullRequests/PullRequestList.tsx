@@ -85,7 +85,7 @@ function PullRequestRow({
       type="button"
       onClick={() => onSelect(pullRequest)}
       aria-label={`${state.label} pull request #${pullRequest.number}${snapshot === undefined ? "" : `: ${snapshot.title}`}`}
-      className="flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left text-xs outline-none transition-colors hover:bg-white/[0.06] focus-visible:shadow-glow"
+      className="flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left text-xs outline-none transition-[color,background-color,box-shadow] duration-200 ease-out hover:bg-white/[0.06] focus-visible:shadow-glow"
     >
       <span className="mt-0.5">
         <PullRequestStateGlyph snapshot={snapshot} />

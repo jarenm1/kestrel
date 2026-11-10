@@ -197,7 +197,7 @@ export function SidebarTabStrip({
                 role="tab"
                 aria-selected={selected}
                 title={label}
-                className="flex h-full items-center gap-1.5 rounded-full pr-1 pl-3 outline-none focus-visible:shadow-glow [&_svg]:size-4 [&_svg]:shrink-0"
+                className="flex h-full items-center gap-1.5 rounded-full pr-1 pl-3 outline-none transition-shadow duration-200 ease-out focus-visible:shadow-glow [&_svg]:size-4 [&_svg]:shrink-0"
                 onClick={() => onSelect(id)}
                 // Middle-click closes, as in a browser.
                 onAuxClick={(e) => {
@@ -215,7 +215,7 @@ export function SidebarTabStrip({
                 aria-label={`Close ${label}`}
                 title={`Close ${label}`}
                 className={cn(
-                  "mr-1 grid size-5 place-items-center rounded-full text-muted-foreground outline-none transition-opacity hover:bg-white/10 hover:text-foreground focus-visible:opacity-100 focus-visible:shadow-glow [&_svg]:size-3",
+                  "mr-1 grid size-5 place-items-center rounded-full text-muted-foreground outline-none transition-[opacity,box-shadow] duration-200 ease-out hover:bg-white/10 hover:text-foreground focus-visible:opacity-100 focus-visible:shadow-glow [&_svg]:size-3",
                   selected ? "opacity-100" : "opacity-0 group-hover/tab:opacity-100",
                 )}
                 onClick={() => onClose(id)}
