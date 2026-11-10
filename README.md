@@ -81,7 +81,7 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` or `
 | [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
 | [`packages/desktop`](packages/desktop) | Electron desktop app for the same SPA, with GitHub-release auto-updates ([README](packages/desktop/README.md)). |
 
-Deeper docs: [architecture and ownership](docs/architecture.md), [goal state](docs/goal-state.md), [the box: harnesses, sandbox and limits](docs/box.md), [bring your own box with cloud overflow (design)](docs/byo-box.md).
+Deeper docs: [architecture and ownership](docs/architecture.md), [goal state](docs/goal-state.md), [the Nest in production](docs/nest-production.md), [the box: harnesses, sandbox and limits](docs/box.md), [bring your own box with cloud overflow (design)](docs/byo-box.md).
 
 ## Deploys
 

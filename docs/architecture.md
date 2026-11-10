@@ -50,7 +50,7 @@ The diagram shows the major paths, not every endpoint. The legacy relay remains 
 | Control plane | GitHub OAuth, sessions, box registration and tokens, credentials, automations, PR watches and relay | `packages/control` |
 | Hub | Durable control-plane state and coordination, including fleet registry and scheduled events | `packages/control/src/hub.ts` |
 | Box | Thread API, agent runs, workspaces, sandbox, desktop and tools | `packages/server` |
-| Host experiment | Local per-user CPU VM lifecycle CLI; not yet the Nest host agent | `packages/host` |
+| Nest host layer | `kestrel-host` daemon, guest agent, volumes and ingress; not yet a production fleet | `packages/host` |
 | Shared protocol | Schemas and types for APIs, events, relay and domain objects | `packages/protocol` |
 
 Phone browsers use the mobile app's web export. Its reference composer and the desktop composer share one DOM
@@ -268,9 +268,9 @@ The product direction is a common box contract and capabilities across BYOB and 
 
 ### Nest: current and planned
 
-**Current:** `packages/host` provides a local CPU-VM lifecycle CLI and a QEMU launcher. The non-billable meter collects host-side process and disk samples, ingests records into the control plane, and reports estimates and coverage gaps. These are experiments, not an integrated managed fleet or charging system. See [packages/host/README.md](../packages/host/README.md) and [scripts/nest-meter/README.md](../scripts/nest-meter/README.md).
+**Current:** `packages/host` provides the `kestrel-host` daemon on Cloud Hypervisor (VM lifecycle, resizing, suspend, park, volumes and ingress), and the control plane has basic placement, epochs and leases. The host-side meter ingests non-billable records into the control plane, which reports estimates and coverage gaps. This has been tested in a NixOS VM test on one host. It is not a production fleet or a charging system. See [nest.md](nest.md) and [packages/host/README.md](../packages/host/README.md).
 
-**Planned:** a host agent and control-plane placement for per-user VMs; CPU and GPU shapes; suspend and wake on activity; parking persistent volumes for later resumption; and reconciled, usage-based billing. Cloud Hypervisor is a candidate, not a completed runtime choice. The detailed design and its constraints remain in [goal-state.md](goal-state.md#the-nest).
+**Planned:** regional controllers, failover, multiple regions, outage survival, abuse controls, and reconciled usage-based billing. See [nest-production.md](nest-production.md) for the production design and [goal-state.md](goal-state.md#the-nest) for the product decisions.
 
 ## Implementation details
 
