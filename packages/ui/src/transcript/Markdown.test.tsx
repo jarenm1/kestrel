@@ -182,4 +182,10 @@ describe("agent HTML and SVG", () => {
     expect(html).toContain("<pre><code>")
     expect(html).toContain("&lt;rect/&gt;")
   })
+
+  test("a fenced code block keeps its language and text", () => {
+    const html = render("```ts\nconst answer = 42\n```")
+    expect(html).toContain('<code class="language-ts">')
+    expect(html).toContain("const answer = 42")
+  })
 })

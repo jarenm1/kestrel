@@ -16,8 +16,13 @@ type Highlights = Pick<Highlighter, "codeToTokens">
 /** A line long enough to be a minified file becomes one token, as t3code's mobile highlighter does. */
 const MAX_TOKENIZED_LINE = 1000
 const CACHE_LIMIT = 100
-/** Past this size a result is used once and not retained, so one huge expanded file cannot pin megabytes. */
+/** One result larger than this is used once and not retained, so a huge expanded file cannot pin memory. */
 const CACHE_MAX_CODE = 200_000
+/**
+ * Token objects are several times the source's size, so an entry budget alone still retains hundreds of megabytes
+ * when large files are opened. Retain at most this much source in total — roughly tens of megabytes of tokens.
+ */
+const CACHE_MAX_TOTAL_CODE = 500_000
 
 let highlights: Highlights | null = null
 let starting = false
@@ -51,16 +56,34 @@ export function useHighlighter(): Highlights | null {
   return useSyncExternalStore(subscribe, snapshot, serverSnapshot)
 }
 
-const cache = new Map<string, readonly (readonly ThemedToken[])[]>()
+type TokenLines = readonly (readonly ThemedToken[])[]
+
+interface CachedTokens {
+  readonly codeLength: number
+  readonly tokens: TokenLines
+}
+
+const cache = new Map<string, CachedTokens>()
+let cachedCodeLength = 0
+
+function trimCache(): void {
+  while (cache.size > CACHE_LIMIT || cachedCodeLength > CACHE_MAX_TOTAL_CODE) {
+    const oldest = cache.keys().next().value
+    if (oldest === undefined) return
+    const entry = cache.get(oldest)
+    cache.delete(oldest)
+    if (entry !== undefined) cachedCodeLength -= entry.codeLength
+  }
+}
 
 function tokenizeCached(
   highlighter: Highlights,
   code: string,
   candidates: readonly string[],
-): readonly (readonly ThemedToken[])[] | null {
+): TokenLines | null {
   const key = `${candidates.join("\0")}\0${code}`
   const cached = cache.get(key)
-  if (cached !== undefined) return cached
+  if (cached !== undefined) return cached.tokens
   let result: TokensResult | undefined
   for (const language of candidates) {
     try {
@@ -83,8 +106,9 @@ function tokenizeCached(
   }
   const tokens = result.tokens
   if (code.length <= CACHE_MAX_CODE) {
-    cache.set(key, tokens)
-    if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!)
+    cache.set(key, { codeLength: code.length, tokens })
+    cachedCodeLength += code.length
+    trimCache()
   }
   return tokens
 }
