@@ -7,14 +7,16 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  type TextInputKeyPressEvent,
   View,
   useWindowDimensions,
 } from "react-native";
 import { useQueries } from "@tanstack/react-query";
 import Animated, {
   FadeIn,
+  FadeInDown,
+  FadeInUp,
   FadeOut,
-  Keyframe,
   LayoutAnimationConfig,
   LinearTransition,
   useAnimatedStyle,
@@ -25,10 +27,12 @@ import Animated, {
 import Archive from "lucide-react-native/icons/archive";
 import ChevronDown from "lucide-react-native/icons/chevron-down";
 import ChevronsUpDown from "lucide-react-native/icons/chevrons-up-down";
+import CreditCard from "lucide-react-native/icons/credit-card";
 import GitBranch from "lucide-react-native/icons/git-branch";
 import GitPullRequest from "lucide-react-native/icons/git-pull-request";
 import LogOut from "lucide-react-native/icons/log-out";
 import Plug from "lucide-react-native/icons/plug";
+import Search from "lucide-react-native/icons/search";
 import Settings from "lucide-react-native/icons/settings";
 import SquarePen from "lucide-react-native/icons/square-pen";
 import Workflow from "lucide-react-native/icons/workflow";
@@ -42,13 +46,14 @@ import { KestrelMark } from "@/components/KestrelMark";
 import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { LiveText } from "@/components/ui/LiveText";
 import { type BoxSource, useBoxSources } from "@/hooks/useBoxSources";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
 import { errorText, formatAgo, repoShortName } from "@/lib/format";
 import { storage } from "@/lib/storage";
-import { groupThreads } from "@/lib/threadLists";
+import { groupThreads, matchesThreadQuery, threadKey } from "@/lib/threadLists";
 import { type Route, useNavigation } from "@/nav/navigation";
 import { colors, radius, shadows, spacing } from "@/theme";
 
@@ -78,16 +83,12 @@ const ROW_EXIT = FadeOut.duration(160);
 const ROW_LAYOUT = LinearTransition.duration(300);
 /**
  * A thread joining the dock arrives from above (it left the list); a thread returning to the list comes from below
- * (it left the dock). Both use the layout primitives so reduced motion turns them into the end state.
+ * (it left the dock). Both use the layout primitives so reduced motion turns them into the end state. Built-in presets,
+ * not a `Keyframe`: on the web Reanimated pins a custom keyframe's element at its measured size once it ends
+ * (`position: absolute`), so a row that later grows (its sub-threads opened) would overlap the rows below.
  */
-const INTO_DOCK = new Keyframe({
-  0: { opacity: 0, transform: [{ translateY: -14 }] },
-  100: { opacity: 1, transform: [{ translateY: 0 }] },
-}).duration(240);
-const INTO_LIST = new Keyframe({
-  0: { opacity: 0, transform: [{ translateY: 14 }] },
-  100: { opacity: 1, transform: [{ translateY: 0 }] },
-}).duration(240);
+const INTO_DOCK = FadeInUp.duration(240);
+const INTO_LIST = FadeInDown.duration(240);
 
 function useNow(intervalMs: number): number {
   const [now, setNow] = useState(Date.now);
@@ -98,14 +99,17 @@ function useNow(intervalMs: number): number {
   return now;
 }
 
-function NavRow({ icon: Icon, label, route, active }: { icon: LucideIcon; label: string; route: Route; active: boolean }) {
+/** One entry of the account sheet: it closes the sheet, then opens its screen from the sidebar. */
+function SheetRow({ icon: Icon, label, route, onClose }: { icon: LucideIcon; label: string; route: Route; onClose: () => void }) {
   const nav = useNavigation();
   return (
     <Pressable
-      onPress={() => nav.navigate(route)}
+      onPress={() => {
+        onClose();
+        nav.navigate(route);
+      }}
       accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      style={({ pressed }) => [styles.row, (pressed || active) && styles.rowActive]}
+      style={({ pressed }) => [styles.row, pressed && styles.rowActive]}
     >
       <Icon size={22} color={colors.foreground} strokeWidth={1.75} />
       <Text style={styles.navText}>{label}</Text>
@@ -117,7 +121,7 @@ function NavRow({ icon: Icon, label, route, active }: { icon: LucideIcon; label:
  * The web's expanded thread row: the first checkout's repository (and how many more) with the time, the title (fading
  * while the agent works), and that checkout's branch or pull request with the status. Without a checkout the last
  * line names the status instead. `interactive` is false while the working dock is folded, which takes the row and its
- * archive button out of the keyboard tab order.
+ * archive button out of the keyboard tab order. With sub-threads, the last line leaves room for their toggle.
  */
 function ThreadRow({
   task,
@@ -127,6 +131,7 @@ function ThreadRow({
   onArchive,
   now,
   interactive,
+  hasChildren,
 }: {
   task: Task;
   source: BoxSource;
@@ -135,6 +140,7 @@ function ThreadRow({
   onArchive: () => void;
   now: number;
   interactive: boolean;
+  hasChildren: boolean;
 }) {
   const nav = useNavigation();
   const [checkout, ...otherCheckouts] = task.checkouts;
@@ -165,7 +171,7 @@ function ThreadRow({
         <LiveText live={task.status === "running"} style={[styles.threadTitle, active && styles.threadTitleActive]}>
           {task.title || "Untitled thread"}
         </LiveText>
-        <View style={styles.threadLine}>
+        <View style={[styles.threadLine, hasChildren && styles.threadLineToggle]}>
           {checkout ? (
             <>
               {pullRequest ? (
@@ -204,9 +210,105 @@ function ThreadRow({
   );
 }
 
-/** Account and connections, behind the settings button at the foot of the sidebar. */
-function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** A sub-thread under its parent: only the title and its status, so the list stays short while work runs. */
+function SubThreadRow({
+  task,
+  source,
+  active,
+  interactive,
+  hasChildren,
+}: {
+  task: Task;
+  source: BoxSource;
+  active: boolean;
+  interactive: boolean;
+  hasChildren: boolean;
+}) {
   const nav = useNavigation();
+  const title = task.title || "Untitled thread";
+  return (
+    <Pressable
+      onPress={() => nav.navigate({ name: "thread", taskId: task.id, box: source.box })}
+      focusable={interactive}
+      tabIndex={interactive ? 0 : -1}
+      accessibilityRole="button"
+      accessibilityLabel={`${title} — ${STATUS_LABEL[task.status]}`}
+      accessibilityState={{ selected: active }}
+      style={({ pressed }) => [styles.subRow, hasChildren && styles.subRowToggle, (pressed || active) && styles.rowActive]}
+    >
+      <Text style={[styles.subTitle, active && styles.threadTitleActive]} numberOfLines={1}>
+        {title}
+      </Text>
+      <StatusIcon status={task.status} size={14} />
+    </Pressable>
+  );
+}
+
+/**
+ * A thread with its sub-threads, as on the web: the sub-threads stay folded under a chevron at the row's lower left
+ * until the user opens them.
+ */
+function ThreadGroup({
+  entry,
+  sub = false,
+  childrenOf,
+  interactive,
+  renderRow,
+}: {
+  entry: ThreadEntry;
+  sub?: boolean;
+  childrenOf: ReadonlyMap<string, ThreadEntry[]>;
+  interactive: boolean;
+  renderRow: (entry: ThreadEntry, sub: boolean, hasChildren: boolean) => ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const children = childrenOf.get(threadKey(entry.source.api.boxScope, entry.task.id)) ?? [];
+  const hasChildren = children.length > 0;
+  return (
+    <View>
+      <View>
+        {renderRow(entry, sub, hasChildren)}
+        {hasChildren ? (
+          <Pressable
+            onPress={() => setExpanded((e) => !e)}
+            focusable={interactive}
+            tabIndex={interactive ? 0 : -1}
+            accessibilityRole="button"
+            accessibilityLabel={`${expanded ? "Collapse" : "Expand"} sub-threads for ${entry.task.title || "Untitled thread"}`}
+            accessibilityState={{ expanded }}
+            aria-expanded={expanded}
+            hitSlop={8}
+            style={({ pressed }) => [styles.subToggle, pressed && styles.subTogglePressed]}
+          >
+            <View style={!expanded && styles.chevronFolded}>
+              <ChevronDown size={14} color={colors.mutedForeground} />
+            </View>
+          </Pressable>
+        ) : null}
+      </View>
+      {hasChildren && expanded ? (
+        <View style={styles.subList}>
+          {children.map((child) => (
+            <ThreadGroup
+              key={child.task.id}
+              entry={child}
+              sub
+              childrenOf={childrenOf}
+              interactive={interactive}
+              renderRow={renderRow}
+            />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * The web's account menu, behind the account row at the foot of the sidebar: settings and its sections (automations
+ * and archived threads among them, for quick access) and sign-out.
+ */
+function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { user, signOut } = useAuth();
   return (
     <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}>
@@ -226,26 +328,13 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
               </Text>
             </View>
           ) : null}
-          <Pressable
-            style={({ pressed }) => [styles.row, pressed && styles.rowActive]}
-            onPress={() => {
-              onClose();
-              nav.navigate({ name: "settings" });
-            }}
-          >
-            <Settings size={22} color={colors.foreground} strokeWidth={1.75} />
-            <Text style={styles.navText}>Settings</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [styles.row, pressed && styles.rowActive]}
-            onPress={() => {
-              onClose();
-              nav.navigate({ name: "connections" });
-            }}
-          >
-            <Plug size={22} color={colors.foreground} strokeWidth={1.75} />
-            <Text style={styles.navText}>Connections</Text>
-          </Pressable>
+          <SheetRow icon={Settings} label="Settings" route={{ name: "settings" }} onClose={onClose} />
+          <SheetRow icon={Plug} label="Connections" route={{ name: "connections" }} onClose={onClose} />
+          <SheetRow icon={CreditCard} label="Billing" route={{ name: "settings", section: "billing" }} onClose={onClose} />
+          <View style={styles.sheetSeparator} />
+          <SheetRow icon={Workflow} label="Automations" route={{ name: "automations" }} onClose={onClose} />
+          <SheetRow icon={Archive} label="Archived" route={{ name: "archived" }} onClose={onClose} />
+          <View style={styles.sheetSeparator} />
           <Pressable
             style={({ pressed }) => [styles.row, pressed && styles.rowActive]}
             onPress={() => {
@@ -274,11 +363,12 @@ function AnimatedThreadRow({ entering, children }: { entering: typeof ROW_ENTER 
 }
 
 /**
- * The user's threads under the workspace pages, the left drawer: most recent first, with running threads in a
- * foldable dock at the bottom. Threads come from every box the user has; a running thread leaves the list and appears
- * once in the dock, and returns to the list when the run ends. The dock remembers whether the user folded it, caps its
- * height and scrolls, and its rows join the keyboard tab order only while it is open. Threads whose box is still
- * loading or failed say so.
+ * The web's thread sidebar as the left drawer: a thread search and a new-thread button, then the user's threads most
+ * recent first, with sub-threads folded under the thread that started them. Threads waiting on the user get their
+ * own group at the top; working threads (running, or with a live run) leave the list for a foldable dock at the
+ * bottom; both return to the list when they settle. Threads come from every box the user has. The dock remembers
+ * whether the user folded it, caps its height and scrolls, and its rows join the keyboard tab order only while it is
+ * open. Threads whose box is still loading or failed say so. The search filters every group.
  */
 export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const { user } = useAuth();
@@ -293,8 +383,16 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const entries: ThreadEntry[] = sources.flatMap((source, i) =>
     (tasksByBox[i].data ?? []).map((task) => ({ task, source }))
   );
-  const { threads, working, archivedCount } = groupThreads(entries);
+  const scope = (entry: ThreadEntry) => entry.source.api.boxScope;
+  const { awaiting, threads, working, children } = groupThreads(entries, scope);
   const allLoaded = tasksByBox.every((query) => query.isSuccess);
+  const [search, setSearch] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const query = search.trim().toLowerCase();
+  const shown = (list: ThreadEntry[]) => (query ? list.filter((entry) => matchesThreadQuery(entry, query, children, scope)) : list);
+  const shownAwaiting = shown(awaiting);
+  const shownThreads = shown(threads);
+  const shownWorking = shown(working);
 
   // Both the dock and the list animate; the dock's size is measured, bounded, and folds to its header.
   const { height: windowHeight } = useWindowDimensions();
@@ -303,8 +401,8 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const dockBound = Math.max(0, Math.round((rootHeight || windowHeight) * DOCK_MAX_FRACTION));
   const contentBound = Math.max(0, dockBound - DOCK_HEADER_HEIGHT);
   // Before the scroll view reports its content, a row estimate keeps the dock from flashing as header-only.
-  const bodyHeight = Math.min(contentHeight > 0 ? contentHeight : working.length * DOCK_ROW_ESTIMATE, contentBound);
-  const dockOpen = working.length > 0;
+  const bodyHeight = Math.min(contentHeight > 0 ? contentHeight : shownWorking.length * DOCK_ROW_ESTIMATE, contentBound);
+  const dockOpen = shownWorking.length > 0;
   const reduceMotion = useReducedMotion();
 
   const [dockCollapsed, setDockCollapsed] = useState(true);
@@ -386,20 +484,33 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
     });
   }
 
-  function threadRow({ task, source }: ThreadEntry, interactive: boolean) {
+  function threadGroup(entry: ThreadEntry, interactive: boolean) {
     return (
-      <ThreadRow
-        task={task}
-        source={source}
-        active={current.name === "thread" && current.taskId === task.id && sameBox(current.box, source.box)}
-        archiving={
-          archive.isPending &&
-          archive.variables?.taskId === task.id &&
-          archive.variables.api.boxScope === source.api.boxScope
-        }
-        onArchive={() => archiveThread({ task, source })}
-        now={now}
+      <ThreadGroup
+        entry={entry}
+        childrenOf={children}
         interactive={interactive}
+        renderRow={({ task, source }, sub, hasChildren) => {
+          const active = current.name === "thread" && current.taskId === task.id && sameBox(current.box, source.box);
+          return sub ? (
+            <SubThreadRow task={task} source={source} active={active} interactive={interactive} hasChildren={hasChildren} />
+          ) : (
+            <ThreadRow
+              task={task}
+              source={source}
+              active={active}
+              archiving={
+                archive.isPending &&
+                archive.variables?.taskId === task.id &&
+                archive.variables.api.boxScope === source.api.boxScope
+              }
+              onArchive={() => archiveThread({ task, source })}
+              now={now}
+              interactive={interactive}
+              hasChildren={hasChildren}
+            />
+          );
+        }}
       />
     );
   }
@@ -407,50 +518,91 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   return (
     <LayoutAnimationConfig skipEntering>
       <View style={styles.root} onLayout={handleRootLayout}>
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.list}>
-          <View style={styles.header}>
-            <View style={styles.brand}>
-              <KestrelMark height={22} />
-              <Text style={styles.brandText}>Kestrel</Text>
-            </View>
-            <NavRow icon={SquarePen} label="New thread" route={{ name: "new-thread" }} active={current.name === "new-thread"} />
-            <NavRow icon={Workflow} label="Automations" route={{ name: "automations" }} active={current.name === "automations"} />
-            <NavRow
-              icon={Archive}
-              label={archivedCount > 0 ? `Archived (${archivedCount})` : "Archived"}
-              route={{ name: "archived" }}
-              active={current.name === "archived"}
+        <View style={styles.brand}>
+          <KestrelMark height={22} />
+          <Text style={styles.brandText}>Kestrel</Text>
+        </View>
+        <View style={styles.searchRow}>
+          {/* Transparent and flat with softened text at rest; focused, it takes the usual grey input look. */}
+          <View style={styles.searchField}>
+            <Input
+              accessibilityLabel="Search threads"
+              placeholder="Search threads"
+              placeholderTextColor={searchFocused ? colors.mutedForeground + "b3" : colors.foreground + "b3"}
+              value={search}
+              onChangeText={setSearch}
+              onKeyPress={(event: TextInputKeyPressEvent) => {
+                if (event.nativeEvent.key === "Escape") setSearch("");
+              }}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="search"
+              inputMode="search"
+              style={[styles.search, !searchFocused && styles.searchRest]}
             />
-            {threads.length > 0 ? <Text style={styles.section}>Threads</Text> : null}
-            {sources.map((source, i) => {
-              const query = tasksByBox[i];
-              if (query.error) {
-                // A box that is merely unreachable is already shown by its indicator; only a real refusal is worth a row.
-                return isUnreachableError(query.error) ? null : (
-                  <Alert key={source.api.boxScope} style={styles.alert}>
-                    {`${source.label}: ${errorText(query.error)}`}
-                  </Alert>
-                );
-              }
-              if (query.isPending) {
-                return (
-                  <Text key={source.api.boxScope} style={styles.empty}>
-                    Loading {source.label}…
-                  </Text>
-                );
-              }
-              return null;
-            })}
-            {archive.error ? <Alert style={styles.alert}>{errorText(archive.error)}</Alert> : null}
-            {threads.length === 0 && working.length === 0 && allLoaded ? (
-              <Text style={styles.empty}>No threads yet.</Text>
-            ) : null}
+            <View style={styles.searchIcon} pointerEvents="none">
+              <Search size={16} color={searchFocused ? colors.mutedForeground : colors.foreground + "b3"} />
+            </View>
           </View>
-          {threads.map((entry) => (
-            <AnimatedThreadRow key={`${entry.source.api.boxScope}:${entry.task.id}`} entering={INTO_LIST}>
-              {threadRow(entry, true)}
+          <Pressable
+            onPress={() => nav.navigate({ name: "new-thread" })}
+            accessibilityRole="button"
+            accessibilityLabel="New thread"
+            accessibilityState={{ selected: current.name === "new-thread" }}
+            style={({ pressed }) => [styles.compose, pressed && styles.composePressed]}
+          >
+            <SquarePen size={18} color={colors.foreground + "b3"} />
+          </Pressable>
+        </View>
+        <ScrollView style={styles.scroll} contentContainerStyle={styles.list} keyboardShouldPersistTaps="handled">
+          {sources.map((source, i) => {
+            const boxQuery = tasksByBox[i];
+            if (boxQuery.error) {
+              // A box that is merely unreachable is already shown by its indicator; only a real refusal is worth a row.
+              return isUnreachableError(boxQuery.error) ? null : (
+                <Alert key={source.api.boxScope} style={styles.alert}>
+                  {`${source.label}: ${errorText(boxQuery.error)}`}
+                </Alert>
+              );
+            }
+            if (boxQuery.isPending) {
+              return (
+                <Text key={source.api.boxScope} style={styles.empty}>
+                  Loading {source.label}…
+                </Text>
+              );
+            }
+            return null;
+          })}
+          {archive.error ? <Alert style={styles.alert}>{errorText(archive.error)}</Alert> : null}
+          {!query && awaiting.length + threads.length + working.length === 0 && allLoaded ? (
+            <Text style={styles.empty}>No threads yet.</Text>
+          ) : null}
+          {shownAwaiting.length > 0 ? (
+            <>
+              <View style={styles.groupHeader}>
+                <StatusIcon status="needs_input" size={14} />
+                <Text style={styles.groupTitle}>Needs input</Text>
+                <Text style={styles.groupCount}>{shownAwaiting.length}</Text>
+              </View>
+              {shownAwaiting.map((entry) => (
+                <AnimatedThreadRow key={threadKey(scope(entry), entry.task.id)} entering={INTO_LIST}>
+                  {threadGroup(entry, true)}
+                </AnimatedThreadRow>
+              ))}
+              {shownThreads.length > 0 ? <View style={styles.groupSeparator} /> : null}
+            </>
+          ) : null}
+          {shownThreads.map((entry) => (
+            <AnimatedThreadRow key={threadKey(scope(entry), entry.task.id)} entering={INTO_LIST}>
+              {threadGroup(entry, true)}
             </AnimatedThreadRow>
           ))}
+          {query && shownAwaiting.length + shownThreads.length + shownWorking.length === 0 ? (
+            <Text style={styles.empty}>No threads match “{search.trim()}”</Text>
+          ) : null}
         </ScrollView>
         {/* The dock stays mounted so its height, not a remount, is what folds: collapsed it is the header alone. */}
         <Animated.View
@@ -466,7 +618,7 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
             focusable={dockOpen}
             tabIndex={dockOpen ? 0 : -1}
             accessibilityRole="button"
-            accessibilityLabel={`Working threads, ${working.length} running`}
+            accessibilityLabel={`Working threads, ${shownWorking.length} running`}
             accessibilityHint={dockCollapsed ? "Shows the working threads" : "Folds the working threads"}
             accessibilityState={{ expanded: !dockCollapsed }}
             aria-expanded={!dockCollapsed}
@@ -476,7 +628,7 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
               <StatusIcon status="running" size={14} />
             </View>
             <Text style={styles.dockTitle}>Working</Text>
-            <Text style={styles.dockCount}>{working.length}</Text>
+            <Text style={styles.dockCount}>{shownWorking.length}</Text>
             <Animated.View style={[styles.dockChevron, chevronStyle]}>
               <ChevronDown size={14} color={colors.mutedForeground} />
             </Animated.View>
@@ -497,9 +649,9 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
                 setContentHeight((previous) => (Math.abs(previous - rounded) > 0.5 ? rounded : previous));
               }}
             >
-              {working.map((entry) => (
-                <AnimatedThreadRow key={`${entry.source.api.boxScope}:${entry.task.id}`} entering={INTO_DOCK}>
-                  {threadRow(entry, !dockCollapsed && dockOpen)}
+              {shownWorking.map((entry) => (
+                <AnimatedThreadRow key={threadKey(scope(entry), entry.task.id)} entering={INTO_DOCK}>
+                  {threadGroup(entry, !dockCollapsed && dockOpen)}
                 </AnimatedThreadRow>
               ))}
             </ScrollView>
@@ -537,8 +689,14 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   scroll: { flex: 1 },
   list: { paddingHorizontal: spacing.sm, paddingBottom: spacing.sm },
-  header: { paddingBottom: spacing.xs },
-  brand: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: spacing.md, paddingVertical: spacing.lg },
+  brand: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
   brandText: { color: colors.foreground, fontSize: 22, fontWeight: "600", letterSpacing: -0.4 },
   row: {
     flexDirection: "row",
@@ -551,16 +709,31 @@ const styles = StyleSheet.create({
   },
   rowActive: { backgroundColor: colors.accent },
   navText: { color: colors.foreground, fontSize: 15, fontWeight: "500" },
-  section: {
-    color: colors.mutedForeground,
-    fontSize: 12,
-    fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
+  searchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: spacing.sm,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.sm,
+  },
+  searchField: { flex: 1, minWidth: 0, justifyContent: "center" },
+  search: { minHeight: 38, paddingLeft: 36, paddingRight: 10, paddingVertical: 6, fontSize: 15 },
+  searchRest: { backgroundColor: "transparent", borderColor: "transparent" },
+  searchIcon: { position: "absolute", left: 11 },
+  compose: { width: 38, height: 38, borderRadius: radius.md, alignItems: "center", justifyContent: "center" },
+  composePressed: { backgroundColor: colors.white06 },
+  groupHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     paddingHorizontal: spacing.md,
-    paddingTop: spacing.lg,
+    paddingTop: spacing.sm,
     paddingBottom: spacing.xs,
   },
+  groupTitle: { color: colors.mutedForeground, fontSize: 12, fontWeight: "600" },
+  groupCount: { color: colors.mutedForeground, fontSize: 12, fontVariant: ["tabular-nums"] },
+  groupSeparator: { height: 1, backgroundColor: colors.border, marginTop: spacing.sm, marginBottom: spacing.xs },
   alert: { marginHorizontal: spacing.sm, marginBottom: spacing.sm },
   empty: { color: colors.mutedForeground, fontSize: 14, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   threadRow: {
@@ -571,12 +744,38 @@ const styles = StyleSheet.create({
   },
   threadInfo: { gap: spacing.xs },
   threadLine: { flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 },
+  threadLineToggle: { paddingLeft: 24 },
   threadMeta: { flex: 1, color: colors.mutedForeground, fontSize: 12 },
   threadTime: { color: colors.mutedForeground, fontSize: 12, fontVariant: ["tabular-nums"] },
   hidden: { opacity: 0 },
   threadTitle: { color: colors.mutedForeground, fontSize: 14, fontWeight: "500" },
   threadTitleActive: { color: colors.foreground, fontWeight: "600" },
   archive: { position: "absolute", top: spacing.xs, right: spacing.xs, width: 28, height: 28 },
+  subToggle: {
+    position: "absolute",
+    left: spacing.xs,
+    bottom: spacing.xs,
+    width: 24,
+    height: 24,
+    borderRadius: radius.sm,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  subTogglePressed: { backgroundColor: colors.white06 },
+  chevronFolded: { transform: [{ rotate: "-90deg" }] },
+  subList: { marginLeft: spacing.lg, paddingLeft: spacing.sm, borderLeftWidth: 1, borderLeftColor: colors.border },
+  subRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    minHeight: 36,
+    paddingLeft: spacing.sm,
+    paddingRight: spacing.md,
+    borderRadius: radius.md,
+    marginVertical: 1,
+  },
+  subRowToggle: { paddingLeft: 36 },
+  subTitle: { flex: 1, color: colors.mutedForeground, fontSize: 13 },
   dockSection: {
     flexShrink: 0,
     overflow: "hidden",
@@ -618,6 +817,7 @@ const styles = StyleSheet.create({
     fontWeight: "500",
   },
   backdrop: { flex: 1, backgroundColor: colors.scrim, justifyContent: "flex-end" },
+  sheetSeparator: { height: 1, backgroundColor: colors.border, marginVertical: spacing.xs, marginHorizontal: spacing.md },
   sheet: {
     backgroundColor: colors.secondary,
     borderTopLeftRadius: radius.xxl,
