@@ -82,7 +82,7 @@ function DockBackdrop({ tall }: { tall: boolean }) {
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/70 backdrop-blur-md"
+      className="pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/50 backdrop-blur-md"
       style={{ top: `-${band}`, maskImage: `linear-gradient(to top, ${stops.join(", ")})` }}
     />
   )
