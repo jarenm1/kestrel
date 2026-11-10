@@ -33,6 +33,7 @@ import X from "lucide-react/icons/x"
 import type { LucideIcon } from "lucide-react"
 import { cn } from "../cn"
 import { tokenizeDiff, TokenizedText, TokenLine, useHighlighter } from "../highlight"
+import { Collapse } from "./Collapse"
 import { useTranscriptHost } from "./host"
 import { useAutoOpen } from "./useAutoOpen"
 
@@ -295,11 +296,9 @@ export function ToolRow({ item, view, source, running, nested }: {
         {failed && <X className="size-3.5 shrink-0 text-destructive" aria-label="failed" />}
         <Chevron open={open} />
       </button>
-      {open && (
-        <div className={DETAILS_CLASS}>
-          <ToolDetails item={item} view={view} source={source} nested={nested} />
-        </div>
-      )}
+      <Collapse open={open} className={DETAILS_CLASS}>
+        <ToolDetails item={item} view={view} source={source} nested={nested} />
+      </Collapse>
     </div>
   )
 }
@@ -335,7 +334,9 @@ export function ToolGroup({ single, summary, kinds, live, failedCount, children 
           <Chevron open={open} />
         </button>
       )}
-      {(single || open) && <div className={single ? "min-w-0" : cn(DETAILS_CLASS, "gap-0")}>{children}</div>}
+      <Collapse open={single || open} className={single ? "min-w-0" : cn(DETAILS_CLASS, "gap-0")}>
+        {children}
+      </Collapse>
     </div>
   )
 }
