@@ -276,10 +276,11 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
         <div className="flex items-center gap-1.5 pr-3 pb-2">
-          <div className="relative min-w-0 flex-1">
+          {/* Black with white text at rest; focused, it takes the usual grey input look. */}
+          <div className="group/search relative min-w-0 flex-1">
             <Search
               aria-hidden="true"
-              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-foreground group-focus-within/search:text-muted-foreground"
             />
             <Input
               type="search"
@@ -290,7 +291,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
               onKeyDown={(e) => {
                 if (e.key === "Escape") setSearch("")
               }}
-              className="h-8 pr-2.5 pl-8 text-[13px]"
+              className="h-8 bg-black pr-2.5 pl-8 text-[13px] text-foreground placeholder:text-foreground focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
             />
           </div>
           <NavLink
