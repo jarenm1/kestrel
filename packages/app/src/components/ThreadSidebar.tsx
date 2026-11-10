@@ -379,7 +379,12 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
   )
 }
 
-function ThreadGroup({ task, sub = false, now, openTaskId, childrenByParent, archivingId, onArchive }: {
+/**
+ * A thread with its sub-threads. Takes a `ref` because `AnimatePresence`'s `popLayout` lifts the leaving group out
+ * of the list; without it the group stays in flow until its row fades, and the rows below jump once it goes.
+ */
+function ThreadGroup({ ref, task, sub = false, now, openTaskId, childrenByParent, archivingId, onArchive }: {
+  ref?: Ref<HTMLDivElement>
   task: Task
   sub?: boolean
   now: number
@@ -391,7 +396,7 @@ function ThreadGroup({ task, sub = false, now, openTaskId, childrenByParent, arc
   const children = childrenByParent.get(task.id) ?? []
   const [expanded, setExpanded] = useState(false)
   return (
-    <div className="min-w-0">
+    <div ref={ref} className="min-w-0">
       <div className="relative">
         {sub ? (
           <SubThreadTab task={task} hasChildren={children.length > 0} />
