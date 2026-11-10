@@ -316,7 +316,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
         <div
           aria-hidden
           className={cn(
-            "pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/60 backdrop-blur-xl backdrop-saturate-150",
+            "pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/40 backdrop-blur-xl backdrop-saturate-150",
             activeRun
               ? "-top-14 [mask-image:linear-gradient(to_top,black_calc(100%-1.4rem),transparent)]"
               : "-top-5 [mask-image:linear-gradient(to_top,black_calc(100%-1.25rem),transparent)]",
