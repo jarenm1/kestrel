@@ -64,6 +64,38 @@ function WorkingIndicator({ run }: { run: Run }) {
   )
 }
 
+/** Blur radii (px) of the layers in the dock's fade band, weakest at its top edge, strongest against the dock. */
+const BAND_BLURS = [1, 2, 4, 8, 16] as const
+const BAND_STEP = 100 / (BAND_BLURS.length + 1)
+
+/**
+ * Acrylic behind the dock: under the dock itself a translucent, strongly blurred fill, and above it a band where the
+ * thread blurs and darkens progressively toward the dock. One `backdrop-filter` has a single radius and so ends in a
+ * visible edge; instead each layer is masked to an overlapping slice of the band, so the strength ramps up smoothly.
+ * `tall` raises the band over the working indicator while a turn runs. Siblings of the dock's content, never a filter
+ * on the dock: a filtered ancestor would keep the composer's own blur from seeing the thread.
+ */
+function DockBackdrop({ tall }: { tall: boolean }) {
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
+      <div className="absolute inset-0 bg-card/70 backdrop-blur-lg" />
+      <div className={cn("absolute inset-x-0 bottom-full", tall ? "h-16" : "h-12")}>
+        {BAND_BLURS.map((px, i) => (
+          <div
+            key={px}
+            className="absolute inset-0"
+            style={{
+              backdropFilter: `blur(${px}px)`,
+              maskImage: `linear-gradient(to bottom, transparent ${i * BAND_STEP}%, black ${(i + 1) * BAND_STEP}%, black ${(i + 2) * BAND_STEP}%, transparent ${(i + 3) * BAND_STEP}%)`,
+            }}
+          />
+        ))}
+        <div className="absolute inset-0 bg-linear-to-t from-card/70 to-transparent" />
+      </div>
+    </div>
+  )
+}
+
 /** One line of what a delegated run is doing: its latest report, tool call, or the last line of its prose. */
 function latestActivity(items: readonly AgentItem[] | undefined, taskId: string): string | undefined {
   for (const item of [...(items ?? [])].reverse()) {
@@ -302,25 +334,11 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
           runs={runs}
           runItems={runItems}
           pendingAskId={pendingAsk?.id}
-          className={cn("px-5 pt-4", activeRun ? "pb-[calc(var(--dock-h)+2.25rem)]" : "pb-[calc(var(--dock-h)+1rem)]")}
+          className={cn("px-5 pt-4", activeRun ? "pb-[calc(var(--dock-h)+4rem)]" : "pb-[calc(var(--dock-h)+3rem)]")}
         />
       )}
       <div ref={dockRef} className="absolute inset-x-0 bottom-0 z-10 flex flex-col items-center px-5 pt-2 pb-5">
-        {/*
-          Acrylic behind the dock: a translucent, lightly blurred layer that reaches just past whatever sits above the
-          composer (the context bar's labels; while a turn runs, the working indicator) and fades out evenly over its top
-          0.75rem. Only enough blur to keep that text readable: the composer carries its own strong blur, and a strong
-          one here would end in a visible edge across the thread. A sibling, not a filter on the dock itself: a filtered
-          ancestor would keep the composer's own blur from seeing the thread.
-        */}
-        <div
-          aria-hidden
-          className={cn(
-            "pointer-events-none absolute inset-x-0 bottom-0 -z-10 bg-card/40 backdrop-blur-sm",
-            "[mask-image:linear-gradient(to_top,black_calc(100%-0.75rem),transparent)]",
-            activeRun ? "-top-9" : "-top-2",
-          )}
-        />
+        <DockBackdrop tall={activeRun !== undefined} />
         {activeRun && <WorkingIndicator run={activeRun} />}
         {/*
           Above the composer, clear of the context bar's labels on its top edge. No key: ThreadPage remounts the panel
