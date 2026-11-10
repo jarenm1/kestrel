@@ -114,7 +114,7 @@ them.
 - `src/ch-api.ts`, `src/ch-process.ts`: Cloud Hypervisor API client and process launch (scope or direct).
 - `src/vsock.ts`: guest agent link (`CONNECT`/`OK` handshake, newline-delimited JSON, per-line cap).
 - `src/template.ts`, `src/restore.ts`: the shared template, and restore with a rewritten config.
-- `src/network.ts`: slot allocation, tap and nftables commands, guest addressing.
+- `src/network.ts`: slot allocation, guest addressing, and the `tap_addrs` element commands and check. The host NixOS module owns the nftables table.
 - `src/policy.ts`: memory and vCPU targets, idle detection, suspend victim choice, disk pressure.
 - `src/volume.ts`: `kestrel-volume` service. `src/meter.ts`, `src/outbox.ts`: usage measurement and shipping.
 - `src/state-store.ts`, `src/fs-atomic.ts`, `src/lock.ts`: durable state, atomic writes, and per-VM locks.

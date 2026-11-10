@@ -297,14 +297,16 @@ in
       matchConfig.Name = "kestrel0";
       address = [ "${hostAddress}/32" ];
     };
-    # The kestrel table is this host's firewall (docs/nest.md). NixOS's nixos-fw input chain has policy drop and
-    # would drop the guests' dependency-cache, Nix-cache and DNS connections before the kestrel accepts run.
+    # This module owns the kestrel table, its chains and the tap_addrs set (docs/nest.md); the host agent only maintains
+    # tap_addrs elements. NixOS's nixos-fw input chain has policy drop and would drop the guests' dependency-cache,
+    # Nix-cache and DNS connections before the kestrel accepts run.
     networking.firewall.enable = false;
     networking.nftables.enable = true;
     networking.nftables.ruleset = ''
       table inet kestrel {
-        # Anti-spoof: a guest's tap may send only from the address the host agent assigned to it. The agent
-        # fills this set when it creates the tap: `nft add element inet kestrel tap_addrs { "kn-<id>" . <vm-ip> }`.
+        # Anti-spoof: a guest's tap may send only from the address the host agent assigned to it. The agent adds one
+        # element per live tap (`nft add element inet kestrel tap_addrs { "kn-<id>" . <vm-ip> }`) and deletes it when the
+        # tap goes. This module declares the set; reloading or stopping nftables.service empties it until the agent re-adds.
         set tap_addrs {
           type ifname . ipv4_addr;
         }
@@ -372,7 +374,7 @@ ${lib.optionalString cfg.turn.enable "          udp dport ${toString config.serv
     systemd.services.kestrel-host = {
       description = "Nest host agent";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" "kestrel-depcache.service" "kestrel-nix-cache.service" ];
+      after = [ "network-online.target" "nftables.service" "kestrel-depcache.service" "kestrel-nix-cache.service" ];
       wants = [ "network-online.target" ];
       # The daemon shells out to `ip`, `tc`, `nft`, `systemd-run`, `cp` and the volume tool.
       path = with pkgs; [ cloud-hypervisor iproute2 nftables xfsprogs systemd coreutils packages."kestrel-volume" ];
