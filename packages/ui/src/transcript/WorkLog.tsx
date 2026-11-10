@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type ReactNode } from "react"
+import { useLayoutEffect, useMemo, useRef, type ReactNode } from "react"
 import {
   outputText,
   Paths,
@@ -32,6 +32,7 @@ import Wrench from "lucide-react/icons/wrench"
 import X from "lucide-react/icons/x"
 import type { LucideIcon } from "lucide-react"
 import { cn } from "../cn"
+import { tokenizeDiff, TokenizedText, TokenLine, useHighlighter } from "../highlight"
 import { useTranscriptHost } from "./host"
 import { useAutoOpen } from "./useAutoOpen"
 
@@ -128,7 +129,9 @@ const DIFF_LINE: Record<EditLine["kind"], { row: string; marker: string }> = {
   context: { row: "", marker: " " },
 }
 
-function EditDiff({ lines }: { lines: readonly EditLine[] }) {
+function EditDiff({ lines, path }: { lines: readonly EditLine[]; path?: string }) {
+  const highlighter = useHighlighter()
+  const tokens = useMemo(() => tokenizeDiff(highlighter, [{ lines }], { path }), [highlighter, lines, path])
   return (
     <div className="max-h-72 overflow-auto rounded-lg bg-code py-1.5 font-mono text-[11px] shadow-well">
       {lines.map((line, index) => (
@@ -141,7 +144,9 @@ function EditDiff({ lines }: { lines: readonly EditLine[] }) {
           >
             {DIFF_LINE[line.kind].marker}
           </span>
-          <span className="text-foreground/90">{line.text}</span>
+          <span className="text-foreground/90">
+            <TokenLine tokens={tokens?.get(line)} fallback={line.text} />
+          </span>
         </div>
       ))}
     </div>
@@ -176,6 +181,9 @@ function RunImage({ source, image }: { source: RunSource; image: Attachment }) {
 function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: ToolView; source: RunSource; nested: ReactNode }) {
   const output = outputText(item.output, view.kind)
   const hasInput = typeof item.input === "object" && item.input !== null && Object.keys(item.input).length > 0
+  const inputJson = hasInput ? JSON.stringify(item.input, null, 2) : ""
+  // Terminal output keeps its colors when it carries SGR escapes; everything else is plain text.
+  const ansiOutput = output.text.includes("\u001b[")
   // An unrecognized call shows its input as is; a recognized one summarizes it, so the whole input sits one click away.
   const inlineInput = view.kind === "other" && view.note === undefined && hasInput
   return (
@@ -183,13 +191,13 @@ function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: Too
       {view.command !== undefined && (
         <pre className={PRE_CLASS} title={view.rawCommand}>
           <span className="text-muted-foreground select-none">$ </span>
-          {view.command}
+          <TokenizedText code={view.command} language="bash" />
         </pre>
       )}
       {view.note !== undefined && (
         <div className="max-h-60 overflow-auto text-sm break-words whitespace-pre-wrap text-muted-foreground">{view.note}</div>
       )}
-      {view.diff !== undefined && view.diff.length > 0 && <EditDiff lines={view.diff} />}
+      {view.diff !== undefined && view.diff.length > 0 && <EditDiff lines={view.diff} path={view.paths[0]} />}
       {view.changes !== undefined && (
         <ul className="flex flex-col gap-0.5 font-mono text-[11px]">
           {view.changes.map((change) => (
@@ -213,10 +221,16 @@ function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: Too
           })}
         </ul>
       )}
-      {inlineInput && <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>}
+      {inlineInput && (
+        <pre className={PRE_CLASS}>
+          <TokenizedText code={inputJson} language="json" />
+        </pre>
+      )}
       {/* A diff stands in for an edit's success message, but never for the error saying why it failed. */}
       {output.text !== "" && (view.diff === undefined || item.status === "error") && (
-        <pre className={cn(PRE_CLASS, item.status === "error" && "text-destructive")}>{output.text}</pre>
+        <pre className={cn(PRE_CLASS, item.status === "error" && "text-destructive")}>
+          {ansiOutput ? <TokenizedText code={output.text} language="ansi" /> : output.text}
+        </pre>
       )}
       {item.images?.map((image) => <RunImage key={image.id} source={source} image={image} />)}
       {/* Placeholders for images the box did not keep: runs from before it kept them, or a type it cannot serve. */}
@@ -233,7 +247,9 @@ function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: Too
             {item.name} · <span className="group-open/input:hidden">full input</span>
             <span className="hidden group-open/input:inline">hide input</span>
           </summary>
-          <pre className={cn(PRE_CLASS, "mt-1")}>{JSON.stringify(item.input, null, 2)}</pre>
+          <pre className={cn(PRE_CLASS, "mt-1")}>
+            <TokenizedText code={inputJson} language="json" />
+          </pre>
         </details>
       ) : (
         <div className="font-mono text-[10px] break-all text-muted-foreground/60">{item.name}</div>

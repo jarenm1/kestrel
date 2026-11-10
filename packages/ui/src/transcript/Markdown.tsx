@@ -9,6 +9,7 @@ import CircleDot from "lucide-react/icons/circle-dot"
 import GitPullRequest from "lucide-react/icons/git-pull-request"
 import { githubReferenceFromLink } from "@cloudagents/composer/reference"
 import { cn } from "../cn"
+import { TokenizedText } from "../highlight"
 import { AGENT_HTML_SCHEMA, rehypeAgentSvg } from "./agentHtml"
 import { externalClick, useTranscriptHost } from "./host"
 
@@ -31,7 +32,19 @@ function Link({ node: _node, children, ...props }: ComponentProps<"a"> & ExtraPr
   )
 }
 
-const COMPONENTS: Components = { a: Link }
+const COMPONENTS: Components = { a: Link, code: Code }
+
+/** Fenced code is highlighted from its info string; inline code and unlabelled fences stay as they are. */
+function Code({ node: _node, className, children, ...props }: ComponentProps<"code"> & ExtraProps) {
+  const language = /^language-(.+)$/.exec(className ?? "")?.[1]
+  if (language === undefined) return <code className={className} {...props}>{children}</code>
+  const text = (Array.isArray(children) ? children.join("") : String(children ?? "")).replace(/\n$/, "")
+  return (
+    <code className={className} {...props}>
+      <TokenizedText code={text} language={language} />
+    </code>
+  )
+}
 
 // Single newlines stay line breaks: run output that falls back to raw stdout/stderr is line-oriented.
 // The drawing repair runs last, so it sees the breaks `remarkBreaks` and the tables `remarkGfm` added.

@@ -1,5 +1,6 @@
-import { useRef, type ReactNode } from "react"
+import { useMemo, useRef, type ReactNode } from "react"
 import { ChevronRight } from "lucide-react"
+import { TokenLine, tokenizeDiff, useHighlighter, type ThemedToken } from "@cloudagents/ui/highlight"
 import { type DiffFile, type DiffFileStatus, type DiffLine, displayPath } from "@/lib/diff"
 import { cn } from "@/lib/utils"
 
@@ -115,6 +116,8 @@ function FileSection({
 }
 
 function FileBody({ file }: { file: DiffFile }) {
+  const highlighter = useHighlighter()
+  const tokens = useMemo(() => tokenizeDiff(highlighter, file.hunks, { path: displayPath(file) }), [highlighter, file])
   const notes: string[] = []
   if (file.modeChange) notes.push(`Mode ${file.modeChange.from} → ${file.modeChange.to}`)
   if (file.binary) notes.push("Binary file not shown.")
@@ -140,7 +143,7 @@ function FileBody({ file }: { file: DiffFile }) {
                 </td>
               </tr>
               {hunk.lines.map((line, j) => (
-                <LineRow key={j} line={line} />
+                <LineRow key={j} line={line} tokens={tokens?.get(line)} />
               ))}
             </tbody>
           ))}
@@ -156,7 +159,7 @@ const LINE_STYLE: Record<DiffLine["kind"], { row: string; gutter: string; marker
   context: { row: "", gutter: "text-muted-foreground/50", marker: " " },
 }
 
-function LineRow({ line }: { line: DiffLine }) {
+function LineRow({ line, tokens }: { line: DiffLine; tokens: readonly ThemedToken[] | undefined }) {
   const style = LINE_STYLE[line.kind]
   const gutter = cn("w-px select-none px-2 text-right align-top whitespace-nowrap", style.gutter)
   return (
@@ -167,7 +170,7 @@ function LineRow({ line }: { line: DiffLine }) {
         {style.marker}
       </td>
       <td className="pr-4 pl-1 whitespace-pre text-foreground/90">
-        {line.text}
+        <TokenLine tokens={tokens} fallback={line.text} />
         {line.noNewline && (
           <span className="ml-2 font-sans text-[10px] text-muted-foreground select-none">no newline at end of file</span>
         )}

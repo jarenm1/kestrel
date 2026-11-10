@@ -11,6 +11,7 @@
     "./transcript/host": "./src/transcript/host.tsx",
     "./markdown": "./src/transcript/Markdown.tsx",
     "./message-attachments": "./src/transcript/MessageAttachments.tsx",
+    "./highlight": "./src/highlight/index.ts",
     "./harness-logos": "./src/harness-logos.ts",
     "./theme.css": "./src/theme.css",
     "./dom.css": "./src/dom.css"
@@ -21,6 +22,7 @@
   "dependencies": {
     "@cloudagents/composer": "workspace:*",
     "@cloudagents/protocol": "workspace:*",
+    "@pierre/highlights": "0.5.0",
     "@radix-ui/react-slot": "^1.5.0",
     "@tailwindcss/typography": "^0.5.20",
     "class-variance-authority": "^0.7.1",
