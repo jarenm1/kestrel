@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
-import { ChevronsUpDown, CreditCard, LogOut, Plug, Settings } from "lucide-react"
+import { Archive, ChevronsUpDown, CreditCard, LogOut, Plug, Settings, Workflow } from "lucide-react"
 import { queries } from "@/api/queries"
 import {
   DropdownMenu,
@@ -22,8 +22,8 @@ function Avatar({ login, avatarUrl }: { login: string; avatarUrl: string }) {
 }
 
 /**
- * The signed-in user at the foot of the threads strip; opens settings, its sections and sign-out. `compact` is the
- * collapsed rail: the avatar alone.
+ * The signed-in user at the foot of the threads strip; opens settings, its sections (automations and archived threads
+ * among them, for quick access) and sign-out. `compact` is the collapsed rail: the avatar alone.
  */
 export function AccountMenu({ compact = false }: { compact?: boolean }) {
   const me = useQuery(queries.me())
@@ -70,6 +70,19 @@ export function AccountMenu({ compact = false }: { compact?: boolean }) {
           <Link to="/settings/billing">
             <CreditCard />
             Billing
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link to="/settings/automations">
+            <Workflow />
+            Automations
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
+          <Link to="/settings/archived">
+            <Archive />
+            Archived
           </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />

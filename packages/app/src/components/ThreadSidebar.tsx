@@ -2,14 +2,12 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type 
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "framer-motion"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
 import {
-  Archive,
   ChevronDown,
   GitBranch,
   GitPullRequest,
   PanelLeftClose,
   PanelLeftOpen,
   SquarePen,
-  Workflow,
   type LucideIcon,
 } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
@@ -141,7 +139,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
   // needs a `lastMessageAt` on Task from the server. The "ago" label has the same caveat.
   const byRecent = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   const active = byRecent.filter((task) => task.archivedAt === undefined)
-  const archivedCount = byRecent.length - active.length
   const { roots, children } = groupSubThreads(active)
   const awaiting = roots.filter((task) => isTaskAwaitingUser(task))
   const threads = roots.filter((task) => !isTaskWorking(task) && !isTaskAwaitingUser(task))
@@ -215,22 +212,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
             >
               <SquarePen className="size-4" />
             </NavLink>
-            <NavLink
-              to="/automations"
-              aria-label="Automations"
-              title="Automations"
-              className={(s) => cn(tabClass(s), "justify-center py-2")}
-            >
-              <Workflow className="size-4" />
-            </NavLink>
-            <NavLink
-              to="/archived"
-              aria-label="Archived"
-              title="Archived"
-              className={(s) => cn(tabClass(s), "justify-center py-2")}
-            >
-              <Archive className="size-4" />
-            </NavLink>
             <AnimatePresence initial={false} mode="popLayout">
               {threads.map(railTab)}
             </AnimatePresence>
@@ -286,14 +267,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           <NavLink to={APP_HOME} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
             <SquarePen className="size-4 shrink-0" />
             New thread
-          </NavLink>
-          <NavLink to="/automations" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-            <Workflow className="size-4 shrink-0" />
-            Automations
-          </NavLink>
-          <NavLink to="/archived" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-            <Archive className="size-4 shrink-0" />
-            Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
           </NavLink>
           {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
           {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}

@@ -77,11 +77,11 @@ export function ArchivedPanel() {
   ])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-6">
+    <>
       <div className="flex items-start gap-4">
         <div className="flex-1">
           <h2 className="text-lg font-semibold tracking-tight">Archived threads</h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-muted-foreground">
             Archived threads keep their history and checkouts. Unarchive one to continue it.
           </p>
         </div>
@@ -219,6 +219,6 @@ export function ArchivedPanel() {
           )}
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   )
 }

@@ -3,7 +3,7 @@ import type { LaunchRoute, Route, SettingsSection } from "@/nav/navigation";
 /**
  * The web build's navigation glue. The stack stays in memory; the browser sees one extra "back" history entry while a
  * back press can be handled in the app, so the phone's back gesture closes the sidebar or pops a screen instead of
- * leaving the page. URLs follow the web app's (`/c/:id`, `/automations`, `/archived`, `/settings/...`) so reloads and
+ * leaving the page. URLs follow the web app's (`/c/:id`, `/settings/...`) so reloads and
  * shared links land on the same screen. The Worker serves this build for exactly these paths (MOBILE_PAGE).
  */
 
@@ -40,8 +40,8 @@ function launchRoute(): LaunchRoute | null {
   const path = window.location.pathname.replace(/(.)\/$/, "$1");
   const thread = THREAD_PATH.exec(path);
   if (thread?.[1]) return { name: "thread", taskId: decodeURIComponent(thread[1]) };
-  if (path === "/automations") return { name: "automations" };
-  if (path === "/archived") return { name: "archived" };
+  if (path === "/settings/automations") return { name: "automations" };
+  if (path === "/settings/archived") return { name: "archived" };
   if (path === "/settings/connections") return { name: "connections" };
   if (path === "/settings/usage") return { name: "usage" };
   const section = sectionOf(path);
@@ -55,9 +55,9 @@ function pathFor(route: Route): string {
     case "thread":
       return `/c/${encodeURIComponent(route.taskId)}`;
     case "automations":
-      return "/automations";
+      return "/settings/automations";
     case "archived":
-      return "/archived";
+      return "/settings/archived";
     case "connections":
       return "/settings/connections";
     case "settings":

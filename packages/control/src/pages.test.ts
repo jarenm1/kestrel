@@ -6,7 +6,7 @@ const ANDROID_PHONE = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.
 const ANDROID_TABLET = "Mozilla/5.0 (Linux; Android 15; SM-X910) AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
 const DESKTOP = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15"
 
-const MOBILE_PATHS = ["/", "/c/3a591628-9dad-4ceb-afd8-58f669cc0e78", "/automations", "/archived", "/settings", "/settings/connections"]
+const MOBILE_PATHS = ["/", "/c/3a591628-9dad-4ceb-afd8-58f669cc0e78", "/settings/automations", "/settings/archived", "/settings", "/settings/connections"]
 
 /** An asset server that records the URL it was asked for and answers with its own Vary header. */
 function stubAssets() {

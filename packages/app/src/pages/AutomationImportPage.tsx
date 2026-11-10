@@ -25,7 +25,7 @@ export function AutomationImportPage() {
         <h1 className="text-xl font-semibold tracking-tight">Import automation</h1>
         <Alert>This automation link is invalid or incomplete. Ask the sender for a new link.</Alert>
         <Button asChild variant="secondary" className="self-start">
-          <Link to="/automations">Back to automations</Link>
+          <Link to="/settings/automations">Back to automations</Link>
         </Button>
       </div>
     )
@@ -65,7 +65,7 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.automations })
-      navigate("/automations")
+      navigate("/settings/automations")
     },
   })
 
@@ -136,7 +136,7 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
 
           <div className="flex justify-end gap-2">
             <Button asChild variant="ghost">
-              <Link to="/automations">Cancel</Link>
+              <Link to="/settings/automations">Cancel</Link>
             </Button>
             <Button type="button" disabled={!canImport || create.isPending} onClick={() => create.mutate()}>
               {create.isPending ? "Importing…" : "Import automation"}

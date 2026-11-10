@@ -8,11 +8,11 @@ export const SITE_HOSTS: Record<string, true> = { "kestrel-agent.com": true, "ww
 const PHONE_USER_AGENT = /Mobi/
 
 /**
- * App pages the mobile app has a screen for: home, threads, automations, archived and settings. They are also the
- * Worker-first page routes in wrangler.jsonc (pages.test.ts checks the two agree). Other pages (pairing approval,
- * sign-in) stay on the desktop SPA.
+ * App pages the mobile app has a screen for: home, threads and settings (automations and archived threads included).
+ * They are also the Worker-first page routes in wrangler.jsonc (pages.test.ts checks the two agree). Other pages
+ * (pairing approval, sign-in) stay on the desktop SPA.
  */
-export const MOBILE_PAGE = /^\/(?:c\/[^/]+|automations|archived|settings(?:\/[^/]+)?)?\/?$/
+export const MOBILE_PAGE = /^\/(?:c\/[^/]+|settings(?:\/[^/]+)?)?\/?$/
 
 /** The static asset server (`env.ASSETS`). */
 export interface Assets {

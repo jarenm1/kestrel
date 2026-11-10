@@ -59,9 +59,7 @@ export function App() {
         <Route element={<WorkspaceLayout />}>
           <Route path={APP_HOME} element={<NewThreadPage />} />
           <Route path="/c/:taskId" element={<ThreadPage />} />
-          <Route path="/automations" element={<AutomationsPanel />} />
           <Route path="/automations/import" element={<AutomationImportPage />} />
-          <Route path="/archived" element={<ArchivedPanel />} />
           <Route path={ControlPaths.pairPage} element={<PairPage />} />
           <Route path="/settings" element={<SettingsLayout />}>
             <Route index element={<Navigate to="profile" replace />} />
@@ -69,6 +67,8 @@ export function App() {
             <Route path="connections" element={<ConnectionsSettings />} />
             <Route path="threads" element={<ThreadsSettings />} />
             <Route path="boxes" element={<BoxesSettings />} />
+            <Route path="automations" element={<AutomationsPanel />} />
+            <Route path="archived" element={<ArchivedPanel />} />
             <Route path="fleet" element={<FleetSettings />} />
             <Route path="billing" element={<BillingSettings />} />
           </Route>

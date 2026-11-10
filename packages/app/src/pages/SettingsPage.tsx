@@ -13,7 +13,7 @@ import {
   type ThreadSettings as ThreadConfig,
   type Usage,
 } from "@cloudagents/protocol"
-import { Check, ChevronDown, CreditCard, ExternalLink, Layers, LogOut, MessagesSquare, Plug, RotateCcw, Server, User } from "lucide-react"
+import { Archive, Check, ChevronDown, CreditCard, ExternalLink, Layers, LogOut, MessagesSquare, Plug, RotateCcw, Server, User, Workflow } from "lucide-react"
 import { Navigate, NavLink, Outlet } from "react-router-dom"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
@@ -47,6 +47,8 @@ const sections = [
   { to: "profile", label: "Profile", icon: User },
   { to: "connections", label: "Connections", icon: Plug },
   { to: "threads", label: "Threads", icon: MessagesSquare },
+  { to: "automations", label: "Automations", icon: Workflow },
+  { to: "archived", label: "Archived", icon: Archive },
   { to: "boxes", label: "Boxes", icon: Server },
   { to: "billing", label: "Billing", icon: CreditCard },
 ] as const
@@ -63,7 +65,7 @@ export function SettingsLayout() {
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6 @5xl:grid @5xl:max-w-none @5xl:grid-cols-[11rem_minmax(0,48rem)_11rem] @5xl:justify-center @5xl:gap-10">
         <aside className="flex shrink-0 flex-col gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
-          <nav className="flex gap-1 @5xl:flex-col">
+          <nav className="flex flex-wrap gap-1 @5xl:flex-col">
             {navSections.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}

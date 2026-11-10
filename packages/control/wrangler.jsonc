@@ -27,8 +27,6 @@
       "/_preview/*",
       "/",
       "/c/*",
-      "/automations",
-      "/archived",
       "/settings",
       "/settings/*"
     ]

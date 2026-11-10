@@ -15,7 +15,10 @@ import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { describeTrigger, formatNextRun, promptPreview } from "@/lib/automations"
 import { errorText } from "@/util"
 
-/** Every automation the user has. The agent creates them from chat; this view lists, toggles, edits and removes them. */
+/**
+ * Settings › Automations: every automation the user has. The agent creates them from chat; this view lists, toggles,
+ * edits and removes them.
+ */
 export function AutomationsPanel() {
   const queryClient = useQueryClient()
   const automations = useQuery(queries.automations())
@@ -38,10 +41,10 @@ export function AutomationsPanel() {
   const error = automations.error ?? toggle.error ?? remove.error
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-6">
+    <>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Automations</h1>
+          <h2 className="text-lg font-semibold tracking-tight">Automations</h2>
           <p className="text-muted-foreground">
             Tasks the agent starts on a schedule or when a pull request changes.
           </p>
@@ -98,7 +101,7 @@ export function AutomationsPanel() {
 
       <AutomationDialog target={dialog} onClose={() => setDialog(null)} />
       {sharing && <ShareAutomationDialog automation={sharing} onClose={() => setSharing(null)} />}
-    </div>
+    </>
   )
 }
 
