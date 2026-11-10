@@ -275,7 +275,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           <BrandToggle label="Collapse threads" Icon={PanelLeftClose} onClick={onCollapse} />
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
-        <div className="flex items-center gap-1.5 pr-3 pb-2">
+        <div className="flex items-center gap-1.5 pt-2 pr-3 pb-2">
           {/* Transparent and flat with softened text at rest; focused, it takes the usual grey input look. */}
           <div className="group/search relative min-w-0 flex-1">
             <Search
