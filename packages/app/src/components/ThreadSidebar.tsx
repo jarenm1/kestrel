@@ -276,7 +276,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
         <div className="flex items-center gap-1.5 pr-3 pb-2">
-          {/* Black with white text at rest; focused, it takes the usual grey input look. */}
+          {/* Transparent with white text at rest; focused, it takes the usual grey input look. */}
           <div className="group/search relative min-w-0 flex-1">
             <Search
               aria-hidden="true"
@@ -291,7 +291,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
               onKeyDown={(e) => {
                 if (e.key === "Escape") setSearch("")
               }}
-              className="h-8 bg-black pr-2.5 pl-8 text-[13px] text-foreground placeholder:text-foreground focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
+              className="h-8 bg-transparent pr-2.5 pl-8 text-[13px] text-foreground placeholder:text-foreground focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
             />
           </div>
           <NavLink
