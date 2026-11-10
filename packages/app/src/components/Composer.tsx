@@ -708,7 +708,7 @@ export function Composer({
       {fileError && <Alert className="mb-2">{fileError}</Alert>}
       <form
         className={cn(
-          "relative flex flex-col gap-1 rounded-2xl bg-secondary/60 p-2 shadow-soft transition-shadow duration-200 focus-within:shadow-glow",
+          "relative flex flex-col gap-1 rounded-2xl bg-secondary/75 p-2 shadow-soft transition-shadow duration-200 focus-within:shadow-glow",
           dragging && "shadow-glow ring-1 ring-white/20",
         )}
         onSubmit={submit}
