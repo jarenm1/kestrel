@@ -66,6 +66,51 @@ describe("Pierre diff parsing", () => {
     expect(diffFileNotes(file("new-name.txt"), false)).toEqual(["Renamed without changes."])
   })
 
+  test("a sibling whose path ends in the binary file's name stays empty", () => {
+    const sibling = parseDiff(
+      [
+        "diff --git a/sub/lib.ts b/sub/lib.ts",
+        "new file mode 100644",
+        "index 0000000..1111111",
+        "Binary files /dev/null and b/sub/lib.ts differ",
+        "diff --git a/lib.ts b/lib.ts",
+        "new file mode 100644",
+        "index 0000000..e69de29",
+        "",
+      ].join("\n"),
+      "sibling",
+    )
+    expect([...sibling.binary]).toEqual(["sub/lib.ts"])
+    const empty = sibling.files.find((candidate) => candidate.name === "lib.ts")
+    expect(empty).toBeDefined()
+    expect(diffFileNotes(empty!, sibling.binary.has("lib.ts"))).toEqual(["Empty file."])
+  })
+
+  test("binary detection reads unquoted spaces and quoted escapes in headers", () => {
+    const spaced = parseDiff(
+      [
+        "diff --git a/img file.png b/img file.png",
+        "new file mode 100644",
+        "index 0000000..1111111",
+        "Binary files /dev/null and b/img file.png differ",
+        "",
+      ].join("\n"),
+      "spaces",
+    )
+    expect(spaced.binary.has("img file.png")).toBe(true)
+    const quoted = parseDiff(
+      [
+        'diff --git "a/caf\\303\\251.png" "b/caf\\303\\251.png"',
+        "new file mode 100644",
+        "index 0000000..1111111",
+        'Binary files /dev/null and "b/caf\\303\\251.png" differ',
+        "",
+      ].join("\n"),
+      "quoted",
+    )
+    expect(quoted.binary.has("café.png")).toBe(true)
+  })
+
   test("mode changes and empty files keep their notes", () => {
     const mode = parseDiff(
       ["diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755", ""].join("\n"),

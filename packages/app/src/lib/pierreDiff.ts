@@ -85,9 +85,62 @@ export function diffFileNotes(file: FileDiffMetadata, binary: boolean): string[]
   return notes
 }
 
+const GIT_DIFF = "diff --git "
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 }
+
+/** Undoes git's C-style path quoting (`"a/caf\303\251"`); octal escapes are UTF-8 bytes. */
+function unquote(quoted: string): string {
+  const bytes: number[] = []
+  const encoder = new TextEncoder()
+  for (let index = 1; index < quoted.length - 1; index++) {
+    const char = quoted[index] as string
+    if (char !== "\\") {
+      bytes.push(...encoder.encode(char))
+      continue
+    }
+    const next = quoted[index + 1] ?? ""
+    if (/[0-7]/.test(next)) {
+      bytes.push(parseInt(quoted.slice(index + 1, index + 4), 8))
+      index += 3
+    } else {
+      bytes.push(C_ESCAPES[next] ?? next.charCodeAt(0))
+      index += 1
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes))
+}
+
+/** The closing quote of a quoted path, skipping escaped characters. */
+function closingQuote(text: string, start: number): number {
+  for (let index = start; index < text.length; index++) {
+    if (text[index] === "\\") index++
+    else if (text[index] === '"') return index
+  }
+  return -1
+}
+
+/** The two paths in a `diff --git` header, decoded and without their `a/`/`b/` prefixes. */
+function headerPaths(line: string): { oldPath: string; newPath: string } | null {
+  const rest = line.slice(GIT_DIFF.length)
+  if (rest.startsWith('"')) {
+    const oldEnd = closingQuote(rest, 1)
+    const newStart = oldEnd < 0 ? -1 : rest.indexOf('"', oldEnd + 1)
+    const newEnd = newStart < 0 ? -1 : closingQuote(rest, newStart + 1)
+    if (oldEnd < 0 || newStart < 0 || newEnd < 0) return null
+    return {
+      oldPath: unquote(rest.slice(0, oldEnd + 1)).slice(2),
+      newPath: unquote(rest.slice(newStart, newEnd + 1)).slice(2),
+    }
+  }
+  // Unquoted headers keep spaces in the path; the ` b/` before the new path is the separator.
+  const split = rest.indexOf(" b/", 2)
+  if (split < 0) return null
+  return { oldPath: rest.slice(2, split), newPath: rest.slice(split + 3) }
+}
+
 /**
  * A binary file's patch has no hunks, so Pierre parses it as an empty diff. Find the files whose patch section says
- * `Binary files` or carries a `GIT binary patch`, by matching the `diff --git` header for each candidate file.
+ * `Binary files` or carries a `GIT binary patch`, by comparing the paths in each `diff --git` header.
  */
 function binaryFileNames(patch: string, files: readonly FileDiffMetadata[]): ReadonlySet<string> {
   const candidates = files.filter((file) => file.hunks.length === 0)
@@ -95,11 +148,12 @@ function binaryFileNames(patch: string, files: readonly FileDiffMetadata[]): Rea
   if (candidates.length === 0) return binary
   const lines = patch.split("\n")
   for (const file of candidates) {
-    const names = file.prevName === undefined ? [file.name] : [file.prevName, file.name]
+    const names = new Set([file.name, ...(file.prevName === undefined ? [] : [file.prevName])])
     let inFile = false
     for (const line of lines) {
-      if (line.startsWith("diff --git ")) {
-        inFile = names.some((name) => line.includes(`a/${name}`) || line.includes(`b/${name}`))
+      if (line.startsWith(GIT_DIFF)) {
+        const paths = headerPaths(line)
+        inFile = paths !== null && (names.has(paths.oldPath) || names.has(paths.newPath))
       } else if (inFile && (line.startsWith("Binary files ") || line === "GIT binary patch")) {
         binary.add(file.name)
         break
