@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { ControlPaths } from "@cloudagents/protocol"
-import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom"
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom"
 import { onUnauthorized } from "@/api/client"
 import { ApiError } from "@/api/errors"
 import { queries } from "@/api/queries"
@@ -29,7 +29,7 @@ import {
 import { ThreadPage } from "@/pages/ThreadPage"
 import { WaitlistPage } from "@/pages/WaitlistPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
-import { APP_HOME, APP_ORIGIN, IS_SITE_HOST, threadPath } from "@/routes"
+import { APP_HOME, APP_ORIGIN, IS_SITE_HOST } from "@/routes"
 import { errorText } from "@/util"
 
 export function App() {
@@ -73,10 +73,6 @@ export function App() {
             <Route path="billing" element={<BillingSettings />} />
           </Route>
         </Route>
-        {/* Legacy thread URLs (including the old per-repo ones) resolve to the canonical thread URL. */}
-        <Route path="/tasks/:taskId" element={<ThreadRedirect />} />
-        <Route path="/repos/:repoId/threads/:taskId" element={<ThreadRedirect />} />
-        <Route path="/repos/*" element={<Navigate to={APP_HOME} replace />} />
       </Route>
 
       <Route path="*" element={<NotFound />} />
@@ -118,12 +114,6 @@ function RequireAuth() {
   }
 
   return <Outlet />
-}
-
-/** Sends short and legacy thread links to the one canonical address per thread. */
-function ThreadRedirect() {
-  const { taskId = "" } = useParams()
-  return <Navigate to={threadPath(taskId)} replace />
 }
 
 function FullPageMessage({ children }: { children: React.ReactNode }) {

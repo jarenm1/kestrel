@@ -17,7 +17,7 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     // The app pages the mobile app has screens for also run the Worker first, so phones get the mobile build
-    // (src/pages.ts serveAppPage). They must match MOBILE_PAGE there, or be a MOVED_PAGES old path the Worker
+    // (src/pages.ts serveAppPage). They must match MOBILE_PAGE there, or be an old path in MOVED_PAGES the Worker
     // redirects; src/pages.test.ts checks it.
     "run_worker_first": [
       "/api/*",
@@ -32,6 +32,9 @@
       "/automations/",
       "/archived",
       "/archived/",
+      "/tasks/*",
+      "/repos",
+      "/repos/*",
       "/settings",
       "/settings/*"
     ]

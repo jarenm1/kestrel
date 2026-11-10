@@ -15,13 +15,28 @@ const PHONE_USER_AGENT = /Mobi/
 export const MOBILE_PAGE = /^\/(?:c\/[^/]+|settings(?:\/[^/]+)?)?\/?$/
 
 /**
- * App pages that moved, by old path. Answered with a permanent redirect before any app loads, so bookmarks and saved
- * links reach the new URL on every client and the apps keep no routes for old paths. Each is a Worker-first route in
- * wrangler.jsonc (pages.test.ts checks it).
+ * App pages that moved: old path pattern and the new path for a match, first match wins. Answered with a permanent
+ * redirect before any app loads, so bookmarks and saved links reach the new URL on every client and the apps keep no
+ * routes for old paths. Each is a Worker-first route in wrangler.jsonc (pages.test.ts checks it). Thread ids stay as
+ * they were encoded in the old path.
  */
-export const MOVED_PAGES: Record<string, string> = {
-  "/automations": "/settings/automations",
-  "/archived": "/settings/archived",
+const MOVED_PAGES: readonly (readonly [RegExp, (match: RegExpExecArray) => string])[] = [
+  [/^\/automations\/?$/, () => "/settings/automations"],
+  [/^\/archived\/?$/, () => "/settings/archived"],
+  // Threads before threads lived at `/c/:id`, first by task, then per repository.
+  [/^\/tasks\/([^/]+)\/?$/, ([, taskId]) => `/c/${taskId}`],
+  [/^\/repos\/[^/]+\/threads\/([^/]+)\/?$/, ([, taskId]) => `/c/${taskId}`],
+  // Any other page of the old per-repository layout.
+  [/^\/repos(?:\/.*)?$/, () => "/"],
+]
+
+/** The new path of a moved page, or null when `path` did not move. */
+export const movedPage = (path: string): string | null => {
+  for (const [from, to] of MOVED_PAGES) {
+    const match = from.exec(path)
+    if (match) return to(match)
+  }
+  return null
 }
 
 /** The static asset server (`env.ASSETS`). */
@@ -34,8 +49,8 @@ export interface Assets {
  * SPA, on the same URLs: the mobile app opens the screen for the path itself. The site hosts' public pages stay.
  */
 export const serveAppPage = async (request: Request, assets: Assets, url: URL): Promise<Response> => {
-  const moved = MOVED_PAGES[url.pathname.replace(/(.)\/$/, "$1")]
-  if (moved !== undefined && (request.method === "GET" || request.method === "HEAD")) {
+  const moved = movedPage(url.pathname)
+  if (moved !== null && (request.method === "GET" || request.method === "HEAD")) {
     return Response.redirect(new URL(`${moved}${url.search}`, url).toString(), 301)
   }
   const page =

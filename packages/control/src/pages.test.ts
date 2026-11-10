@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { MOBILE_PAGE, MOVED_PAGES, serveAppPage, type Assets } from "./pages"
+import { MOBILE_PAGE, movedPage, serveAppPage, type Assets } from "./pages"
 
 const PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
 const ANDROID_PHONE = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36"
@@ -7,6 +7,22 @@ const ANDROID_TABLET = "Mozilla/5.0 (Linux; Android 15; SM-X910) AppleWebKit/537
 const DESKTOP = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15"
 
 const MOBILE_PATHS = ["/", "/c/3a591628-9dad-4ceb-afd8-58f669cc0e78", "/settings/automations", "/settings/archived", "/settings", "/settings/connections"]
+
+/** Old paths and where they now live, including the trailing-slash forms bookmarks may carry. */
+const MOVED: readonly (readonly [string, string])[] = [
+  ["/automations", "/settings/automations"],
+  ["/automations/", "/settings/automations"],
+  ["/archived", "/settings/archived"],
+  ["/archived/", "/settings/archived"],
+  ["/tasks/a%20b", "/c/a%20b"],
+  ["/tasks/t1/", "/c/t1"],
+  ["/repos/r1/threads/t1", "/c/t1"],
+  ["/repos/r1/threads/t1/", "/c/t1"],
+  ["/repos", "/"],
+  ["/repos/", "/"],
+  ["/repos/r1", "/"],
+  ["/repos/r1/settings/x", "/"],
+]
 
 /** An asset server that records the URL it was asked for and answers with its own Vary header. */
 function stubAssets() {
@@ -74,15 +90,19 @@ describe("serveAppPage", () => {
   })
 
   test("moved pages redirect permanently to their new path for every client, keeping the query", async () => {
-    for (const [from, to] of Object.entries(MOVED_PAGES)) {
-      for (const path of [from, `${from}/`]) {
-        for (const ua of [PHONE, DESKTOP]) {
-          const { response, fetched } = await serve(`${path}?x=1`, { ua })
-          expect(response.status).toBe(301)
-          expect(response.headers.get("location")).toBe(`https://app.kestrel-agent.com${to}?x=1`)
-          expect(fetched).toEqual([])
-        }
+    for (const [from, to] of MOVED) {
+      for (const ua of [PHONE, DESKTOP]) {
+        const { response, fetched } = await serve(`${from}?x=1`, { ua })
+        expect(response.status).toBe(301)
+        expect(response.headers.get("location")).toBe(`https://app.kestrel-agent.com${to}?x=1`)
+        expect(fetched).toEqual([])
       }
+    }
+  })
+
+  test("current pages and paths only resembling an old one are not moved", () => {
+    for (const path of ["/settings/automations", "/automations/import", "/c/abc", "/tasks", "/tasks/a/b", "/repository", "/archived-x"]) {
+      expect(movedPage(path)).toBeNull()
     }
   })
 })
@@ -106,8 +126,8 @@ describe("wrangler.jsonc run_worker_first", () => {
       expect(MOBILE_PAGE.test(path)).toBe(true)
       expect(patterns.some((pattern) => matches(pattern, path))).toBe(true)
     }
-    for (const path of Object.keys(MOVED_PAGES).flatMap((from) => [from, `${from}/`])) {
-      expect(patterns.some((pattern) => matches(pattern, path))).toBe(true)
+    for (const [from] of MOVED) {
+      expect(patterns.some((pattern) => matches(pattern, from))).toBe(true)
     }
   })
 
@@ -116,7 +136,7 @@ describe("wrangler.jsonc run_worker_first", () => {
   })
 
   test("every Worker-first page route is a mobile page or a moved page", async () => {
-    for (const pattern of (await workerFirst()).filter((p) => !NON_PAGE[p] && !MOVED_PAGES[p.replace(/(.)\/$/, "$1")])) {
+    for (const pattern of (await workerFirst()).filter((p) => !NON_PAGE[p] && movedPage(p.replace(/\*/g, "x")) === null)) {
       expect(MOBILE_PAGE.test(pattern.replace(/\*/g, "x"))).toBe(true)
     }
   })
