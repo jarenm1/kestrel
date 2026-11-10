@@ -79,7 +79,7 @@ function DockBackdrop({ tall }: { tall: boolean }) {
   return (
     <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
       <div className="absolute inset-0 bg-card/70 backdrop-blur-lg" />
-      <div className={cn("absolute inset-x-0 bottom-full", tall ? "h-16" : "h-12")}>
+      <div className={cn("absolute inset-x-0 bottom-full", tall ? "h-10" : "h-5")}>
         {BAND_BLURS.map((px, i) => (
           <div
             key={px}
@@ -334,7 +334,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
           runs={runs}
           runItems={runItems}
           pendingAskId={pendingAsk?.id}
-          className={cn("px-5 pt-4", activeRun ? "pb-[calc(var(--dock-h)+4rem)]" : "pb-[calc(var(--dock-h)+3rem)]")}
+          className={cn("px-5 pt-4", activeRun ? "pb-[calc(var(--dock-h)+2.75rem)]" : "pb-[calc(var(--dock-h)+1.5rem)]")}
         />
       )}
       <div ref={dockRef} className="absolute inset-x-0 bottom-0 z-10 flex flex-col items-center px-5 pt-2 pb-5">
