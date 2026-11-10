@@ -41,11 +41,11 @@ const SHIMMER_CLASS =
 const PRE_CLASS = "m-0 max-h-72 overflow-auto rounded-lg bg-code px-3 py-2 font-mono text-[11px] break-all whitespace-pre-wrap shadow-well"
 
 /** A row's header: icon, one-line label, trailing marks, and a chevron that shows on hover and while open. */
-const ROW_CLASS =
+export const ROW_CLASS =
   "group/row flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-md py-0.5 text-left text-sm text-muted-foreground select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/70 focus-visible:outline-none"
 
 /** Details hang off the row's icon column. */
-const DETAILS_CLASS = "mt-1 mb-1.5 ml-[7px] flex min-w-0 flex-col gap-2 border-l-2 border-border pl-3"
+export const DETAILS_CLASS = "mt-1 mb-1.5 ml-[7px] flex min-w-0 flex-col gap-2 border-l-2 border-border pl-3"
 
 /** How close to the bottom (px) still counts as following the stream. */
 const LIVE_EDGE_PX = 16
@@ -70,12 +70,15 @@ const EXTRA_ICONS: Record<ToolIcon, LucideIcon> = {
   message: MessageSquare,
 }
 
-function Chevron({ open }: { open: boolean }) {
+/** `open` for rows that track their state; a `<details>` row passes its `group-open` variants as `className`. */
+export function Chevron({ open = false, className }: { open?: boolean; className?: string }) {
   return (
     <ChevronRight
+      aria-hidden="true"
       className={cn(
         "size-3.5 shrink-0 opacity-0 transition group-hover/row:opacity-100 group-focus-visible/row:opacity-100",
         open && "rotate-90 opacity-100",
+        className,
       )}
     />
   )

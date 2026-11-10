@@ -1,6 +1,7 @@
 import type { AgentItem, Run } from "@cloudagents/protocol"
-import ChevronRight from "lucide-react/icons/chevron-right"
+import { cn } from "../cn"
 import { formatMessageTime } from "./time"
+import { Chevron, DETAILS_CLASS, ROW_CLASS } from "./WorkLog"
 
 const TOKENS = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
 const EXACT = new Intl.NumberFormat("en")
@@ -74,15 +75,15 @@ export function RunSummary({ run, items }: { run: Run; items: readonly AgentItem
   const rate = measured && elapsed > 0 && output !== null ? output * 1000 / elapsed : null
   const label = run.interruptedByRestart ? "Interrupted by restart" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Worked"
   return (
-    <details className="group/run text-[11px] text-muted-foreground tabular-nums">
-      <summary className="group/row flex w-fit cursor-pointer list-none items-center gap-2 rounded-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70 [&::-webkit-details-marker]:hidden">
+    <details className="group/run tabular-nums">
+      <summary className={cn(ROW_CLASS, "w-fit list-none [&::-webkit-details-marker]:hidden")}>
         <span>
           {label}{measured ? ` for ${duration(elapsed)}` : ""}
           {run.endedAt !== null && <><span aria-hidden="true"> · </span><time dateTime={run.endedAt}>{formatMessageTime(run.endedAt)}</time></>}
         </span>
-        <ChevronRight aria-hidden="true" className="size-3.5 shrink-0 opacity-0 transition group-hover/row:opacity-100 group-focus-visible/row:opacity-100 group-open/run:rotate-90 group-open/run:opacity-100" />
+        <Chevron className="group-open/run:rotate-90 group-open/run:opacity-100" />
       </summary>
-      <dl className="mt-2 grid w-fit grid-cols-[auto_auto] gap-x-5 gap-y-1">
+      <dl className={cn(DETAILS_CLASS, "grid w-fit grid-cols-[auto_auto] gap-x-5 gap-y-1 text-sm text-muted-foreground")}>
         <dt>Input tokens</dt><dd title={input === null ? undefined : EXACT.format(input)}>{count(input)}</dd>
         <dt>Output tokens</dt><dd title={output === null ? undefined : EXACT.format(output)}>{count(output)}</dd>
         <dt>Cached tokens</dt><dd title={cached === null ? undefined : EXACT.format(cached)}>{count(cached)}</dd>
