@@ -291,7 +291,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
               onKeyDown={(e) => {
                 if (e.key === "Escape") setSearch("")
               }}
-              className="h-8 bg-transparent pr-2.5 pl-9 text-sm text-foreground shadow-none placeholder:text-foreground/70 focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
+              className="h-8 bg-transparent pr-2.5 pl-9 text-sm text-foreground shadow-none placeholder:text-foreground/70 hover:bg-white/[0.06] focus:bg-input focus:placeholder:text-muted-foreground/70 focus-visible:bg-input"
             />
           </div>
           <NavLink
