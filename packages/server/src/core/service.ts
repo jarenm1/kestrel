@@ -55,6 +55,7 @@ import { MODEL_HARNESS, harnessForRoute } from "../agent-clis"
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { dailyActivity } from "./activity"
+import { evidenceBranch, evidenceCommentBody, evidencePath } from "./evidence"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
@@ -598,6 +599,20 @@ export interface CoreShape {
     taskId: string,
     input: PullRequestTarget & PullRequestCommentInput,
   ) => Effect.Effect<PostedComment | null, NotFound | BadRequest | InternalError>
+  /**
+   * Used by the MCP handler: uploads a desktop screenshot to a dedicated evidence branch and comments it on the
+   * thread's linked pull request as a markdown image. The pull request's head branch and diff are never modified.
+   */
+  readonly attachEvidenceToPullRequest: (
+    taskId: string,
+    input: {
+      readonly caption: string
+      readonly bytes: Uint8Array
+      readonly mimeType: "image/png"
+      readonly checkoutId?: string
+      readonly number?: number
+    },
+  ) => Effect.Effect<{ readonly commentUrl: string; readonly imageUrl: string }, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: requests or removes reviewers (users and teams) on a pull request. */
   readonly changeReviewers: (
     taskId: string,
@@ -3370,6 +3385,55 @@ export const CoreLive = Layer.effect(
               yield* github.deleteComment(token, slug, input.kind, input.commentId).pipe(Effect.mapError(fromGitHub))
               return null
           }
+        }),
+
+      attachEvidenceToPullRequest: (taskId, input) =>
+        Effect.gen(function* () {
+          if (input.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+            return yield* Effect.fail(
+              new BadRequest({ message: `screenshot is ${input.bytes.byteLength} bytes; the limit is ${MAX_ATTACHMENT_BYTES}` }),
+            )
+          }
+          const { slug, token, number } = yield* pullRequestTarget(taskId, { checkoutId: input.checkoutId, number: input.number })
+          const status = yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
+          if (status.state !== "open") {
+            return yield* Effect.fail(
+              new BadRequest({ message: `pull request #${number} is ${status.state}; evidence can only be attached to an open pull request` }),
+            )
+          }
+          // One clock for the path and the comment, and a base branch that is never the pull request's own head.
+          const now = Date.now()
+          const file = yield* github
+            .putFile(token, slug, {
+              path: evidencePath(taskId, number, now),
+              branch: evidenceBranch(),
+              bytes: input.bytes,
+              message: `Desktop evidence for pull request #${number}`,
+              createFrom: status.baseRef,
+            })
+            .pipe(Effect.mapError(fromGitHub))
+          const comment = yield* github
+            .createComment(
+              token,
+              slug,
+              number,
+              evidenceCommentBody({ caption: input.caption, htmlUrl: file.htmlUrl, taskId, capturedAt: new Date(now).toISOString() }),
+            )
+            .pipe(
+              // The upload has no link if the comment fails; remove it rather than leave an orphan on the shared branch.
+              Effect.catchAll((error) =>
+                github
+                  .deleteFile(token, slug, {
+                    path: file.path,
+                    branch: file.branch,
+                    sha: file.sha,
+                    message: `Remove unlinked evidence for pull request #${number}`,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void), Effect.zipRight(Effect.fail(error))),
+              ),
+              Effect.mapError(fromGitHub),
+            )
+          return { commentUrl: comment.url, imageUrl: file.htmlUrl }
         }),
 
       changeReviewers: (taskId, input) =>
