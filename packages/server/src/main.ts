@@ -19,6 +19,7 @@ import { CredentialStore, CredentialStoreLive } from "./credentials"
 import { makeModelDiscovery } from "./model-discovery"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
+import { idleStopLoopEnabled, stopIdleDesktops } from "./desktop/idle-stop"
 import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
@@ -122,6 +123,9 @@ const closeServer = (server: Server) =>
     server.close(() => resume(Effect.void))
     server.closeAllConnections()
   })
+
+/** How often the idle stop loop looks at the box's desktops. */
+const DESKTOP_IDLE_CHECK_MS = 60_000
 
 const program = Effect.gen(function* () {
   const config = yield* Config
@@ -278,10 +282,40 @@ const program = Effect.gen(function* () {
     }),
   )
 
+  // A desktop nobody uses stops itself: that is what lets a Nest host see `desktops: 0` and suspend the VM. Runs and
+  // viewers are checked per session; a stop that fails is logged and the loop keeps going.
+  const idleStopAfterMs = config.desktopIdleStopAfterMs
+  const streamIdleCloseAfterMs = config.streamIdleCloseAfterMs
+  const idleStopFiber =
+    !idleStopLoopEnabled(idleStopAfterMs, streamIdleCloseAfterMs)
+      ? null
+      : yield* Effect.forkDaemon(
+          Effect.gen(function* () {
+            while (true) {
+              yield* Effect.sleep(DESKTOP_IDLE_CHECK_MS)
+              yield* stopIdleDesktops(
+                {
+                  idleTaskIds: desktop.idleTaskIds,
+                  stop: desktop.stop,
+                  activeCount: desktop.activeCount,
+                  runs: harness.activeRunCount,
+                  lastActivityAt: () => tracker.snapshot.pipe(Effect.map((snapshot) => snapshot.lastActivityAt)),
+                  now: Date.now,
+                  logInfo: (message) => Effect.logInfo(message),
+                  logWarning: (message) => Effect.logWarning(message),
+                },
+                idleStopAfterMs,
+                streamIdleCloseAfterMs,
+              )
+            }
+          }),
+        )
+
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
   boxActivity?.stop()
   if (activity !== null) yield* activity.close
+  if (idleStopFiber !== null) yield* Fiber.interrupt(idleStopFiber)
   yield* Fiber.interrupt(platformFiber)
   const relay = yield* Ref.get(relayFiber)
   if (relay !== null) yield* Fiber.interrupt(relay)

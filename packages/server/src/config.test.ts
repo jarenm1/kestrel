@@ -19,6 +19,8 @@ const BOX_VARS = [
   "CLOUDAGENTS_TASK_MEMORY_HIGH",
   "CLOUDAGENTS_TASK_SWAP_MAX",
   "CLOUDAGENTS_BOX_SWAP_MAX",
+  "CLOUDAGENTS_DESKTOP_IDLE_STOP_MS",
+  "CLOUDAGENTS_STREAM_IDLE_CLOSE_MS",
 ] as const
 
 const CONTROL = "https://control.example"
@@ -63,6 +65,40 @@ describe("sandbox listener settings", () => {
 test("legacy noreply selection accepts only owner logins, case-insensitively", () => {
   expect(configWith({ CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS: " Alice, BOB " }).gitLegacyNoreplyUsers).toEqual(["alice", "bob"])
   expect(() => configWith({ CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS: "alice@example.com" })).toThrow("comma-separated GitHub logins")
+})
+
+describe("desktop idle stop", () => {
+  test("defaults to 30 minutes", () => {
+    expect(configWith({}).desktopIdleStopAfterMs).toBe(1_800_000)
+  })
+
+  test("the environment overrides the window and 0 disables the stop", () => {
+    expect(configWith({ CLOUDAGENTS_DESKTOP_IDLE_STOP_MS: "5000" }).desktopIdleStopAfterMs).toBe(5_000)
+    expect(configWith({ CLOUDAGENTS_DESKTOP_IDLE_STOP_MS: "0" }).desktopIdleStopAfterMs).toBe(0)
+  })
+
+  test("a negative, fractional or non-numeric value is refused", () => {
+    for (const raw of ["-1", "1.5", "soon"]) {
+      expect(() => configWith({ CLOUDAGENTS_DESKTOP_IDLE_STOP_MS: raw })).toThrow("CLOUDAGENTS_DESKTOP_IDLE_STOP_MS")
+    }
+  })
+})
+
+describe("desktop stream idle close", () => {
+  test("defaults to 2 minutes", () => {
+    expect(configWith({}).streamIdleCloseAfterMs).toBe(120_000)
+  })
+
+  test("the environment overrides the window and 0 disables it", () => {
+    expect(configWith({ CLOUDAGENTS_STREAM_IDLE_CLOSE_MS: "5000" }).streamIdleCloseAfterMs).toBe(5_000)
+    expect(configWith({ CLOUDAGENTS_STREAM_IDLE_CLOSE_MS: "0" }).streamIdleCloseAfterMs).toBe(0)
+  })
+
+  test("a negative, fractional or non-numeric value is refused", () => {
+    for (const raw of ["-1", "1.5", "soon"]) {
+      expect(() => configWith({ CLOUDAGENTS_STREAM_IDLE_CLOSE_MS: raw })).toThrow("CLOUDAGENTS_STREAM_IDLE_CLOSE_MS")
+    }
+  })
 })
 
 describe("default Claude command", () => {

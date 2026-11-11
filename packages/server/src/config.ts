@@ -202,6 +202,16 @@ export interface ServerConfig {
    * shadow repos. The box enforces it itself (see `core/storage.ts`); it applies with or without systemd.
    */
   readonly taskDiskMax: number
+  /**
+   * How long a desktop stays up with no agent run, viewer, recording or desktop input before the box stops it
+   * (CLOUDAGENTS_DESKTOP_IDLE_STOP_MS, default 30 minutes); 0 disables the stop. See docs/box.md.
+   */
+  readonly desktopIdleStopAfterMs: number
+  /**
+   * How long a desktop with a viewer attached stays up without an agent run, recording or desktop/box activity before
+   * the box stops it and closes the stream (CLOUDAGENTS_STREAM_IDLE_CLOSE_MS, default 2 minutes); 0 disables.
+   */
+  readonly streamIdleCloseAfterMs: number
   /** WebRTC desktop media and its connectivity. Always on. See docs/box.md. */
   readonly webrtc: WebRtcSettings
   /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
@@ -343,6 +353,8 @@ export const loadConfig = (): ServerConfig => {
     systemd,
     maxConcurrentRuns: intEnv("CLOUDAGENTS_MAX_CONCURRENT_RUNS", 0, 0),
     taskDiskMax: diskMaxEnv(),
+    desktopIdleStopAfterMs: intEnv("CLOUDAGENTS_DESKTOP_IDLE_STOP_MS", 1_800_000, 0),
+    streamIdleCloseAfterMs: intEnv("CLOUDAGENTS_STREAM_IDLE_CLOSE_MS", 120_000, 0),
     webrtc: webRtcEnv(direct?.managed === true),
     githubApiUrl: loadGitHubApiUrl(),
     gitLegacyNoreplyUsers,

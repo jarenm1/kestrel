@@ -23,7 +23,7 @@ const configOf = (root: string): ServerConfig => ({
   agentCommands: { anthropic: "", openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", "opencode-go": "", google: "", devin: "" }, agentRouteCommands: { claude: "", codex: "", opencode: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
   nest: null,
   sandboxSslCertFile: null, systemd: null, maxConcurrentRuns: 2, relay: null, direct: null, toolkitsFlake: null,
-  taskDiskMax: 1024 ** 3, githubApiUrl: "https://api.github.com",
+  taskDiskMax: 1024 ** 3, desktopIdleStopAfterMs: 0, streamIdleCloseAfterMs: 0, githubApiUrl: "https://api.github.com",
   webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
 })
 

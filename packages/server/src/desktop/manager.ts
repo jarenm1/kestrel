@@ -23,6 +23,7 @@ import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
 import { isWsl } from "./platform"
 import { applyDesktopEvent } from "./desktop-state"
+import { detachViewer, hasRunningApp, idleSessionView, idleTaskIdsFor, noteDesktopInput, type IdleTaskQuery } from "./idle"
 import { desktopStatus, HEIGHT, WIDTH, type DesktopStatusSource } from "./status"
 import {
   ENCODER_STABLE_MS,
@@ -98,6 +99,8 @@ export interface DesktopStartOptions {
    * MIT-SHM too.
    */
   readonly ipcNamespace: Effect.Effect<IpcNamespace, DesktopError>
+  /** The idle clock a restart carries over; null for a fresh desktop. */
+  readonly lastInputAt?: number | null
 }
 
 export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
@@ -133,6 +136,12 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     readonly refreshProfile: (taskId: string) => Effect.Effect<void>
     /** Desktops that are starting or running (a failed desktop has already had its processes terminated). */
     readonly activeCount: () => Effect.Effect<number>
+    /**
+     * Live desktops that may stop for inactivity: no viewer, no agent-launched app still running, and no box activity
+     * or desktop input for `idleAfterMs`; a run on the box prevents every stop. A running app is skipped because it
+     * may still be rendering. Callers stop each with `stop`, which is also what lets the Nest host see `desktops: 0`.
+     */
+    readonly idleTaskIds: (query: IdleTaskQuery) => Effect.Effect<ReadonlyArray<string>>
     /** The GPU is available: desktops restart on the GPU renderer. */
     readonly attachHardwareRender: Effect.Effect<void, DesktopError>
     /** The GPU is going away: desktops on the GPU stop now and come back on software rendering in the background. */
@@ -215,6 +224,8 @@ interface Relaunch {
   readonly terminal: DesktopStartOptions["terminal"]
   readonly ipcNamespace: DesktopStartOptions["ipcNamespace"]
   readonly sinks: ReadonlyArray<DesktopSink>
+  /** The input clock, so a restart does not make an actively driven desktop look idle. */
+  readonly lastInputAt: number | null
 }
 
 interface Session {
@@ -265,6 +276,12 @@ interface Session {
   stderrTail: string
   /** The long-lived xdotool helper; null until boot starts it and while it is being restarted. */
   input: InputPipe | null
+  /**
+   * When this desktop was last driven: an input event, or its last viewer leaving. Null until the first of those, so a
+   * desktop that has recorded no activity since it started is never stopped for idleness. `ActivityTracker` does not
+   * see WebRTC input, so the idle stop loop compares against this clock rather than box requests alone.
+   */
+  lastInputAt: number | null
   inputRestartsLeft: number
   /** The desktop's Opus source (PulseAudio and capture), or null when audio is unavailable. */
   audio: DesktopAudio | null
@@ -1139,6 +1156,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               encoder: null,
               profile: "high",
               input: null,
+              lastInputAt: opts.lastInputAt ?? null,
               state: "starting",
               error: null,
               config: null,
@@ -1216,8 +1234,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           detachedSinks.add(sink)
           const current = sessions.get(taskId)
           if (current === undefined) return
-          current.sinks.delete(sink)
-          current.awaiting.delete(sink)
+          // Remove the sink and start the idle window on the last viewer's departure. This order is pinned by
+          // idle.test.ts's detachViewer cases, including the clock the idle stop loop reads.
+          detachViewer(current, sink, Date.now())
           // The last Baseline-only viewer leaving lets the remaining viewers have High back.
           applyProfile(current)
           scheduleStop(current)
@@ -1228,7 +1247,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const snapshotAndStop = (taskId: string) =>
       Effect.gen(function* () {
         const s = yield* lookup(taskId)
-        const snapshot: Relaunch = { taskId, terminal: s.terminal, ipcNamespace: s.ipcNamespace, sinks: [...s.sinks] }
+        const snapshot: Relaunch = { taskId, terminal: s.terminal, ipcNamespace: s.ipcNamespace, sinks: [...s.sinks], lastInputAt: s.lastInputAt }
         yield* stopTask(taskId)
         return snapshot
       })
@@ -1236,7 +1255,11 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     // Starts the desktop again on the current renderer and attaches the viewers that are still watching it.
     const relaunch = (snapshot: Relaunch) =>
       Effect.gen(function* () {
-        yield* startDesktop(snapshot.taskId, { terminal: snapshot.terminal, ipcNamespace: snapshot.ipcNamespace })
+        yield* startDesktop(snapshot.taskId, {
+          terminal: snapshot.terminal,
+          ipcNamespace: snapshot.ipcNamespace,
+          lastInputAt: snapshot.lastInputAt,
+        })
         for (const sink of snapshot.sinks) {
           if (detachedSinks.has(sink)) continue
           yield* attachSink(snapshot.taskId, sink).pipe(
@@ -1248,8 +1271,6 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     // Whether the desktop renders on a renderer other than the one the GPU state now allows.
     const stale = (s: Session) =>
       (s.state === "starting" || s.state === "running") && s.renderer !== null && s.renderer !== desiredRenderer()
-    const liveApps = (s: Session) => [...s.apps.values()].some((app) => app.exit === null)
-
     // Restarts the task's desktop, attaching the viewers that are still watching it.
     const restart = (taskId: string) =>
       Effect.flatMap(snapshotAndStop(taskId), relaunch).pipe(
@@ -1259,7 +1280,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     // Restarts a desktop onto the current renderer once none of its apps is running. A restart stops the desktop's
     // processes, so apps keep the renderer they started on until they exit (the exit hook in launch retries this).
     const restartIdle = (s: Session) =>
-      sessions.get(s.taskId) === s && stale(s) && !liveApps(s) ? restart(s.taskId) : Effect.void
+      sessions.get(s.taskId) === s && stale(s) && !hasRunningApp(s.apps.values()) ? restart(s.taskId) : Effect.void
 
     // The GPU arrived: restart each desktop whose renderer is stale and has no running app. A failed desktop that still
     // has viewers is retried, since they are waiting on it; one that fails again stays failed and the others still restart.
@@ -1336,6 +1357,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       input: (taskId, event) =>
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
+          noteDesktopInput(s, Date.now())
           const args = xdotoolArgs(event)
           if (args.length === 0) return
           const r = yield* Effect.tryPromise({ try: () => runCommand("xdotool", args, s.display, s.ipc), catch: toErr })
@@ -1353,6 +1375,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       streamInput: (taskId, event) =>
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
+          noteDesktopInput(s, Date.now())
           const pipe = s.input
           if (pipe === null) return yield* Effect.fail(new DesktopError({ message: "desktop input is not ready" }))
           const lines = yield* Effect.try({ try: () => xdotoolLines(event), catch: toErr })
@@ -1427,6 +1450,23 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
       activeCount: () =>
         Effect.sync(() => [...sessions.values()].filter((s) => s.state === "starting" || s.state === "running").length),
+
+      idleTaskIds: (query) =>
+        Effect.sync(() =>
+          idleTaskIdsFor(
+            [...sessions.values()].map((s) =>
+              idleSessionView({
+                taskId: s.taskId,
+                state: s.state,
+                sinks: s.sinks,
+                // An app the agent started may still be rendering with no viewer watching: leave that desktop alone.
+                apps: s.apps.values(),
+                lastInputAt: s.lastInputAt,
+              }),
+            ),
+            query,
+          ),
+        ),
 
       stopAll: () =>
         Effect.gen(function* () {

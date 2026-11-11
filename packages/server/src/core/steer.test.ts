@@ -25,7 +25,7 @@ test.each([4, 0])("a message sent mid-run retains its position (initial items: %
     agentCommands: { anthropic: "", openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", "opencode-go": "", google: "", devin: "" }, agentRouteCommands: { claude: "", codex: "", opencode: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
     nest: null,
     sandboxSslCertFile: null, systemd: null, maxConcurrentRuns: 0, relay: null, direct: null, toolkitsFlake: null,
-    taskDiskMax: 1024 ** 3, githubApiUrl: "https://api.github.com",
+    taskDiskMax: 1024 ** 3, desktopIdleStopAfterMs: 0, streamIdleCloseAfterMs: 0, githubApiUrl: "https://api.github.com",
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
   }
   const configLayer = Layer.succeed(Config, config)

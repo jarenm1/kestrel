@@ -110,6 +110,7 @@ describe("idle", () => {
   })
 
   test("runs, desktops, viewers, recordings or open connections keep a VM awake", () => {
+    expect(isIdle({ ...base, activity: { ...quiet, desktops: 1 } })).toBe(false)
     expect(isIdle({ ...base, activity: { ...quiet, viewers: 1 } })).toBe(false)
     expect(isIdle({ ...base, openConnections: 2, activity: quiet })).toBe(false)
   })

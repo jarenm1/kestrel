@@ -79,6 +79,8 @@ const harnessLayer = (
     direct: null,
     toolkitsFlake: null,
     taskDiskMax: 1024 ** 3,
+    desktopIdleStopAfterMs: 0,
+    streamIdleCloseAfterMs: 0,
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
     githubApiUrl: "https://api.github.com",
   }
