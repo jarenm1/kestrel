@@ -286,6 +286,12 @@ export function Composer({
   const promptHistory = usePromptHistory(draftKey)
   const [view, setView] = useState<ComposerEditorView>(() => composerViewOf(text))
   const [files, setFiles] = useState<readonly File[]>([])
+  // What the box holds right now, read after an awaited send: putting a failed send's draft back must not overwrite
+  // text or attachments the user added while it was in flight.
+  const draft = useRef({ text, files, elements })
+  draft.current.text = text
+  draft.current.files = files
+  draft.current.elements = elements
   const [fileError, setFileError] = useState<string>()
   const [dragging, setDragging] = useState(false)
   const [composerFocused, setComposerFocused] = useState(false)
@@ -506,16 +512,18 @@ export function Composer({
       return
     }
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
-    // Failures surface through `error`; the text and files stay so they can be resent.
     if (empty || pending) return
     const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
+    // Empty the box now, not when the request resolves. The box publishes the message while it answers, so the
+    // transcript shows it before the response arrives: waiting for it leaves the message in both places for that
+    // gap and then collapses the dock under it. A failure puts the draft back below.
+    setText("")
+    onElementsChange?.([])
+    setFiles([])
+    setFileError(undefined)
     onSend({ text: message, model: model?.id, effort }, files).then(
       (sent) => {
         promptHistory.remember(text.trim())
-        setText("")
-        onElementsChange?.([])
-        setFiles([])
-        setFileError(undefined)
         setChoice(undefined)
         // The new run now records these picks. A message joining a running turn keeps them for the next turn.
         if (taskId !== undefined && sent !== undefined && sent.message.afterItems === undefined) {
@@ -523,7 +531,14 @@ export function Composer({
           clearPickedEffort(pickedEffort)
         }
       },
-      () => {},
+      () => {
+        // Put back exactly what this send took, so it can be resent as it was, unless the user typed or attached
+        // something since. A rejection landing before the clear commits still sees the send's own draft, so match it too.
+        const current = draft.current
+        if (current.text === "" || current.text === text) setText(text)
+        if (current.files.length === 0 || current.files === files) setFiles(files)
+        if (current.elements.length === 0 || current.elements === elements) onElementsChange?.(elements)
+      },
     )
   }
 
