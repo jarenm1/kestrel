@@ -13,6 +13,7 @@ const KESTREL_TOOLS: Readonly<Record<string, string>> = {
   desktop_kill: "Stop desktop app",
   evidence_record_start: "Start recording",
   evidence_record_stop: "Save recording",
+  evidence_attach_to_pr: "Attach evidence to pull request",
   repo_checkout: "Check out repository",
   workspace_exec: "Run workspace command",
   toolkit_install: "Install desktop app",

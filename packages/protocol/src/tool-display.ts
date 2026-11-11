@@ -270,6 +270,17 @@ function kestrelView(tool: string, input: Readonly<Record<string, unknown>>, tas
     }
     case "evidence_record_stop":
       return { kind: "desktop", icon: "camera", label: "Saved the desktop recording", code: false, paths: [] }
+    case "evidence_attach_to_pr": {
+      const caption = str(input.caption)
+      const kind = input.poster === true ? "poster" : "clip"
+      return {
+        kind: "other",
+        icon: "git",
+        label: caption === undefined ? `Attached ${kind} to the pull request` : `Attached ${kind} to the pull request: ${quote(caption)}`,
+        code: false,
+        paths: [],
+      }
+    }
     default:
       return null
   }

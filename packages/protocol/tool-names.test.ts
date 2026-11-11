@@ -6,6 +6,7 @@ describe("toolDisplayName", () => {
     const bare = toolDisplayName("desktop_screenshot")
     expect(toolDisplayName("mcp__cloudagents__desktop_screenshot")).toBe(bare)
     expect(toolDisplayName("cloudagents.desktop_screenshot")).toBe(bare)
+    expect(toolDisplayName("mcp__cloudagents__evidence_attach_to_pr")).toBe("Attach evidence to pull request")
   })
 
   test("keeps external servers distinct without assigning built-in semantics", () => {

@@ -38,10 +38,16 @@ const fakeGitHub = (route: (request: Recorded) => { readonly json?: unknown; rea
   return { requests, auth, url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
 }
 
-const runAgainst = <A>(url: string, program: Effect.Effect<A, unknown, GitHub>) =>
+const runAgainst = <A>(url: string, program: Effect.Effect<A, unknown, GitHub>, uploadsUrl?: string) =>
   Effect.runPromise(
     program.pipe(
-      Effect.provide(GitHubLive.pipe(Layer.provide(Layer.succeed(Config, { githubApiUrl: url } as unknown as ServerConfig)))),
+      Effect.provide(
+        GitHubLive.pipe(
+          Layer.provide(
+            Layer.succeed(Config, { githubApiUrl: url, ...(uploadsUrl === undefined ? {} : { githubUploadsUrl: uploadsUrl }) } as unknown as ServerConfig),
+          ),
+        ),
+      ),
     ),
   )
 
@@ -658,4 +664,107 @@ test("commentMismatch refuses comments on another pull request or written by som
   expect(commentMismatch({ ...own, author: "octocat" }, 7, "jarenm1")).toBe(
     "it was written by octocat, not by the connected account jarenm1",
   )
+})
+
+interface AttachmentRequest {
+  readonly method: string
+  readonly path: string
+  readonly auth: string | null
+  readonly contentType: string | null
+  readonly body: Uint8Array | null
+}
+
+/** A stand-in for uploads.github.com plus the repository lookup on the API host. */
+const fakeAttachmentHost = (reply: (request: AttachmentRequest) => { readonly status?: number; readonly json?: unknown }) => {
+  const requests: AttachmentRequest[] = []
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url)
+      const body = request.method === "POST" ? new Uint8Array(await request.arrayBuffer()) : null
+      const recorded = {
+        method: request.method,
+        path: url.pathname + url.search,
+        auth: request.headers.get("authorization"),
+        contentType: request.headers.get("content-type"),
+        body,
+      }
+      requests.push(recorded)
+      if (request.method === "GET") return Response.json({ id: 4242 })
+      const { status = 201, json } = reply(recorded)
+      return Response.json(json ?? {}, { status })
+    },
+  })
+  return { requests, url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
+}
+
+test("uploadUserAttachment resolves the repository id, then posts the file with the token", async () => {
+  const host = fakeAttachmentHost(() => ({ json: { url: "https://github.com/user-attachments/assets/abc" } }))
+  try {
+    const bytes = Uint8Array.from([1, 2, 3])
+    const attachment = await runAgainst(
+      host.url,
+      Effect.flatMap(GitHub, (github) =>
+        github.uploadUserAttachment("token", repo, { name: "evidence-clip.mp4", contentType: "video/mp4", bytes }),
+      ),
+      host.url,
+    )
+    expect(attachment).toEqual({ url: "https://github.com/user-attachments/assets/abc" })
+    expect(host.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "GET /repos/jarenm1/kestrel",
+      "POST /user-attachments/assets?name=evidence-clip.mp4&content_type=video%2Fmp4&repository_id=4242",
+    ])
+    const upload = host.requests[1]
+    expect(upload?.auth).toBe("Bearer token")
+    expect(upload?.contentType).toBe("video/mp4")
+    expect(upload?.body).toEqual(bytes)
+  } finally {
+    host.stop()
+  }
+})
+
+test("uploadUserAttachment maps an HTTP failure and rejects a response without a url", async () => {
+  const rejected = fakeAttachmentHost(() => ({ status: 422, json: { message: "Validation Failed" } }))
+  const malformed = fakeAttachmentHost(() => ({ json: { id: "not-a-url" } }))
+  try {
+    const failure = await runAgainst(
+      rejected.url,
+      Effect.either(
+        Effect.flatMap(GitHub, (github) =>
+          github.uploadUserAttachment("token", repo, { name: "clip.mp4", contentType: "video/mp4", bytes: Uint8Array.from([1]) }),
+        ),
+      ),
+      rejected.url,
+    )
+    expect(failure).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "GitHubError", status: 422, message: "GitHub user-attachments upload failed: HTTP 422: Validation Failed" },
+    })
+
+    const decoded = await runAgainst(
+      malformed.url,
+      Effect.either(
+        Effect.flatMap(GitHub, (github) =>
+          github.uploadUserAttachment("token", repo, { name: "clip.mp4", contentType: "video/mp4", bytes: Uint8Array.from([1]) }),
+        ),
+      ),
+      malformed.url,
+    )
+    expect(decoded).toMatchObject({ _tag: "Left", left: { message: "unexpected user attachment response from GitHub" } })
+  } finally {
+    rejected.stop()
+    malformed.stop()
+  }
+})
+
+test("uploadUserAttachment refuses GitHub Enterprise instead of uploading to github.com", async () => {
+  const failure = await runAgainst(
+    "https://ghe.example.com/api/v3",
+    Effect.either(
+      Effect.flatMap(GitHub, (github) =>
+        github.uploadUserAttachment("token", repo, { name: "clip.mp4", contentType: "video/mp4", bytes: Uint8Array.from([1]) }),
+      ),
+    ),
+  )
+  expect(failure).toMatchObject({ _tag: "Left", left: { message: expect.stringContaining("GitHub Enterprise Server does not implement it") } })
 })

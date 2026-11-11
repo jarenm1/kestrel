@@ -347,6 +347,7 @@ Evidence is a first-class output of a run, shown in the thread and attached to i
 |---|---|---|
 | Screenshot | Agent's desktop screenshot in the transcript | Built (#154), kept as a tool-call image |
 | Video clip | An animation, physics glitch or frame-rate drop | Built: explicit recording saves an MP4 beside the run, with a poster when one can be captured |
+| Pull request attachment | The clip, or its poster, commented on the thread's PR | Built: `evidence_attach_to_pr` uploads it to GitHub's user-attachments store, with no branch and no commit |
 | Output file | Rendered frames, a `.blend` or a game build | Downloadable from Files, not marked as a result |
 | Run summary | Before/after shots and clips with captions | Built: a finished run's summary shows each clip's video and caption, and its poster when one was captured |
 
@@ -372,8 +373,8 @@ buffer keeps an encoder running while a run uses the desktop. That costs little 
 continuous motion uses real CPU. Measure this before turning it on by default. At 3 Mbps, continuous motion is about
 22 MB per minute.
 
-Tools: `evidence_record_start` and `evidence_record_stop`. `evidence_clip` and `evidence_mark` (for an output file)
-remain planned.
+Tools: `evidence_record_start`, `evidence_record_stop` and `evidence_attach_to_pr` (a GitHub user attachment; no
+branch or commit). `evidence_clip` and `evidence_mark` (for an output file) remain planned.
 
 ### What evidence can prove
 
@@ -387,10 +388,24 @@ it, and nothing retains more than the moments someone chose to record yet.
 |---|---|---|
 | BYOB | On the box, counted against the task's storage limit | Only while the box is online, at no cost to Kestrel |
 | Nest | On the volume, and copied to object storage | Without waking the VM, billed as storage |
-| PR | Through the user's GitHub account | Follows the repository's access |
+| PR | In GitHub's user-attachments store, through the user's GitHub account | GitHub renders it for every viewer who can see the repository; private repositories get per-viewer URLs. |
 
-GitHub may only render video for files uploaded through its own web attachment flow, not arbitrary URLs. Confirm this first.
-If it holds, a PR gets a poster image or short animated preview that links to the full clip.
+`evidence_attach_to_pr` attaches one saved clip to the thread's linked open pull request. It first reads the
+repository id (`GET /repos/{owner}/{name}`), then posts the clip's bytes to
+`https://uploads.github.com/user-attachments/assets?name=&content_type=&repository_id=` with the owner's Bearer token.
+That host — the engine behind `gh pr comment --attach` — takes the file's raw bytes as the request body with the
+file's `Content-Type`, creates no branch and no commit in the repository, and the box never writes the pull request's
+head or base. A video is posted as its bare user-attachments URL on its own line,
+which github.com renders as an inline player; a poster is posted as markdown `![caption](url)`. The comment also names
+the run and clip and the thread's title. Caps are 50 MiB for video and 10 MiB for an image, and the upload host is
+`CLOUDAGENTS_GITHUB_UPLOADS_URL` (default `https://uploads.github.com`; tests may point it elsewhere).
+
+Limits: the upload endpoint is undocumented and can change without notice; it exists only on github.com (GitHub
+Enterprise Server fails with a clear error), so a box on an enterprise API without an explicit upload host refuses
+instead of uploading to github.com; and it has no delete endpoint. If the comment request fails ambiguously, the box
+retries it once, which can leave an orphan upload that neither GitHub nor Kestrel can remove. The clip and poster come
+from the recording stack (`RunClip`/`RunEvidence`), so this attachment path stacks on saved run evidence rather than
+creating an evidence branch.
 
 ### Keeping desktops idle less
 
@@ -438,7 +453,7 @@ records, and usage records. `PLANS` changes when billing arrives.
 - **Memory billing:** whether ballooning returns enough memory to bill close to real use.
 - **Fractional GPUs:** which option works with our apps, and whether it is worth its licensing and setup.
 - **WebRTC reach:** how often a direct connection fails on real networks. The API channel is tested on one host (a managed box on loopback, with HTTP fallback). The desktop stream has no fallback, so its failure rate on real networks is the open question.
-- **Evidence in PRs:** what GitHub actually renders, and how long Nest evidence is retained.
+- **Evidence retention:** how long Nest evidence is retained. GitHub's rendering is settled for github.com: a user-attachment MP4 URL plays inline and a poster renders as an image, through an undocumented endpoint with no delete; GitHub Enterprise Server has no such endpoint.
 - **Free tier:** whether the Nest has one, given that a free VM has a real cost even when suspended.
 - **Teams:** whether a team shares boxes or each seat gets its own. Boxes are single-owner in this design.
 - **Current managed boxes:** when they migrate to VMs. They keep running until the host layer can replace them.

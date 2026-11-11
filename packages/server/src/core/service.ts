@@ -1,7 +1,7 @@
 import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import Ajv from "ajv"
-import { copyFile, mkdir, open, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises"
+import { copyFile, mkdir, open, readdir, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
   BadRequest,
@@ -204,6 +204,19 @@ export interface PullRequestTarget {
   /** Checkout whose repository holds the pull request; required when the thread has several. */
   readonly checkoutId?: string
   readonly number?: number
+}
+
+/** One run's saved evidence to attach to the thread's linked pull request. */
+export interface AttachRunEvidenceInput {
+  readonly caption: string
+  /** Checkout whose repository holds the pull request; required when the thread has several checkouts. */
+  readonly checkoutId?: string
+  /** Run whose saved clip to attach; default: the thread's newest run. The MCP tool passes its own run. */
+  readonly runId?: string
+  /** Saved clip of that run; default: its newest clip. */
+  readonly clipId?: string
+  /** Upload the clip's poster PNG instead of its MP4. */
+  readonly poster?: boolean
 }
 
 /** An issue or pull request read from an explicit repository, with no checkout involved. */
@@ -515,6 +528,15 @@ export interface CoreShape {
   ) => Effect.Effect<void, NotFound | Conflict | InternalError>
   /** Used by the MCP handler (`evidence_record_stop`): stops the run's recording and returns its clip. */
   readonly evidenceRecordStop: (taskId: string, runId: string) => Effect.Effect<RunClip, NotFound | Conflict | InternalError>
+  /**
+   * Used by the MCP handler (`evidence_attach_to_pr`): uploads one of the run's clips, or its poster, to GitHub's
+   * user-attachments store and posts it as a comment on the thread's linked open pull request. Creates no branch and
+   * no commit, and never changes the pull request's head or base.
+   */
+  readonly attachRunEvidenceToPullRequest: (
+    taskId: string,
+    input: AttachRunEvidenceInput,
+  ) => Effect.Effect<{ readonly commentUrl: string; readonly evidenceUrl: string }, NotFound | BadRequest | Conflict | InternalError>
   /** Stores a file the user uploads for one of the task's messages; it waits there, unsent, until a message names it. */
   readonly upload: (user: string, taskId: string, input: UploadInput) => Effect.Effect<Attachment, NotFound | Conflict | BadRequest | InternalError>
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
@@ -786,6 +808,13 @@ const snapshotOf = (status: PullRequestStatus): ThreadPullRequestSnapshot => ({
 
 /** A diff larger than this is cut before it reaches the browser; the view marks it `truncated`. */
 const MAX_DIFF_BYTES = 2 * 1024 * 1024
+
+/**
+ * GitHub user-attachment caps for run evidence. The upload endpoint is undocumented and enforces its own limit, so
+ * these stay conservative: a 50 MiB recording is already minutes of continuous motion.
+ */
+export const MAX_EVIDENCE_VIDEO_BYTES = 50 * 1024 * 1024
+export const MAX_EVIDENCE_IMAGE_BYTES = 10 * 1024 * 1024
 
 const boundedDiff = (patch: string): ThreadPullRequestDiff =>
   Buffer.byteLength(patch, "utf8") <= MAX_DIFF_BYTES
@@ -2669,6 +2698,101 @@ export const CoreLive = Layer.effect(
         return yield* recorder.stop(taskId, runId).pipe(Effect.mapError(fromRecording))
       })
 
+    const attachRunEvidenceToPullRequest: CoreShape["attachRunEvidenceToPullRequest"] = (taskId, input) =>
+      Effect.gen(function* () {
+        const caption = input.caption.trim()
+        if (caption === "") return yield* Effect.fail(new BadRequest({ message: "a caption is required" }))
+        if (caption.length > 500) {
+          return yield* Effect.fail(new BadRequest({ message: `caption is ${caption.length} characters; the limit is 500` }))
+        }
+        const task = yield* requireTask(taskId)
+        // The write target: a checkout's linked pull request, refused when the thread only reads one it does not push.
+        const { slug, token, number } = yield* pullRequestTarget(taskId, { checkoutId: input.checkoutId })
+        const pullRequest = yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
+        if (pullRequest.state !== "open") {
+          return yield* Effect.fail(
+            new Conflict({
+              message: `pull request #${number} is ${pullRequest.state}; evidence attaches only to an open pull request`,
+            }),
+          )
+        }
+        const runId = input.runId ?? (yield* Effect.flatMap(store.read, (state) => {
+          const [newest] = state.runs
+            .filter((run) => run.taskId === taskId)
+            .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+          return newest === undefined
+            ? Effect.fail(new NotFound({ message: "this thread has no runs yet; pass runId" }))
+            : Effect.succeed(newest.id)
+        }))
+        yield* requireRunInTask(taskId, runId)
+        const clips = listRunClips(join(config.runsDir, runId))
+        if (clips.length === 0) {
+          return yield* Effect.fail(
+            new NotFound({
+              message: `run ${runId} has no saved clips; record one with evidence_record_start and evidence_record_stop`,
+            }),
+          )
+        }
+        const clip = input.clipId === undefined ? clips[clips.length - 1] : clips.find((candidate) => candidate.id === input.clipId)
+        if (clip === undefined) {
+          return yield* Effect.fail(new NotFound({ message: `run ${runId} has no clip ${input.clipId}` }))
+        }
+        const poster = input.poster === true
+        if (poster && clip.poster === null) {
+          return yield* Effect.fail(
+            new BadRequest({ message: `clip ${clip.id} has no poster; attach the video instead` }),
+          )
+        }
+        const fileId = poster ? clip.poster : clip.id
+        const file = fileId === null ? null : runClipFile(join(config.runsDir, runId), fileId)
+        if (file === null || fileId === null) {
+          return yield* Effect.fail(new NotFound({ message: `run ${runId} has no clip file for ${fileId ?? "its poster"}` }))
+        }
+        const size = yield* Effect.tryPromise({
+          try: () => stat(file.path),
+          catch: (e) =>
+            (e as NodeJS.ErrnoException).code === "ENOENT"
+              ? new NotFound({ message: `run ${runId} has no saved file ${fileId}` })
+              : new InternalError({ message: `read run clip: ${String(e)}` }),
+        })
+        const cap = poster ? MAX_EVIDENCE_IMAGE_BYTES : MAX_EVIDENCE_VIDEO_BYTES
+        if (size.size === 0) {
+          return yield* Effect.fail(new BadRequest({ message: `${fileId} is empty; nothing to attach` }))
+        }
+        if (size.size > cap) {
+          return yield* Effect.fail(
+            new BadRequest({
+              message: `${fileId} is ${formatBytes(size.size)}; GitHub user-attachments take at most ${formatBytes(cap)} for ${poster ? "an image" : "a video"}`,
+            }),
+          )
+        }
+        const bytes = yield* Effect.tryPromise({
+          try: () => readFile(file.path),
+          catch: (e) => new InternalError({ message: `read run clip: ${String(e)}` }),
+        })
+        const evidence = yield* github
+          .uploadUserAttachment(token, slug, {
+            name: `evidence-${fileId}`,
+            contentType: file.mimeType,
+            bytes,
+          })
+          .pipe(Effect.mapError(fromGitHub))
+        // A bare user-attachments URL on its own line renders GitHub's inline player; an image uses markdown. The image
+        // label cannot contain an unescaped `]`, so the caption is escaped and flattened to one line in the alt text.
+        const provenance = `Recorded from run ${runId} (clip ${clip.id}) in Kestrel thread "${task.title}".`
+        const alt = caption.replace(/[\\[\]]/g, (character) => `\\${character}`).replace(/\s+/g, " ")
+        const body = poster
+          ? `![${alt}](${evidence.url})\n\n${provenance}`
+          : `${caption}\n\n${evidence.url}\n\n${provenance}`
+        // The upload has no delete endpoint, so a retried comment can orphan one. One retry keeps a transient failure
+        // from losing the post, and a second failure reports the error rather than trying again forever.
+        const comment = yield* github.createComment(token, slug, number, body).pipe(
+          Effect.catchAll(() => github.createComment(token, slug, number, body)),
+          Effect.mapError(fromGitHub),
+        )
+        return { commentUrl: comment.url, evidenceUrl: evidence.url }
+      })
+
     /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
     const upload: CoreShape["upload"] = (user, taskId, input) =>
       uploadLock.withPermits(1)(Effect.gen(function* () {
@@ -2762,6 +2886,7 @@ export const CoreLive = Layer.effect(
       runClip,
       evidenceRecordStart,
       evidenceRecordStop,
+      attachRunEvidenceToPullRequest,
       upload,
       health: () => Effect.void,
       getTextGenerationSettings: (user) => readTextGenerationSettings(config.dataDir, user),

@@ -206,6 +206,14 @@ export interface ServerConfig {
   readonly webrtc: WebRtcSettings
   /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
   readonly githubApiUrl: string
+  /**
+   * Base URL (no trailing slash) of GitHub's user-attachments upload host, used to attach run evidence to a pull
+   * request. Defaults to `https://uploads.github.com`. GitHub Enterprise Server has no user-attachments endpoint, so an
+   * enterprise `githubApiUrl` that leaves this default is refused rather than uploading elsewhere. Optional so
+   * existing config fixtures decode; set it for tests or a github.com-compatible host
+   * (`CLOUDAGENTS_GITHUB_UPLOADS_URL`).
+   */
+  readonly githubUploadsUrl?: string
   /** Owners who explicitly selected GitHub's legacy username-only noreply address. Defaults to none. */
   readonly gitLegacyNoreplyUsers?: readonly string[]
 }
@@ -345,6 +353,7 @@ export const loadConfig = (): ServerConfig => {
     taskDiskMax: diskMaxEnv(),
     webrtc: webRtcEnv(direct?.managed === true),
     githubApiUrl: loadGitHubApiUrl(),
+    githubUploadsUrl: loadGitHubUploadsUrl(),
     gitLegacyNoreplyUsers,
   }
 }
@@ -449,6 +458,24 @@ const loadGitHubApiUrl = (): string => {
     throw new Error(`GITHUB_API_URL must be an absolute URL, got "${raw}"`)
   }
   if (!["http:", "https:"].includes(protocol)) throw new Error(`GITHUB_API_URL must use http(s), got "${raw}"`)
+  return raw.replace(/\/+$/, "")
+}
+
+/**
+ * CLOUDAGENTS_GITHUB_UPLOADS_URL, validated; defaults to github.com's upload host. `GitHubLive` refuses an enterprise
+ * API that still points at that default, because GitHub Enterprise Server has no user-attachments endpoint.
+ */
+const loadGitHubUploadsUrl = (): string => {
+  const raw = process.env.CLOUDAGENTS_GITHUB_UPLOADS_URL?.trim() || "https://uploads.github.com"
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error(`CLOUDAGENTS_GITHUB_UPLOADS_URL must be an absolute URL, got "${raw}"`)
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`CLOUDAGENTS_GITHUB_UPLOADS_URL must use http(s), got "${raw}"`)
+  }
   return raw.replace(/\/+$/, "")
 }
 

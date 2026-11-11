@@ -18,6 +18,21 @@ export interface RepoSlug {
   readonly name: string
 }
 
+/**
+ * A file to upload to GitHub's user-attachments store. The endpoint is undocumented, github.com-only, and has no
+ * delete: the returned URL is the only handle once the upload succeeds.
+ */
+export interface UserAttachmentInput {
+  readonly name: string
+  readonly contentType: string
+  readonly bytes: Uint8Array
+}
+
+/** A stored user attachment: GitHub's rendered URL, which works for every viewer who can see the repository. */
+export interface UserAttachment {
+  readonly url: string
+}
+
 /** `owner/name` of a github.com remote, or null for any other host. */
 export const parseGitHubRepo = (url: string): RepoSlug | null => {
   const match = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^/\s:]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(
@@ -301,6 +316,13 @@ export interface GitHubShape {
     method: "merge" | "squash" | "rebase",
   ) => Effect.Effect<void, GitHubError>
   readonly createComment: (token: string, repo: RepoSlug, number: number, body: string) => Effect.Effect<PostedComment, GitHubError>
+  /**
+   * Uploads bytes to GitHub's user-attachments store and returns the URL GitHub renders. The file travels as the raw
+   * request body with its own `Content-Type`, as the GitHub CLI sends it. This is the undocumented endpoint behind
+   * `gh pr comment --attach`: it creates no branch and no commit in the repository. Fails clearly on GitHub Enterprise
+   * Server, where the endpoint does not exist.
+   */
+  readonly uploadUserAttachment: (token: string, repo: RepoSlug, input: UserAttachmentInput) => Effect.Effect<UserAttachment, GitHubError>
   /** Replies in the thread of a review comment on the pull request's diff. */
   readonly replyToReviewComment: (token: string, repo: RepoSlug, number: number, commentId: number, body: string) => Effect.Effect<PostedComment, GitHubError>
   readonly editComment: (token: string, repo: RepoSlug, kind: CommentKind, commentId: number, body: string) => Effect.Effect<PostedComment, GitHubError>
@@ -438,6 +460,12 @@ const CommentPostedBody = Schema.Struct({
   html_url: Schema.String,
 })
 
+/** `GET /repos/{owner}/{name}` carries the numeric repository id the upload endpoint requires. */
+const RepositoryBody = Schema.Struct({ id: Schema.Number })
+
+/** The upload endpoint answers `{ url }`; anything else is not a usable attachment. */
+const UserAttachmentBody = Schema.Struct({ url: Schema.String })
+
 const PullCommitsBody = Schema.Array(
   Schema.Struct({
     sha: Schema.String,
@@ -531,6 +559,11 @@ export const GitHubLive = Layer.effect(
   GitHub,
   Effect.map(Config, (config) => {
     const apiBase = config.githubApiUrl
+    /**
+     * The user-attachments upload host. github.com's is the default; GitHub Enterprise Server does not implement the
+     * endpoint, so an enterprise API that still points at the default fails instead of uploading to github.com.
+     */
+    const uploadsBase = config.githubUploadsUrl ?? "https://uploads.github.com"
     const legacyNoreplyUsers = new Set(config.gitLegacyNoreplyUsers?.map((login) => login.toLowerCase()))
 
     /** One HTTP exchange with GitHub; the status is the caller's to judge. */
@@ -789,6 +822,71 @@ export const GitHubLive = Layer.effect(
         } satisfies PullRequestReference
       })
 
+    /**
+     * Uploads to the undocumented user-attachments endpoint: first the repository id, then a POST whose body is the
+     * file's raw bytes and whose `Content-Type` is the file's type, with the owner's token. It creates no branch and no
+     * commit in the repository, and the result cannot be deleted.
+     */
+    const uploadUserAttachment: GitHubShape["uploadUserAttachment"] = (token, repo, input) =>
+      Effect.gen(function* () {
+        if (apiBase !== "https://api.github.com" && uploadsBase === "https://uploads.github.com") {
+          return yield* Effect.fail(
+            new GitHubError({
+              message:
+                `attaching evidence needs github.com's user-attachments endpoint, but this box uses GitHub Enterprise ` +
+                `at ${apiBase} and GitHub Enterprise Server does not implement it; set ` +
+                `CLOUDAGENTS_GITHUB_UPLOADS_URL only for a github.com-compatible upload host`,
+            }),
+          )
+        }
+        const repository = yield* call(token, repo, "GET", repoPath(repo)).pipe(
+          Effect.flatMap(decode(RepositoryBody, "repository")),
+        )
+        const query = new URLSearchParams({
+          name: input.name,
+          content_type: input.contentType,
+          repository_id: String(repository.id),
+        })
+        // Copy: the body may outlive input.bytes, and a raw Uint8Array is what the endpoint (and `gh --attach`) sends.
+        const bytes = new Uint8Array(input.bytes.byteLength)
+        bytes.set(input.bytes)
+        const response = yield* Effect.tryPromise({
+          try: () =>
+            fetch(`${uploadsBase}/user-attachments/assets?${query}`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${token}`,
+                accept: "application/vnd.github+json",
+                "content-type": input.contentType,
+                "x-github-api-version": "2022-11-28",
+                "user-agent": "kestrel-mcp",
+              },
+              body: bytes,
+              signal: AbortSignal.timeout(120_000),
+            }),
+          catch: () => new GitHubError({ message: `could not reach GitHub's user-attachments host at ${uploadsBase}` }),
+        })
+        const text = yield* Effect.tryPromise({
+          try: () => response.text(),
+          catch: () => new GitHubError({ message: "could not read GitHub's user-attachments response" }),
+        })
+        if (response.status < 200 || response.status >= 300) {
+          const detail = githubMessage(text)
+          const message =
+            response.status === 401
+              ? "GitHub rejected the connected token (expired or revoked): reconnect GitHub and retry"
+              : response.status === 403
+                ? `GitHub denied the user-attachments upload (the connected account may not attach files here)${detail === "" ? "" : `: ${detail}`}`
+                : `GitHub user-attachments upload failed: HTTP ${response.status}${detail === "" ? "" : `: ${detail}`}`
+          return yield* Effect.fail(new GitHubError({ message, status: response.status }))
+        }
+        const json = yield* Effect.try({
+          try: () => JSON.parse(text) as unknown,
+          catch: () => new GitHubError({ message: "GitHub returned a non-JSON user-attachments response" }),
+        })
+        return yield* decode(UserAttachmentBody, "user attachment")(json)
+      })
+
     const toComment = (comment: Schema.Schema.Type<typeof CommentPostedBody>): PostedComment => ({
       id: comment.id,
       url: comment.html_url,
@@ -1012,6 +1110,7 @@ export const GitHubLive = Layer.effect(
           ),
         ),
       createComment: (token, repo, number, body) => postComment(token, repo, `${repoPath(repo)}/issues/${number}/comments`, body),
+      uploadUserAttachment,
       replyToReviewComment: (token, repo, number, commentId, body) =>
         postComment(token, repo, `${repoPath(repo)}/pulls/${number}/comments/${commentId}/replies`, body),
       editComment: (token, repo, kind, commentId, body) =>

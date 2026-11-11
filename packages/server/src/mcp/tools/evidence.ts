@@ -11,6 +11,20 @@ export interface EvidenceToolDeps {
     readonly start: (taskId: string, runId: string, caption?: string) => Effect.Effect<void, unknown>
     /** Stops the run's recording and returns the saved clip. */
     readonly stop: (taskId: string, runId: string) => Effect.Effect<RunClip, unknown>
+    /**
+     * Uploads one of the run's clips, or its poster, to GitHub and comments it on the thread's linked pull request.
+     * Creates no branch and no commit in the repository.
+     */
+    readonly attach: (
+      taskId: string,
+      input: {
+        readonly caption: string
+        readonly checkoutId?: string
+        readonly runId?: string
+        readonly clipId?: string
+        readonly poster?: boolean
+      },
+    ) => Effect.Effect<{ readonly commentUrl: string; readonly evidenceUrl: string }, unknown>
   }
 }
 
@@ -27,6 +41,44 @@ const clipReport = (taskId: string, runId: string, clip: RunClip): string =>
 
 /** Explicit desktop recordings: the run's own evidence, kept beside its other artifacts. */
 export const registerEvidenceTools = (server: McpServer, ctx: RunContext, deps: EvidenceToolDeps): void => {
+  server.registerTool(
+    "evidence_attach_to_pr",
+    {
+      description:
+        "Attach the run's saved desktop clip to the thread's linked open pull request. GitHub holds the file as a user " +
+        "attachment, so this creates no branch and no commit in the repository and never changes the pull request's " +
+        "branches. A video gets an inline player in a new comment; use poster to attach the poster image instead. " +
+        "Record a clip first with evidence_record_start and evidence_record_stop. Attaching only works on github.com; " +
+        "GitHub Enterprise Server has no user-attachments endpoint, and an upload cannot be deleted afterwards.",
+      inputSchema: {
+        caption: z
+          .string()
+          .min(1)
+          .max(500)
+          .describe("What the clip shows; the comment's text (or the image's alt text)"),
+        checkout: z
+          .string()
+          .optional()
+          .describe("Checkout id from repo_checkout; needed when the thread has several checkouts"),
+        runId: z.string().optional().describe("Run whose saved clip to attach; default: this run"),
+        clipId: z.string().optional().describe("Clip id from evidence_record_stop; default: the run's newest clip"),
+        poster: z.boolean().optional().describe("Attach the clip's poster PNG instead of the MP4 (default false)"),
+      },
+    },
+    ({ caption, checkout, runId, clipId, poster }: { readonly caption: string; readonly checkout?: string; readonly runId?: string; readonly clipId?: string; readonly poster?: boolean }) =>
+      guard(() =>
+        runTool(
+          Effect.map(
+            deps.evidence.attach(ctx.taskId, { caption, checkoutId: checkout, runId: runId ?? ctx.runId, clipId, poster }),
+            (attached): CallToolResult =>
+              text(
+                `Attached ${poster === true ? "the poster image" : "the clip"} (${attached.evidenceUrl}) to the thread's pull request: ${attached.commentUrl}`,
+              ),
+          ),
+        ),
+      ),
+  )
+
   server.registerTool(
     "evidence_record_start",
     {

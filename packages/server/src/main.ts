@@ -172,6 +172,7 @@ const program = Effect.gen(function* () {
     evidence: {
       start: (taskId, runId, caption) => core.evidenceRecordStart(taskId, runId, caption),
       stop: (taskId, runId) => core.evidenceRecordStop(taskId, runId),
+      attach: (taskId, input) => core.attachRunEvidenceToPullRequest(taskId, input),
     },
     workspace: {
       checkout: core.checkout,

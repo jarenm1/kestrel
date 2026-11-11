@@ -78,6 +78,17 @@ describe("describeTool", () => {
   test("an external server's tool keeps its server name instead of borrowing a built-in's meaning", () => {
     expect(describeTool(tool("mcp__linear__Read", { file_path: "/x" }), TASK)).toMatchObject({ kind: "other", label: "Read · Linear" })
   })
+
+  test("evidence attachments name the clip or poster on the pull request", () => {
+    expect(describeTool(tool("mcp__cloudagents__evidence_attach_to_pr", { caption: "Spawn works" }), TASK)).toMatchObject({
+      kind: "other",
+      icon: "git",
+      label: "Attached clip to the pull request: “Spawn works”",
+    })
+    expect(describeTool(tool("cloudagents.evidence_attach_to_pr", { caption: "The frame", poster: true }), TASK).label).toBe(
+      "Attached poster to the pull request: “The frame”",
+    )
+  })
 })
 
 describe("editDiff", () => {
