@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { hostname, tmpdir, userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect } from "effect"
@@ -166,6 +166,23 @@ describe("identityFileContents", () => {
     const { passwd, group } = identityFileContents(65534, 65534)
     expect(passwd).toBe("root:x:0:0::/root:/bin/sh\nagent:x:65534:65534::/home/agent:/bin/bash\n")
     expect(group).toBe("root:x:0:\nagent:x:65534:\n")
+  })
+})
+
+describe("ensureIdentityFiles", () => {
+  test("concurrent first launches share one write", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kestrel-identity-race-"))
+    try {
+      const dir = join(root, "sandbox-etc")
+      const results = await Promise.all(Array.from({ length: 8 }, () => Effect.runPromise(ensureIdentityFiles(dir))))
+      const expected = identityFileContents(process.getuid?.() ?? 0, process.getgid?.() ?? 0)
+      for (const files of results) expect(files).toEqual(results[0] as (typeof results)[number])
+      expect(readFileSync(join(dir, "passwd"), "utf8")).toBe(expected.passwd)
+      expect(readFileSync(join(dir, "group"), "utf8")).toBe(expected.group)
+      expect(readdirSync(dir).sort()).toEqual(["group", "passwd"])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
