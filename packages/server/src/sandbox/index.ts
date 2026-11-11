@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import { spawn } from "node:child_process"
 import { accessSync, constants, existsSync, readdirSync, realpathSync } from "node:fs"
-import { mkdir } from "node:fs/promises"
+import { mkdir, rename, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
@@ -18,6 +18,66 @@ export const SANDBOX_HOME = "/home/agent"
 
 /** Under the task home: executables of the task's installed toolkits (`toolkits.ts`), last on every launch's PATH. */
 export const TOOLKIT_BIN = ".kestrel/bin"
+
+/** The box user's name inside the sandbox, in place of its host account name. */
+export const SANDBOX_USER = "agent"
+
+/** The sandbox's hostname, in place of the host's. */
+export const SANDBOX_HOSTNAME = "kestrel"
+
+/** Host paths of the sandbox's own /etc/passwd and /etc/group (see `ensureIdentityFiles`). */
+export interface IdentityFiles {
+  readonly passwd: string
+  readonly group: string
+}
+
+/**
+ * The sandbox's /etc/passwd and /etc/group: the box user as SANDBOX_USER with home SANDBOX_HOME, plus root and
+ * nobody, so lookups by id (`id`, `whoami`, ssh, git) work without listing the host's accounts.
+ */
+export const identityFileContents = (uid: number, gid: number): { readonly passwd: string; readonly group: string } => {
+  const users = [
+    { name: "root", uid: 0, gid: 0, home: "/root", shell: "/bin/sh" },
+    { name: SANDBOX_USER, uid, gid, home: SANDBOX_HOME, shell: "/bin/bash" },
+    { name: "nobody", uid: 65534, gid: 65534, home: "/var/empty", shell: "/bin/sh" },
+  ]
+  const groups = [
+    { name: "root", gid: 0 },
+    { name: SANDBOX_USER, gid },
+    { name: "nogroup", gid: 65534 },
+  ]
+  // The box user's own entry wins over root's or nobody's when its ids collide with theirs.
+  const passwd = users
+    .filter((u) => u.name === SANDBOX_USER || u.uid !== uid)
+    .map((u) => `${u.name}:x:${u.uid}:${u.gid}::${u.home}:${u.shell}\n`)
+  const group = groups.filter((g) => g.name === SANDBOX_USER || g.gid !== gid).map((g) => `${g.name}:x:${g.gid}:\n`)
+  return { passwd: passwd.join(""), group: group.join("") }
+}
+
+const writtenIdentityDirs = new Map<string, IdentityFiles>()
+
+/**
+ * Writes `identityFileContents` for the box user into `dir` once per box process and returns the paths. Each file is
+ * written beside its final path and renamed into place, so a concurrent launch never binds a partial file.
+ */
+export const ensureIdentityFiles = (dir: string): Effect.Effect<IdentityFiles, InternalError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const known = writtenIdentityDirs.get(dir)
+      if (known !== undefined) return known
+      const contents = identityFileContents(process.getuid?.() ?? 0, process.getgid?.() ?? 0)
+      const files = { passwd: join(dir, "passwd"), group: join(dir, "group") }
+      await mkdir(dir, { recursive: true })
+      for (const name of ["passwd", "group"] as const) {
+        const temp = `${files[name]}.${process.pid}.tmp`
+        await writeFile(temp, contents[name], { mode: 0o644 })
+        await rename(temp, files[name])
+      }
+      writtenIdentityDirs.set(dir, files)
+      return files
+    },
+    catch: (e) => new InternalError({ message: `cannot write sandbox passwd/group in ${dir}: ${String(e)}` }),
+  })
 
 /**
  * How tightly agent processes are isolated (`CLOUDAGENTS_SANDBOX`):
@@ -160,6 +220,8 @@ export interface BwrapOptions {
   readonly homeToolArgs?: ReadonlyArray<string>
   /** `strict` only: the toolchain dir (CLOUDAGENTS_SANDBOX_PATH), whose `env` becomes /usr/bin/env. */
   readonly binPath?: string | null
+  /** Bound at /etc/passwd and /etc/group in place of the host's (`ensureIdentityFiles`). */
+  readonly identity?: IdentityFiles
 }
 
 /**
@@ -176,6 +238,8 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     "--unshare-user-try",
     "--unshare-pid",
     "--unshare-uts",
+    "--hostname",
+    SANDBOX_HOSTNAME,
     "--unshare-cgroup-try",
     // Agent CLIs refuse root, so keep the box user's own ids; a holder's namespace may map them to root (pasta's does).
     "--uid",
@@ -218,9 +282,12 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     }
     for (const file of SYSTEM_RO_FILES) {
       if (file === "/etc/ssl" && opts.caBundle) continue
+      if (opts.identity && (file === "/etc/passwd" || file === "/etc/group")) continue
       if (existsSync(file)) argv.push("--ro-bind", file, file)
     }
   }
+  // Over basic's /etc bind: binds apply in order.
+  if (opts.identity) argv.push("--ro-bind", opts.identity.passwd, "/etc/passwd", "--ro-bind", opts.identity.group, "/etc/group")
   if (opts.caBundle) for (const path of CA_BUNDLE_PATHS) argv.push("--ro-bind", opts.caBundle, path)
   if (opts.display !== undefined) {
     const socket = x11Socket(opts.display)
@@ -345,6 +412,8 @@ export interface SandboxSettings {
   readonly systemd: SystemdSettings | null
   /** Box HTTP port, forwarded into each task's network namespace for the broker and MCP. */
   readonly boxPort: number
+  /** Box-owned dir holding the sandbox's /etc/passwd and /etc/group (`ensureIdentityFiles`). */
+  readonly identityDir: string
 }
 
 export interface LaunchRequest {
@@ -387,6 +456,7 @@ export const agentHome = (settings: SandboxSettings, homeDir: string): string =>
   settings.level === "off" ? homeDir : SANDBOX_HOME
 
 export const sandboxSettingsOf = (config: {
+  readonly dataDir: string
   readonly sandbox: SandboxLevel
   readonly sandboxPath: string | null
   readonly sandboxSslCertFile: string | null
@@ -399,6 +469,7 @@ export const sandboxSettingsOf = (config: {
   sslCertFile: config.sandbox === "strict" ? config.sandboxSslCertFile : null,
   systemd: config.systemd,
   boxPort: config.sandboxPort,
+  identityDir: join(config.dataDir, "sandbox-etc"),
 })
 
 /**
@@ -766,6 +837,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         }),
       { discard: true },
     )
+    const identity = settings.level === "off" ? undefined : yield* ensureIdentityFiles(settings.identityDir)
     const home = agentHome(settings, req.homeDir)
     const cwd = req.cwd ?? req.workspacePath
     const hostPath = process.env.PATH ?? "/usr/bin:/bin"
@@ -817,6 +889,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         caBundle: settings.sslCertFile,
         homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],
         binPath: settings.binPath,
+        identity,
       }).slice(1)
     const sandbox = settings.level === "off" ? [shell(), "-c", req.command] : [bwrap as string, ...bwrapArgs(settings.level)]
     const joinArgv =
