@@ -54,27 +54,36 @@ export const identityFileContents = (uid: number, gid: number): { readonly passw
   return { passwd: passwd.join(""), group: group.join("") }
 }
 
-const writtenIdentityDirs = new Map<string, IdentityFiles>()
+const writeIdentityFiles = async (dir: string): Promise<IdentityFiles> => {
+  const contents = identityFileContents(process.getuid?.() ?? 0, process.getgid?.() ?? 0)
+  const files = { passwd: join(dir, "passwd"), group: join(dir, "group") }
+  await mkdir(dir, { recursive: true })
+  for (const name of ["passwd", "group"] as const) {
+    const temp = `${files[name]}.${process.pid}.tmp`
+    await writeFile(temp, contents[name], { mode: 0o644 })
+    await rename(temp, files[name])
+  }
+  return files
+}
+
+/** One write per dir: concurrent first launches share it, so they never race on its temp files. */
+const identityWrites = new Map<string, Promise<IdentityFiles>>()
 
 /**
  * Writes `identityFileContents` for the box user into `dir` once per box process and returns the paths. Each file is
- * written beside its final path and renamed into place, so a concurrent launch never binds a partial file.
+ * written beside its final path and renamed into place, so a launch never binds a partial file. A failed write is
+ * forgotten, so the next launch tries again.
  */
 export const ensureIdentityFiles = (dir: string): Effect.Effect<IdentityFiles, InternalError> =>
   Effect.tryPromise({
-    try: async () => {
-      const known = writtenIdentityDirs.get(dir)
-      if (known !== undefined) return known
-      const contents = identityFileContents(process.getuid?.() ?? 0, process.getgid?.() ?? 0)
-      const files = { passwd: join(dir, "passwd"), group: join(dir, "group") }
-      await mkdir(dir, { recursive: true })
-      for (const name of ["passwd", "group"] as const) {
-        const temp = `${files[name]}.${process.pid}.tmp`
-        await writeFile(temp, contents[name], { mode: 0o644 })
-        await rename(temp, files[name])
+    try: () => {
+      let write = identityWrites.get(dir)
+      if (write === undefined) {
+        write = writeIdentityFiles(dir)
+        identityWrites.set(dir, write)
+        write.catch(() => identityWrites.delete(dir))
       }
-      writtenIdentityDirs.set(dir, files)
-      return files
+      return write
     },
     catch: (e) => new InternalError({ message: `cannot write sandbox passwd/group in ${dir}: ${String(e)}` }),
   })
