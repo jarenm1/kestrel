@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { renderToStaticMarkup } from "react-dom/server"
 import type { AgentItem, Run } from "@cloudagents/protocol"
 import { Transcript } from "./Transcript"
-import { RunSummary } from "./RunSummary"
+import { RunSummary, RunUsage } from "./RunSummary"
 
 const start = "2026-11-06T10:00:00Z"
 const end = "2026-11-06T10:01:00Z"
@@ -23,15 +23,16 @@ test("unfinished trailing work cannot report a completed prefix as invocation us
     { _tag: "text", id: "next", parentToolId: null, text: "Still working" },
   ]
   for (const status of ["failed", "cancelled", "succeeded"] as const) {
-    const html = renderToStaticMarkup(<RunSummary run={{ ...run, status }} items={items} />)
+    const html = renderToStaticMarkup(<RunUsage run={{ ...run, status }} items={items} />)
     expect(html).not.toContain("tok/s")
     expect(html).toContain("Not reported")
   }
 })
 
 test("restart reconciliation does not count downtime as work", () => {
-  const html = renderToStaticMarkup(<RunSummary run={{ ...run, status: "failed", interruptedByRestart: true, endedAt: "2026-11-07T10:00:00Z" }} items={[]} />)
-  expect(html).not.toContain("24h")
+  const restarted: Run = { ...run, status: "failed", interruptedByRestart: true, endedAt: "2026-11-07T10:00:00Z" }
+  expect(renderToStaticMarkup(<RunSummary run={restarted} items={[]} />)).not.toContain("24h")
+  const html = renderToStaticMarkup(<RunUsage run={restarted} items={[]} />)
   expect(html).not.toContain("tok/s")
   expect(html).toContain("Not reported")
 })

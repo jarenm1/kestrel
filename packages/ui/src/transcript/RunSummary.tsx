@@ -1,5 +1,7 @@
+import { useState } from "react"
 import type { AgentItem, Run } from "@cloudagents/protocol"
 import { cn } from "../cn"
+import { Collapse } from "./Collapse"
 import { formatMessageTime } from "./time"
 import { Chevron, DETAILS_CLASS, ROW_CLASS } from "./WorkLog"
 
@@ -64,31 +66,47 @@ function tokenTotals(items: readonly AgentItem[]): Totals {
   }
 }
 
-/** One summary per harness invocation, using Kestrel's lifecycle clock for every harness. */
-export function RunSummary({ run, items }: { run: Run; items: readonly AgentItem[] }) {
-  if (run.status === "running") return null
+/** The run's wall-clock work time; NaN when it has no trustworthy end (still going, unparseable, or a restart). */
+function workedMs(run: Run): number {
   const elapsed = run.endedAt === null ? NaN : Date.parse(run.endedAt) - Date.parse(run.startedAt)
-  const measured = !run.interruptedByRestart && Number.isFinite(elapsed) && elapsed >= 0
+  return !run.interruptedByRestart && Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : NaN
+}
+
+/** A finished run's token totals and rate, behind its summary line. */
+export function RunUsage({ run, items }: { run: Run; items: readonly AgentItem[] }) {
+  const elapsed = workedMs(run)
   // A failed/stopped invocation can end without a final usage report. Do not call a completed prefix its total.
   const complete = run.status === "succeeded" && items.at(-1)?._tag === "turn"
   const { input, output, cached } = complete ? tokenTotals(items) : { input: null, output: null, cached: null }
-  const rate = measured && elapsed > 0 && output !== null ? output * 1000 / elapsed : null
+  const rate = elapsed > 0 && output !== null ? output * 1000 / elapsed : null
+  return (
+    <dl className="grid w-fit grid-cols-[auto_auto] gap-x-5 gap-y-1 text-sm text-muted-foreground">
+      <dt>Input tokens</dt><dd title={input === null ? undefined : EXACT.format(input)}>{count(input)}</dd>
+      <dt>Output tokens</dt><dd title={output === null ? undefined : EXACT.format(output)}>{count(output)}</dd>
+      <dt>Cached tokens</dt><dd title={cached === null ? undefined : EXACT.format(cached)}>{count(cached)}</dd>
+      <dt>Avg TPS</dt><dd title="Output tokens per second over the run's wall-clock time, including tools and waiting">{rate !== null && Number.isFinite(rate) ? `${rate.toLocaleString("en-US", { maximumFractionDigits: 1 })} tok/s` : "Not reported"}</dd>
+    </dl>
+  )
+}
+
+/** One summary per harness invocation, using Kestrel's lifecycle clock for every harness. */
+export function RunSummary({ run, items }: { run: Run; items: readonly AgentItem[] }) {
+  const [open, setOpen] = useState(false)
+  if (run.status === "running") return null
+  const elapsed = workedMs(run)
   const label = run.interruptedByRestart ? "Interrupted by restart" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Worked"
   return (
-    <details className="group/run tabular-nums">
-      <summary className={cn(ROW_CLASS, "w-fit list-none [&::-webkit-details-marker]:hidden")}>
+    <div className="tabular-nums">
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className={cn(ROW_CLASS, "w-fit")}>
         <span>
-          {label}{measured ? ` for ${duration(elapsed)}` : ""}
+          {label}{Number.isNaN(elapsed) ? "" : ` for ${duration(elapsed)}`}
           {run.endedAt !== null && <><span aria-hidden="true"> · </span><time dateTime={run.endedAt}>{formatMessageTime(run.endedAt)}</time></>}
         </span>
-        <Chevron className="group-open/run:rotate-90 group-open/run:opacity-100" />
-      </summary>
-      <dl className={cn(DETAILS_CLASS, "grid w-fit grid-cols-[auto_auto] gap-x-5 gap-y-1 text-sm text-muted-foreground")}>
-        <dt>Input tokens</dt><dd title={input === null ? undefined : EXACT.format(input)}>{count(input)}</dd>
-        <dt>Output tokens</dt><dd title={output === null ? undefined : EXACT.format(output)}>{count(output)}</dd>
-        <dt>Cached tokens</dt><dd title={cached === null ? undefined : EXACT.format(cached)}>{count(cached)}</dd>
-        <dt>Avg TPS</dt><dd title="Output tokens per second over the run's wall-clock time, including tools and waiting">{rate !== null && Number.isFinite(rate) ? `${rate.toLocaleString("en-US", { maximumFractionDigits: 1 })} tok/s` : "Not reported"}</dd>
-      </dl>
-    </details>
+        <Chevron open={open} />
+      </button>
+      <Collapse open={open} className={DETAILS_CLASS}>
+        <RunUsage run={run} items={items} />
+      </Collapse>
+    </div>
   )
 }

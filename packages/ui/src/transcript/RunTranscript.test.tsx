@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { renderToStaticMarkup } from "react-dom/server"
 import type { AgentItem, Message, Run } from "@cloudagents/protocol"
 import { RunTranscript } from "./RunTranscript"
-import { RunSummary } from "./RunSummary"
+import { RunSummary, RunUsage } from "./RunSummary"
 import { Transcript } from "./Transcript"
 
 const timestamp = "2026-11-06T10:00:00Z"
@@ -12,10 +12,11 @@ const turn = (id: string, outputTokens: number | null = 60): AgentItem => ({
 })
 const usage: AgentItem = { _tag: "usage", id: "usage", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 20, cachedTokens: 1000 }
 const summary = (items: AgentItem[], overrides: Partial<Run> = {}) => renderToStaticMarkup(<RunSummary run={{ ...run, ...overrides }} items={items} />)
+const totals = (items: AgentItem[], overrides: Partial<Run> = {}) => renderToStaticMarkup(<RunUsage run={{ ...run, ...overrides }} items={items} />)
 
 test("elapsed and rate use the lifecycle clock rather than response or provider timing", () => {
-  const html = summary([usage, turn("end")])
-  expect(html).toContain("Worked for 1m")
+  expect(summary([usage, turn("end")])).toContain("Worked for 1m")
+  const html = totals([usage, turn("end")])
   // 60 turn output over the run's 60s; response output/duration (20 / 0.4s) and turn output/duration (60 / 2s) must
   // not leak into the rate.
   expect(html).toContain("1 tok/s")
@@ -24,7 +25,7 @@ test("elapsed and rate use the lifecycle clock rather than response or provider 
 })
 
 test("input excludes cache reads, cached tokens stay separate, and details do not repeat elapsed", () => {
-  const html = summary([usage, turn("end")])
+  const html = totals([usage, turn("end")])
   expect(html).not.toContain("Elapsed")
   expect(html).toContain(`title="100"`)
   expect(html).toContain(`title="60"`)
@@ -36,7 +37,7 @@ test("input excludes cache reads, cached tokens stay separate, and details do no
 })
 
 test("turn-only totals report output without inventing cache-free input or a cache split", () => {
-  const html = summary([turn("end")])
+  const html = totals([turn("end")])
   expect(html).toContain(`title="60"`)
   expect(html).toContain("1 tok/s")
   expect(html).toContain("Input tokens</dt><dd>Not reported</dd>")
@@ -45,14 +46,14 @@ test("turn-only totals report output without inventing cache-free input or a cac
 
 test("a response with missing output usage does not blank the turn's output total", () => {
   const partial: AgentItem = { _tag: "usage", id: "partial", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: null, cachedTokens: 1000 }
-  const html = summary([partial, turn("end")])
+  const html = totals([partial, turn("end")])
   expect(html).toContain(`title="60"`)
   expect(html).toContain("1 tok/s")
 })
 
 test("subagent usage stays out of the main agent's input and cache totals", () => {
   const subagent: AgentItem = { _tag: "usage", id: "sub", parentToolId: "tool-1", timestamp, durationMs: 400, inputTokens: 500, outputTokens: 60, cachedTokens: 5000 }
-  const html = summary([usage, subagent, turn("end")])
+  const html = totals([usage, subagent, turn("end")])
   expect(html).toContain(`title="100"`)
   expect(html).toContain(`title="1,000"`)
   expect(html).not.toContain(`title="600"`)
@@ -62,7 +63,7 @@ test("subagent usage stays out of the main agent's input and cache totals", () =
 test("multi-turn responses stay grouped with the turn that closed them", () => {
   const first: AgentItem = { _tag: "usage", id: "first", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 60, cachedTokens: 1000 }
   const second: AgentItem = { _tag: "usage", id: "second", parentToolId: null, timestamp, durationMs: 400, inputTokens: 200, outputTokens: 60, cachedTokens: 2000 }
-  const html = summary([first, turn("one"), second, turn("two")])
+  const html = totals([first, turn("one"), second, turn("two")])
   expect(html).toContain(`title="300"`)
   expect(html).toContain(`title="3,000"`)
   expect(html).toContain("2 tok/s")
@@ -70,7 +71,7 @@ test("multi-turn responses stay grouped with the turn that closed them", () => {
 
 test("a reported input survives an unknown cache bucket", () => {
   const uncached: AgentItem = { _tag: "usage", id: "uncached", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 60, cachedTokens: null }
-  const html = summary([uncached, turn("end")])
+  const html = totals([uncached, turn("end")])
   expect(html).toContain(`title="100"`)
   expect(html).toContain("Cached tokens</dt><dd>Not reported</dd>")
   expect(html).toContain("1 tok/s")
@@ -104,19 +105,18 @@ test("steering splits content but leaves exactly one final run summary", () => {
     { id: "reply", taskId: "task", role: "agent", text: "Done", runId: "run", createdAt: run.endedAt! },
   ]
   const html = renderToStaticMarkup(<Transcript taskId="task" messages={messages} runs={[run]} runItems={{ run: [usage, turn("one"), { _tag: "text", id: "text", parentToolId: null, text: "Done" }, turn("two")] }} pendingAskId={undefined} />)
-  expect(html.match(/<summary/g)?.length).toBe(1)
+  expect(html.match(/Worked for/g)?.length).toBe(1)
   expect(html.indexOf("Worked for")).toBeGreaterThan(html.indexOf("Done"))
   expect(html.match(/<time /g)?.length).toBe(1)
-  expect(html).toContain("2 tok/s")
 })
 
 test("missing tokens never turn partial totals into a misleading rate", () => {
-  expect(summary([turn("one"), turn("two", null)])).not.toContain("tok/s")
-  expect(summary([])).toContain("Not reported")
-  expect(summary([turn("zero", 0)])).toContain("0 tok/s")
-  expect(summary([turn("end")], { endedAt: timestamp })).not.toContain("tok/s")
-  expect(summary([turn("end")], { endedAt: null })).not.toContain("tok/s")
-  expect(summary([turn("end")], { endedAt: "invalid" })).not.toContain("tok/s")
+  expect(totals([turn("one"), turn("two", null)])).not.toContain("tok/s")
+  expect(totals([])).toContain("Not reported")
+  expect(totals([turn("zero", 0)])).toContain("0 tok/s")
+  expect(totals([turn("end")], { endedAt: timestamp })).not.toContain("tok/s")
+  expect(totals([turn("end")], { endedAt: null })).not.toContain("tok/s")
+  expect(totals([turn("end")], { endedAt: "invalid" })).not.toContain("tok/s")
 })
 
 test("running runs have no completion footer; stops and failures retain duration", () => {

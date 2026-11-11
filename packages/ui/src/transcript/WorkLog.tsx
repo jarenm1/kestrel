@@ -72,15 +72,14 @@ const EXTRA_ICONS: Record<ToolIcon, LucideIcon> = {
   message: MessageSquare,
 }
 
-/** `open` for rows that track their state; a `<details>` row passes its `group-open` variants as `className`. */
-export function Chevron({ open = false, className }: { open?: boolean; className?: string }) {
+/** Shows on hover, and turned down while its row is open. */
+export function Chevron({ open }: { open: boolean }) {
   return (
     <ChevronRight
       aria-hidden="true"
       className={cn(
         "size-3.5 shrink-0 opacity-0 transition group-hover/row:opacity-100 group-focus-visible/row:opacity-100",
         open && "rotate-90 opacity-100",
-        className,
       )}
     />
   )
@@ -108,18 +107,18 @@ export function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
         <span className={cn(live && SHIMMER_CLASS)}>{live ? "Thinking" : "Thought"}</span>
         <Chevron open={open} />
       </button>
-      {open && (
+      <Collapse open={open} className={DETAILS_CLASS}>
         <div
           ref={scrollerRef}
           onScroll={(event) => {
             const { scrollHeight, scrollTop, clientHeight } = event.currentTarget
             atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= LIVE_EDGE_PX
           }}
-          className={cn(DETAILS_CLASS, "max-h-60 overflow-auto text-sm break-words whitespace-pre-wrap text-muted-foreground italic")}
+          className="max-h-60 overflow-auto text-sm break-words whitespace-pre-wrap text-muted-foreground italic"
         >
           {text}
         </div>
-      )}
+      </Collapse>
     </div>
   )
 }
