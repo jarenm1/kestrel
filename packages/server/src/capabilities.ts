@@ -59,6 +59,9 @@ export const boxCapabilities = (
     desktop: desktop ? "prerequisites-present" : "unavailable",
     gpu,
     suspend,
+    // Explicit recording needs only the desktop's encoder and ffmpeg (both required desktop tools); the rolling
+    // buffer is not built. The desktop itself may still be unavailable at runtime.
+    evidence: { recording: true, rollingBuffer: false },
   }
 }
 

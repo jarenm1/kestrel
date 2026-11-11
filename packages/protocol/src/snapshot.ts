@@ -4,6 +4,16 @@ export interface Identified {
 }
 
 /**
+ * Merges one live run update into its cached run. A `run.updated` event carries the run as the state store has it,
+ * and the store never holds saved evidence: clips live on the box's disk and are filled into run snapshots only. So
+ * an update without `evidence` keeps the cached clips, and one that has evidence is a full snapshot and replaces them.
+ */
+export const mergeRunUpdate = <T extends Identified & { readonly evidence?: unknown }>(
+  cached: T | undefined,
+  update: T,
+): T => (update.evidence === undefined && cached?.evidence !== undefined ? { ...update, evidence: cached.evidence } : update)
+
+/**
  * Merges a list snapshot with the cache entries live events wrote while the snapshot was in flight.
  *
  * The caller takes `before` from the cache immediately before starting the fetch. Event writes replace an entry's

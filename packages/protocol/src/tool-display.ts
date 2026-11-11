@@ -264,6 +264,12 @@ function kestrelView(tool: string, input: Readonly<Record<string, unknown>>, tas
       return { kind: "other", icon: "message", label: `Reported ${str(input.status) ?? "progress"}`, code: false, paths: [], note: str(input.message) }
     case "task_ask":
       return { kind: "other", icon: "message", label: `Asked ${quote(str(input.question) ?? "")}`, code: false, paths: [] }
+    case "evidence_record_start": {
+      const caption = str(input.caption)
+      return { kind: "desktop", icon: "camera", label: caption === undefined ? "Started recording" : `Started recording ${quote(caption)}`, code: false, paths: [] }
+    }
+    case "evidence_record_stop":
+      return { kind: "desktop", icon: "camera", label: "Saved the desktop recording", code: false, paths: [] }
     default:
       return null
   }

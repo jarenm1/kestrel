@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { BOX_USER_HEADER, type BoxCapabilities, NotFound, Paths, type ThreadPullRequestAction } from "@cloudagents/protocol"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { open } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { BOX_USER_HEADER, MAX_RELAY_RESPONSE_BYTES, type BoxCapabilities, NotFound, Paths, type RunClip, type ThreadPullRequestAction } from "@cloudagents/protocol"
 import type { CoreShape } from "../core/service"
 import { makeWebHandler, type RouterHooks } from "./router"
 
@@ -211,4 +215,115 @@ describe("pull request routes", () => {
     expect(response.status).toBe(400)
     expect(events).toEqual(["hook false", "hook false"])
   })
+})
+
+describe("clip routes", () => {
+  const clip: RunClip = {
+    id: `${"a".repeat(32)}.mp4`,
+    caption: "Spawn demo",
+    createdAt: "2026-11-06T10:00:00Z",
+    durationMs: 1200,
+    poster: `${"a".repeat(32)}.png`,
+  }
+
+  test("start carries the caption, stop returns the clip, and list returns the run's clips", async () => {
+    const calls: string[] = []
+    const handler = await handlerFor({
+      evidenceStart: (_user: string, _taskId: string, _runId: string, caption?: string) => {
+        calls.push(`start ${caption}`)
+        return Effect.void
+      },
+      evidenceStop: () => {
+        calls.push("stop")
+        return Effect.succeed(clip)
+      },
+      runClips: () => {
+        calls.push("list")
+        return Effect.succeed({ clips: [clip] })
+      },
+    } as unknown as Partial<CoreShape>)
+    const started = await handler(request(Paths.taskRunClips("t1", "r1"), { method: "POST", body: JSON.stringify({ caption: "Spawn demo" }) }))
+    expect(started.status).toBe(204)
+    const stopped = await handler(request(Paths.taskRunClips("t1", "r1"), { method: "DELETE" }))
+    expect(stopped.status).toBe(200)
+    const stoppedClip = await stopped.json()
+    expect(stoppedClip.id).toBe(clip.id)
+    expect(stoppedClip.caption).toBe("Spawn demo")
+    const listed = await handler(request(Paths.taskRunClips("t1", "r1")))
+    expect((await listed.json()).clips).toHaveLength(1)
+    expect(calls).toEqual(["start Spawn demo", "stop", "list"])
+  })
+
+  test("a clip is served whole, as a byte range, and 416 when the range cannot be satisfied", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clip-route-"))
+    try {
+      const path = join(dir, "clip.mp4")
+      writeFileSync(path, Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))
+      const handler = await handlerFor({
+        runClip: () =>
+          Effect.tryPromise({
+            try: async () => {
+              const handle = await open(path)
+              const stat = await handle.stat()
+              return { handle, size: stat.size, mimeType: "video/mp4" }
+            },
+            catch: () => new NotFound({ message: "no clip" }),
+          }),
+      } as unknown as Partial<CoreShape>)
+      const url = Paths.taskRunClip("t1", "r1", "clip.mp4")
+      const whole = await handler(request(url))
+      expect(whole.status).toBe(200)
+      expect(whole.headers.get("content-type")).toBe("video/mp4")
+      expect(whole.headers.get("accept-ranges")).toBe("bytes")
+      expect(new Uint8Array(await whole.arrayBuffer())).toEqual(Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))
+      const partial = await handler(new Request(`http://box.test${url}`, {
+        headers: { [BOX_USER_HEADER]: "alice", range: "bytes=2-5" },
+      }))
+      expect(partial.status).toBe(206)
+      expect(partial.headers.get("content-range")).toBe("bytes 2-5/10")
+      expect(new Uint8Array(await partial.arrayBuffer())).toEqual(Uint8Array.from([2, 3, 4, 5]))
+      const bad = await handler(new Request(`http://box.test${url}`, {
+        headers: { [BOX_USER_HEADER]: "alice", range: "bytes=20-30" },
+      }))
+      expect(bad.status).toBe(416)
+      expect(bad.headers.get("content-range")).toBe("bytes */10")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test("a clip over the relay response cap is served as a capped short 206", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "clip-route-"))
+  try {
+    const path = join(dir, "long.mp4")
+    const size = MAX_RELAY_RESPONSE_BYTES + 1
+    writeFileSync(path, new Uint8Array(size))
+    const handler = await handlerFor({
+      runClip: () =>
+        Effect.tryPromise({
+          try: async () => {
+            const handle = await open(path)
+            return { handle, size: (await handle.stat()).size, mimeType: "video/mp4" }
+          },
+          catch: () => new NotFound({ message: "no clip" }),
+        }),
+    } as unknown as Partial<CoreShape>)
+    const url = Paths.taskRunClip("t1", "r1", "long.mp4")
+    const whole = await handler(request(url))
+    expect(whole.status).toBe(206)
+    expect(whole.headers.get("content-length")).toBe(String(MAX_RELAY_RESPONSE_BYTES))
+    expect(whole.headers.get("content-range")).toBe(`bytes 0-${MAX_RELAY_RESPONSE_BYTES - 1}/${size}`)
+    expect(whole.headers.get("accept-ranges")).toBe("bytes")
+    await whole.body?.cancel()
+    const openEnded = await handler(new Request(`http://box.test${url}`, {
+      headers: { [BOX_USER_HEADER]: "alice", range: "bytes=0-" },
+    }))
+    expect(openEnded.status).toBe(206)
+    expect(openEnded.headers.get("content-length")).toBe(String(MAX_RELAY_RESPONSE_BYTES))
+    expect(openEnded.headers.get("content-range")).toBe(`bytes 0-${MAX_RELAY_RESPONSE_BYTES - 1}/${size}`)
+    await openEnded.body?.cancel()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -69,7 +69,15 @@ async function exercise(managed: boolean): Promise<void> {
     assert.equal(input.readyState, "open")
     const command = '{"_tag":"key.down","key":"a"}'
     input.send(command)
-    const config = { kind: "config", config: { profileIdc: 66, lengthBytes: 4, nals: [Uint8Array.of(0x67, 0x42, 0xe0, 0x28), Uint8Array.of(0x68, 0xce)] } } as const
+    const config = {
+      kind: "config",
+      config: {
+        profileIdc: 66,
+        lengthBytes: 4,
+        nals: [Uint8Array.of(0x67, 0x42, 0xe0, 0x28), Uint8Array.of(0x68, 0xce)],
+        avcc: Uint8Array.of(1, 0x42, 0xe0, 0x28, 0xff, 0xe1, 0, 4, 0x67, 0x42, 0xe0, 0x28, 1, 0, 2, 0x68, 0xce),
+      },
+    } as const
     tap.push(config)
     session.push(config)
     const frame = { kind: "key", au: Uint8Array.of(0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21) } as const

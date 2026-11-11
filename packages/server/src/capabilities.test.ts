@@ -19,6 +19,7 @@ test("reports the configured sandbox, without inferring it from installed tools"
     const capability = boxCapabilities(sandbox, linux)
     expect(Schema.decodeUnknownSync(BoxCapabilities)(capability)).toEqual({
       version: 1, platform: "linux", sandbox, desktop: "prerequisites-present", gpu: "none", suspend: false,
+      evidence: { recording: true, rollingBuffer: false },
     })
   }
 })
@@ -29,7 +30,7 @@ test("recognizes WSL and does not promise a desktop on native Windows or macOS",
     expect(boxCapabilities("off", {
       ...linux, platform,
       executable: () => { throw new Error("must not probe Linux tools") },
-    })).toEqual({ version: 1, platform: "other", sandbox: "off", desktop: "unavailable", gpu: "none", suspend: false })
+    })).toEqual({ version: 1, platform: "other", sandbox: "off", desktop: "unavailable", gpu: "none", suspend: false, evidence: { recording: true, rollingBuffer: false } })
   }
 })
 
@@ -37,6 +38,7 @@ test("recognizes a Lima guest by its cloud-init seed, whatever the kernel releas
   const lima = { ...linux, exists: (path: string) => path === "/mnt/lima-cidata" }
   expect(boxCapabilities("basic", lima)).toEqual({
     version: 1, platform: "lima", sandbox: "basic", desktop: "prerequisites-present", gpu: "none", suspend: false,
+    evidence: { recording: true, rollingBuffer: false },
   })
   expect(boxCapabilities("basic", { ...lima, exists: () => false }).platform).toBe("linux")
   expect(boxCapabilities("basic", { ...lima, platform: "darwin" }).platform).toBe("other")

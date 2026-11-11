@@ -371,6 +371,28 @@ export type Message = typeof Message.Type
 export const RunStatus = Schema.Literal("running", "succeeded", "failed", "cancelled")
 export type RunStatus = typeof RunStatus.Type
 
+/**
+ * One video clip recorded from the run's desktop. `id` and `poster` name files the box serves for the run; both are
+ * content-immutable, so their URLs can be cached. `poster` is null when the desktop stopped before its screenshot
+ * could be taken.
+ */
+export const RunClip = Schema.Struct({
+  /** The MP4 file name, served by `Paths.taskRunClip`. */
+  id: Schema.String,
+  caption: Schema.String,
+  createdAt: Schema.String,
+  durationMs: Schema.Number,
+  /** The poster PNG's file name, served by `Paths.taskRunClip`; null when the screenshot failed. */
+  poster: Schema.NullOr(Schema.String),
+})
+export type RunClip = typeof RunClip.Type
+
+/** A run's saved evidence: its desktop clips, oldest first. */
+export const RunEvidence = Schema.Struct({
+  clips: Schema.Array(RunClip),
+})
+export type RunEvidence = typeof RunEvidence.Type
+
 /** One agent-harness invocation in a thread's workspace. */
 export const Run = Schema.Struct({
   id: Schema.String,
@@ -392,6 +414,8 @@ export const Run = Schema.Struct({
   interruptedByRestart: Schema.optional(Schema.Boolean),
   /** Set on a run started automatically after the thread's previous run failed: its retry number, 1-based. */
   autoRetryAttempt: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
+  /** Desktop clips saved for this run; absent when it has none. Read from the run's clip sidecars, never stored in state. */
+  evidence: Schema.optional(RunEvidence),
 })
 export type Run = typeof Run.Type
 
@@ -975,6 +999,16 @@ export const BoxCapabilities = Schema.Struct({
   gpu: Schema.optional(Schema.Literal("none", "static", "on-demand")),
   /** True on a Nest VM: the box suspends when idle and resumes on the next request. Absent means false. */
   suspend: Schema.optional(Schema.Boolean),
+  /**
+   * Saved evidence the box supports: `recording` for explicit desktop clips, `rollingBuffer` for saving the last few
+   * minutes. Absent on boxes from before it was reported; treat as unsupported.
+   */
+  evidence: Schema.optional(
+    Schema.Struct({
+      recording: Schema.Boolean,
+      rollingBuffer: Schema.Boolean,
+    }),
+  ),
 })
 export type BoxCapabilities = typeof BoxCapabilities.Type
 
@@ -1179,6 +1213,14 @@ export const Paths = {
     `/api/tasks/${taskId}/checkouts/${checkoutId}/icon/${blob}`,
   /** An image a tool call returned (`images` on a tool item); the id names the bytes, so the URL is immutable. */
   taskRunImage: (taskId: string, runId: string, imageId: string) => `/api/tasks/${taskId}/runs/${runId}/images/${imageId}`,
+  /**
+   * GET -> `RunEvidence` for the run; POST with an optional `{ caption }` body starts recording its desktop; DELETE
+   * stops the active recording and returns its `RunClip`. The desktop must be running.
+   */
+  taskRunClips: (taskId: string, runId: string) => `/api/tasks/${taskId}/runs/${runId}/clips`,
+  /** The bytes of a clip's MP4 (`clip.id`) or poster PNG (`clip.poster`); the file name is immutable. Supports Range. */
+  taskRunClip: (taskId: string, runId: string, clipId: string) =>
+    `/api/tasks/${taskId}/runs/${runId}/clips/${clipId}`,
   /**
    * POST the raw file bytes as the body (not multipart), its type as `Content-Type`, and its file name as the
    * optional `name` query parameter -> `Attachment`. The upload waits, unsent, until a `SendMessageBody.attachments`

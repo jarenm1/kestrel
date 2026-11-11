@@ -46,6 +46,8 @@ export interface AvcConfig {
   readonly profileIdc: number
   readonly nals: ReadonlyArray<Uint8Array>
   readonly lengthBytes: number
+  /** The avcC record as it arrived: the exact bytes an FLV AVC sequence header carries. */
+  readonly avcc: Uint8Array
 }
 
 /** What the encoder produces, as the viewer's RTP side takes it. `au` is an AVCC access unit owned by the receiver. */
@@ -73,7 +75,7 @@ export const parseAvcConfig = (avcc: Uint8Array): AvcConfig => {
   const ppsCount = avcc[at]!
   at += 1
   readSets(ppsCount)
-  return { profileIdc: avcc[1]!, nals, lengthBytes: (avcc[4]! & 0x03) + 1 }
+  return { profileIdc: avcc[1]!, nals, lengthBytes: (avcc[4]! & 0x03) + 1, avcc }
 }
 
 /** The NAL units of an AVCC access unit, without the delimiters a packet stream does not need. */

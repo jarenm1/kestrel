@@ -505,7 +505,13 @@ start needs (weston 14 or newer, Xwayland, xdotool, ffmpeg, and the xdamage-capt
 openbox, hsetroot and xterm are optional and do not change the answer. It does not guarantee a desktop will start;
 permissions, graphics and runtime resources still matter. `unavailable` means that check did not pass. The
 `platform` and `sandbox` value sets are closed within version 1: a value outside them is a new contract version.
-Additive fields within version 1 may be ignored. The response is a startup snapshot; restart the box after installing
+Additive fields within version 1 may be ignored. A box that reports `evidence` supports explicit desktop recording:
+`evidence.recording` starts a clip with `evidence_record_start` and saves it with `evidence_record_stop` (also
+`POST`/`DELETE` under `Paths.taskRunClips`); its MP4 and poster live under the run's `clips/` directory and are served,
+with HTTP `Range`, from `Paths.taskRunClip`. The finished run lists them in `Run.evidence`. `evidence.rollingBuffer` is
+reported false today: the box does not retain a rolling window. A box from before this field reports it as absent, and
+clients treat that as no recording support.
+The response is a startup snapshot; restart the box after installing
 desktop tools to refresh it.
 
 Discovery needs a signed-in user, like the other box routes: send the same box token. Without one it answers 401

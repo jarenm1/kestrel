@@ -346,33 +346,40 @@ Evidence is a first-class output of a run, shown in the thread and attached to i
 | Kind | Example | Status |
 |---|---|---|
 | Screenshot | Agent's desktop screenshot in the transcript | Built (#154), kept as a tool-call image |
-| Video clip | An animation, physics glitch or frame-rate drop | Not built |
+| Video clip | An animation, physics glitch or frame-rate drop | Built: explicit recording saves an MP4 beside the run, with a poster when one can be captured |
 | Output file | Rendered frames, a `.blend` or a game build | Downloadable from Files, not marked as a result |
-| Run summary | Before/after shots and clips with captions | Not built |
+| Run summary | Before/after shots and clips with captions | Built: a finished run's summary shows each clip's video and caption, and its poster when one was captured |
 
 ### Capture
 
 Clips reuse the desktop's H.264 stream, recorded on the box outside the sandbox. There are two ways to capture:
 
-- **Explicit recording:** the agent or user starts and stops a recording. Every box supports this.
-- **Rolling buffer:** the box keeps the last few minutes, and the agent or user saves "the last 20 seconds". This catches
-  things nobody expected. It runs only where the `rollingEvidence` capability is set, which is the default with a hardware
-  encoder.
+- **Explicit recording:** built. `evidence_record_start` (or `POST Paths.taskRunClips`) begins recording the run's
+  running desktop and `evidence_record_stop` (or `DELETE` on the same path) saves the clip. The recorder subscribes to
+  the shared encoder like a viewer, so a recording alone keeps it alive even with nobody watching. A restart with the
+  same H.264 configuration re-sends the AVC sequence header and continues the clip. A restart with a different
+  configuration (a Baseline-only viewer attaching or leaving, or a quality change altering size/profile) fails the
+  recording and discards the partial file: the MP4 would carry one avcC, and frames after the change would not decode
+  with the frames before it. The finished clip is
+  `<runDir>/clips/<id>.mp4` with a `<id>.png` poster and a `<id>.json` sidecar; `GET Paths.taskRunClips` lists them,
+  `GET Paths.taskRunClip` serves the bytes (with `Range`), and each finished run carries them as `Run.evidence`.
+- **Rolling buffer:** not built. The box keeps the last few minutes, and the agent or user saves "the last 20 seconds".
+  This catches things nobody expected. It runs only where the `evidence.rollingBuffer` capability is set; today every
+  box reports it false.
 
 The encoder currently stops when nobody is watching. So a recorder has to count as an encoder subscriber, and a rolling
 buffer keeps an encoder running while a run uses the desktop. That costs little while the screen is still, but x264 under
 continuous motion uses real CPU. Measure this before turning it on by default. At 3 Mbps, continuous motion is about
-22 MB per minute. A viewer changing the stream quality also restarts the encoder today, so a recording must survive that
-or use its own fixed-quality encoder.
+22 MB per minute.
 
-Illustrative tools: `evidence_record_start`, `evidence_record_stop`, `evidence_clip` and `evidence_mark` (for an output
-file). Each takes a caption.
+Tools: `evidence_record_start` and `evidence_record_stop`. `evidence_clip` and `evidence_mark` (for an output file)
+remain planned.
 
 ### What evidence can prove
 
 Capture happens on the host side, so an agent cannot alter a clip once it is recorded. The agent still controls what is on
-screen and which moments it saves, so a clip supports its claim without proving it. Source (`agent`, `user` or `auto`) is
-recorded on each item, and the rolling buffer lets a reviewer look beyond what the agent chose.
+screen and which moments it saves, so a clip supports its claim without proving it. A clip does not record who started
+it, and nothing retains more than the moments someone chose to record yet.
 
 ### Storage and sharing
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { useQueries, useQueryClient } from "@tanstack/react-query"
-import type { Message, Run, RunItems, Task } from "@cloudagents/protocol"
+import { useQueries, useQueryClient, type QueryClient } from "@tanstack/react-query"
+import { mergeRunUpdate, type Message, type Run, type RunItems, type Task } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
 import { invalidateRunItems, keys, queries, storeTask, upsert } from "@/api/queries"
 import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol"
@@ -11,6 +11,16 @@ const MAX_LOG_LINES = 2000
 const RECONNECT_MS = 2000
 /** Items arrive far faster than the diff is worth fetching; one invalidation per window bounds that traffic. */
 const DIFF_INVALIDATE_MS = 3000
+
+/**
+ * Applies a live run update to the cached list. The event's run comes from the state store, which never holds saved
+ * evidence (clips live on disk), so the cached clips stay until a new snapshot carries them.
+ */
+export function storeRunUpdate(client: QueryClient, taskId: string, run: Run): void {
+  client.setQueryData(keys.runs(taskId), (list: Run[] | undefined) =>
+    upsert(list, mergeRunUpdate(list?.find((cached) => cached.id === run.id), run)),
+  )
+}
 
 /** What the pull request panel shows of the registry: adding, dropping or toggling a watch changes it. */
 const registrySignature = (task: Task | undefined): string =>
@@ -94,7 +104,7 @@ export function useTaskState(taskId: string) {
             )
             break
           case "run.updated":
-            queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, event.run))
+            storeRunUpdate(queryClient, taskId, event.run)
             // A run starting or ending is when the worktree changes; the diff and files have no events of their own.
             refetchWorktree()
             break

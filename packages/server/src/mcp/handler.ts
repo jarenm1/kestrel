@@ -8,6 +8,7 @@ import { Effect } from "effect"
 import type { BrokerGrant } from "../broker"
 import { type RunContext, describeError } from "./tools/common"
 import { type DesktopToolDeps, registerDesktopTools } from "./tools/desktop"
+import { type EvidenceToolDeps, registerEvidenceTools } from "./tools/evidence"
 import { type AutomationToolDeps, registerAutomationTools } from "./tools/automations"
 import { type GitHubToolDeps, registerGitHubTools } from "./tools/github"
 import { type TaskToolDeps, registerTaskTools } from "./tools/task"
@@ -29,6 +30,7 @@ export interface McpAuthDeps {
 
 export type McpDeps = McpAuthDeps &
   DesktopToolDeps &
+  EvidenceToolDeps &
   WorkspaceToolDeps &
   TaskToolDeps &
   ThreadToolDeps &
@@ -59,6 +61,7 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
     },
   )
   registerDesktopTools(server, ctx, deps)
+  registerEvidenceTools(server, ctx, deps)
   registerWorkspaceTools(server, ctx, deps)
   registerToolkitTools(server, ctx, deps)
   registerTaskTools(server, ctx, deps)

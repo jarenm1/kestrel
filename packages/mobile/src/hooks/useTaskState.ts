@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQueries, useQueryClient } from "@tanstack/react-query";
-import { Paths, type AgentItem, type Message, type Run } from "@cloudagents/protocol";
+import { useQueries, useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
+import { Paths, mergeRunUpdate, type AgentItem, type Message, type Run } from "@cloudagents/protocol";
 import { openTaskEvents } from "@/api/events";
 import { createQueries, boxKeys, invalidateRunItems, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
@@ -9,6 +9,16 @@ import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protoc
 
 const MAX_LOG_LINES = 2000;
 const RECONNECT_MS = 2000;
+
+/**
+ * Applies a live run update to the cached list at `key`. The event's run comes from the state store, which never
+ * holds saved evidence (clips live on disk), so the cached clips stay until a new snapshot carries them.
+ */
+export function storeRunUpdate(client: QueryClient, key: QueryKey, run: Run): void {
+  client.setQueryData(key, (list: Run[] | undefined) =>
+    upsert(list, mergeRunUpdate(list?.find((cached) => cached.id === run.id), run))
+  );
+}
 
 /**
  * Task chat state: REST snapshots in the query cache, kept current by the task events WebSocket.
@@ -73,7 +83,7 @@ export function useTaskState(taskId: string) {
               );
               break;
             case "run.updated":
-              queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, event.run));
+              storeRunUpdate(queryClient, keys.runs(taskId), event.run);
               // A run starting or ending is when the worktree changes; the diff has no events of its own.
               void queryClient.invalidateQueries({ queryKey: keys.diff(taskId) });
               break;

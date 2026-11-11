@@ -1,7 +1,7 @@
 import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import Ajv from "ajv"
-import { copyFile, mkdir, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises"
+import { copyFile, mkdir, open, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
   BadRequest,
@@ -22,6 +22,8 @@ import {
   PreviewSession,
   Paths,
   Run,
+  type RunClip,
+  type RunEvidence,
   type ThreadPullRequest,
   type ThreadPullRequestAction,
   type ThreadPullRequestDetail,
@@ -57,6 +59,7 @@ import { CredentialBroker } from "../broker"
 import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
+import { listRunClips, Recorder, runClipFile, type RecordingError } from "../desktop/recorder"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, commentMismatch, type ApiRequest, type ApiResponse, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
@@ -482,6 +485,36 @@ export interface CoreShape {
     runId: string,
     imageId: string,
   ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
+  /** Starts explicit desktop recording for one of the task's runs; its desktop must be running. */
+  readonly evidenceStart: (
+    user: string,
+    taskId: string,
+    runId: string,
+    caption?: string,
+  ) => Effect.Effect<void, NotFound | Conflict | InternalError>
+  /** Stops the run's recording and returns the clip it saved. A run with no recording is a Conflict. */
+  readonly evidenceStop: (
+    user: string,
+    taskId: string,
+    runId: string,
+  ) => Effect.Effect<RunClip, NotFound | Conflict | InternalError>
+  /** The run's saved desktop clips, oldest first. */
+  readonly runClips: (user: string, taskId: string, runId: string) => Effect.Effect<RunEvidence, NotFound | InternalError>
+  /** A clip's MP4 or poster as an open file; the router streams it and supports Range over it. */
+  readonly runClip: (
+    user: string,
+    taskId: string,
+    runId: string,
+    clipId: string,
+  ) => Effect.Effect<{ readonly handle: FileHandle; readonly size: number; readonly mimeType: string }, NotFound | InternalError>
+  /** Used by the MCP handler (`evidence_record_start`): starts recording the task's running desktop for the run. */
+  readonly evidenceRecordStart: (
+    taskId: string,
+    runId: string,
+    caption?: string,
+  ) => Effect.Effect<void, NotFound | Conflict | InternalError>
+  /** Used by the MCP handler (`evidence_record_stop`): stops the run's recording and returns its clip. */
+  readonly evidenceRecordStop: (taskId: string, runId: string) => Effect.Effect<RunClip, NotFound | Conflict | InternalError>
   /** Stores a file the user uploads for one of the task's messages; it waits there, unsent, until a message names it. */
   readonly upload: (user: string, taskId: string, input: UploadInput) => Effect.Effect<Attachment, NotFound | Conflict | BadRequest | InternalError>
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
@@ -842,6 +875,34 @@ export const CoreLive = Layer.effect(
 
     // Desktop status changes are pushed to every task's event stream.
     yield* desktop.watchStatus((desktopStatus) => hub.publish({ _tag: "desktop.updated", desktop: desktopStatus }))
+    // Explicit recordings subscribe to the same encoder viewers do, so recording alone keeps it alive.
+    const recorder = new Recorder({
+      desktop: {
+        status: (taskId) => desktop.status(taskId),
+        subscribe: (taskId, sink) => desktop.subscribe(taskId, sink),
+        screenshot: (taskId) => desktop.screenshot(taskId),
+      },
+      runsDir: config.runsDir,
+      // A recording belongs to its run: settling, cancelling or deleting it, or stopping its desktop, ends the
+      // recording instead of leaving the encoder subscribed until someone remembers to call evidence_record_stop.
+      watch: (taskId, runId, onEnd) =>
+        Effect.gen(function* () {
+          let ended = false
+          const end = () => {
+            if (ended) return
+            ended = true
+            onEnd()
+          }
+          const unsubscribeRun = hub.subscribe(taskId, (event) => {
+            if (event._tag === "run.updated" && event.run.id === runId && event.run.status !== "running") end()
+            else if (event._tag === "task.deleted" && event.taskId === taskId) end()
+          })
+          const unsubscribeDesktop = yield* desktop.watchStatus((status) => {
+            if (status.taskId === taskId && status.state !== "running") end()
+          })
+          return Effect.zipRight(Effect.sync(unsubscribeRun), unsubscribeDesktop)
+        }),
+    })
 
     const threadDirOf = (taskId: string) => join(config.threadsDir, taskId)
     const shadowPathOf = (taskId: string, checkoutId: string) => join(config.shadowsDir, taskId, `${checkoutId}.git`)
@@ -899,6 +960,17 @@ export const CoreLive = Layer.effect(
 
     const ownsTask = (state: Readonly<StoreState>, user: string, taskId: string): boolean =>
       state.tasks.some((t) => t.id === taskId && t.owner === user)
+
+    /** A run of `taskId`; another thread's run is NotFound, like every other owned route. */
+    const requireRunInTask = (taskId: string, runId: string): Effect.Effect<void, NotFound> =>
+      Effect.flatMap(store.read, (state) =>
+        state.runs.some((r) => r.id === runId && r.taskId === taskId)
+          ? Effect.void
+          : Effect.fail(new NotFound({ message: `run ${runId} not found` })),
+      )
+
+    const fromRecording = (e: RecordingError): Conflict | InternalError =>
+      e._tag === "RecordingConflict" ? new Conflict({ message: e.message }) : new InternalError({ message: e.message })
 
     /** A thread of `user`; anything else is NotFound. */
     const ownedTask = (user: string, taskId: string): Effect.Effect<Task, NotFound> =>
@@ -2541,6 +2613,62 @@ export const CoreLive = Layer.effect(
         return { mimeType: file.mimeType, bytes }
       })
 
+    const evidenceStart: CoreShape["evidenceStart"] = (user, taskId, runId, caption) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        yield* requireRunInTask(taskId, runId)
+        yield* recorder.start(taskId, runId, caption).pipe(Effect.mapError(fromRecording))
+      })
+
+    const evidenceStop: CoreShape["evidenceStop"] = (user, taskId, runId) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        yield* requireRunInTask(taskId, runId)
+        return yield* recorder.stop(taskId, runId).pipe(Effect.mapError(fromRecording))
+      })
+
+    const runClips: CoreShape["runClips"] = (user, taskId, runId) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        yield* requireRunInTask(taskId, runId)
+        return { clips: listRunClips(join(config.runsDir, runId)) }
+      })
+
+    const runClip: CoreShape["runClip"] = (user, taskId, runId, clipId) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        yield* requireRunInTask(taskId, runId)
+        const file = runClipFile(join(config.runsDir, runId), clipId)
+        const missing = () => new NotFound({ message: `run ${runId} has no clip ${clipId}` })
+        if (file === null) return yield* Effect.fail(missing())
+        const handle = yield* Effect.tryPromise({
+          try: () => open(file.path),
+          catch: (e) => ((e as NodeJS.ErrnoException).code === "ENOENT" ? missing() : new InternalError({ message: `read run clip: ${String(e)}` })),
+        })
+        const size = yield* Effect.tryPromise({
+          try: () => handle.stat(),
+          catch: (e) => new InternalError({ message: `read run clip: ${String(e)}` }),
+        }).pipe(
+          Effect.map((stat) => stat.size),
+          Effect.tapError(() => Effect.sync(() => void handle.close())),
+        )
+        return { handle, size, mimeType: file.mimeType }
+      })
+
+    const evidenceRecordStart: CoreShape["evidenceRecordStart"] = (taskId, runId, caption) =>
+      Effect.gen(function* () {
+        yield* requireTask(taskId)
+        yield* requireRunInTask(taskId, runId)
+        yield* recorder.start(taskId, runId, caption).pipe(Effect.mapError(fromRecording))
+      })
+
+    const evidenceRecordStop: CoreShape["evidenceRecordStop"] = (taskId, runId) =>
+      Effect.gen(function* () {
+        yield* requireTask(taskId)
+        yield* requireRunInTask(taskId, runId)
+        return yield* recorder.stop(taskId, runId).pipe(Effect.mapError(fromRecording))
+      })
+
     /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
     const upload: CoreShape["upload"] = (user, taskId, input) =>
       uploadLock.withPermits(1)(Effect.gen(function* () {
@@ -2628,6 +2756,12 @@ export const CoreLive = Layer.effect(
       attachment,
       checkoutIcon,
       runImage,
+      evidenceStart,
+      evidenceStop,
+      runClips,
+      runClip,
+      evidenceRecordStart,
+      evidenceRecordStop,
       upload,
       health: () => Effect.void,
       getTextGenerationSettings: (user) => readTextGenerationSettings(config.dataDir, user),
@@ -2765,7 +2899,13 @@ export const CoreLive = Layer.effect(
         Effect.gen(function* () {
           yield* ownedTask(user, taskId)
           const state = yield* store.read
-          return state.runs.filter((r) => r.taskId === taskId).map((r) => ({ ...r }))
+          return state.runs
+            .filter((r) => r.taskId === taskId)
+            .map((r) => {
+              // Clips live next to the run's other artifacts; state stays untouched so deleting them is enough.
+              const clips = listRunClips(join(config.runsDir, r.id))
+              return clips.length === 0 ? { ...r } : { ...r, evidence: { clips } }
+            })
         }),
 
       usage: (user, now) =>

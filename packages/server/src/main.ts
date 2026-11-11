@@ -173,6 +173,10 @@ const program = Effect.gen(function* () {
       processes: (taskId) => desktop.processes(taskId),
       kill: (taskId, id) => desktop.kill(taskId, id),
     },
+    evidence: {
+      start: (taskId, runId, caption) => core.evidenceRecordStart(taskId, runId, caption),
+      stop: (taskId, runId) => core.evidenceRecordStop(taskId, runId),
+    },
     workspace: {
       checkout: core.checkout,
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),

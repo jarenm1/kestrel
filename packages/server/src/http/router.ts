@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { BOX_API, BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, CliSelectAccountBody, Conflict, CreateTaskBody, ForkTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
-import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings } from "@cloudagents/protocol"
+import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings, MAX_RELAY_RESPONSE_BYTES } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
@@ -233,6 +233,119 @@ const serveDownload = (core: CoreShape, taskId: string, headOnly: boolean) =>
       }),
     )
   }).pipe(Effect.catchAll((e) => Effect.succeed(errorResponse(e))))
+
+/** `Range: bytes=start-end` over a clip; null means the whole file, "invalid" is answered 416. */
+interface ByteRange {
+  readonly start: number
+  readonly end: number
+}
+
+const parseByteRange = (header: string | undefined, size: number): ByteRange | "invalid" | null => {
+  if (header === undefined) return null
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (match === null) return "invalid"
+  const [, rawStart = "", rawEnd = ""] = match
+  if (rawStart === "" && rawEnd === "") return "invalid"
+  let start: number
+  let end: number
+  if (rawStart === "") {
+    // A suffix range: the last N bytes.
+    const suffix = Number(rawEnd)
+    if (!Number.isSafeInteger(suffix) || suffix <= 0 || size === 0) return "invalid"
+    start = Math.max(0, size - suffix)
+    end = size - 1
+  } else {
+    start = Number(rawStart)
+    end = rawEnd === "" ? size - 1 : Number(rawEnd)
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) return "invalid"
+    end = Math.min(end, size - 1)
+  }
+  return { start, end }
+}
+
+/**
+ * Streams a clip's MP4 or poster. The file name is immutable, so browsers may cache it for good. Video needs Range to
+ * seek; the body is a byte range (206) when asked for, otherwise the whole file (200).
+ */
+const serveClip = (core: CoreShape, taskId: string, runId: string, clipId: string) =>
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const { handle, size, mimeType } = yield* signedIn((user) => core.runClip(user, taskId, runId, clipId))
+    const range = parseByteRange(request.headers["range"], size)
+    const headers: Record<string, string> = {
+      "content-type": mimeType,
+      "accept-ranges": "bytes",
+      "cache-control": "private, max-age=31536000, immutable",
+      "content-security-policy": "sandbox",
+      "x-content-type-options": "nosniff",
+    }
+    if (range === "invalid") {
+      yield* Effect.promise(() => handle.close())
+      return HttpServerResponse.fromWeb(
+        new Response(null, { status: 416, headers: { ...headers, "content-range": `bytes */${size}` } }),
+      )
+    }
+    const start = range === null ? 0 : range.start
+    const requestedEnd = range === null ? size - 1 : range.end
+    // The relay refuses a response declaring more than MAX_RELAY_RESPONSE_BYTES, so one response carries at most
+    // that window; a player asks for the rest with the next Range. A no-Range GET over the cap becomes a short 206.
+    const end = Math.min(requestedEnd, start + MAX_RELAY_RESPONSE_BYTES - 1)
+    const length = size === 0 ? 0 : end - start + 1
+    const partial = range !== null || end < size - 1
+    let body: BodyInit | null = null
+    if (length === 0) {
+      yield* Effect.promise(() => handle.close())
+    } else {
+      body = Readable.toWeb(handle.createReadStream({ start, end })) as unknown as BodyInit
+    }
+    return HttpServerResponse.fromWeb(
+      new Response(body, {
+        status: partial ? 206 : 200,
+        headers: {
+          ...headers,
+          "content-length": String(length),
+          ...(partial ? { "content-range": `bytes ${start}-${end}/${size}` } : {}),
+        },
+      }),
+    )
+  }).pipe(Effect.catchAll((e) => Effect.succeed(errorResponse(e))))
+
+const StartRecordingBody = Schema.Struct({ caption: Schema.optional(Schema.String) })
+
+/** A run's saved clips: list them, start a recording, stop it, or read one clip's bytes. Owner only. */
+const clipRoutes = (core: CoreShape) =>
+  HttpRouter.empty.pipe(
+    HttpRouter.get(
+      "/api/tasks/:id/runs/:runId/clips",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        respond(signedIn((user) => core.runClips(user, p.id ?? "", p.runId ?? ""))),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/tasks/:id/runs/:runId/clips",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        noContent(
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(StartRecordingBody), (body) =>
+              core.evidenceStart(user, p.id ?? "", p.runId ?? "", body.caption),
+            ),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.del(
+      "/api/tasks/:id/runs/:runId/clips",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        respond(signedIn((user) => core.evidenceStop(user, p.id ?? "", p.runId ?? ""))),
+      ),
+    ),
+    HttpRouter.get(
+      "/api/tasks/:id/runs/:runId/clips/:clipId",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        serveClip(core, p.id ?? "", p.runId ?? "", p.clipId ?? ""),
+      ),
+    ),
+  )
 
 /** GET downloads a thread file; HEAD answers the same headers without the body. */
 const downloadRoutes = (core: CoreShape) =>
@@ -515,6 +628,7 @@ export const makeRouter = (
       }),
     ),
     HttpRouter.concat(downloadRoutes(core)),
+    HttpRouter.concat(clipRoutes(core)),
     // The pull request view of a thread: its list, one pull request, its diff, and the changes the view asks of it.
     HttpRouter.get(
       "/api/tasks/:id/pull-requests",

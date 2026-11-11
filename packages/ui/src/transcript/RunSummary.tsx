@@ -1,8 +1,10 @@
 import { useState } from "react"
-import type { AgentItem, Run } from "@cloudagents/protocol"
+import type { AgentItem, Run, RunClip } from "@cloudagents/protocol"
+import { Paths } from "@cloudagents/protocol"
 import { cn } from "../cn"
 import { Collapse } from "./Collapse"
 import { formatMessageTime } from "./time"
+import { useTranscriptHost } from "./host"
 import { Chevron, DETAILS_CLASS, ROW_CLASS } from "./WorkLog"
 
 const TOKENS = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
@@ -66,6 +68,46 @@ function tokenTotals(items: readonly AgentItem[]): Totals {
   }
 }
 
+/** One saved clip: its poster while paused, playback after, and the caption the recorder was given. */
+function EvidenceClip({ run, clip }: { run: Run; clip: RunClip }) {
+  const host = useTranscriptHost()
+  const media = host.useFileLink(run.taskId, Paths.taskRunClip(run.taskId, run.id, clip.id))
+  // Called unconditionally: a clip with no poster still resolves the MP4 path, which is simply unused.
+  const poster = host.useFileLink(run.taskId, Paths.taskRunClip(run.taskId, run.id, clip.poster ?? clip.id))
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const url = media.url
+  const failed = url !== undefined && failedUrl === url
+  return (
+    <figure className="max-w-md">
+      {url === undefined ? (
+        // The host is still minting the URL: a skeleton, not a failure.
+        <div aria-label="Loading clip" className="h-40 w-full animate-pulse rounded-lg border border-border bg-muted" />
+      ) : failed ? (
+        <div className="flex h-40 w-full items-center justify-center rounded-lg border border-border bg-muted text-sm text-muted-foreground">
+          Video unavailable
+        </div>
+      ) : (
+        <video
+          controls
+          preload="metadata"
+          src={url}
+          poster={clip.poster === null ? undefined : poster.url}
+          onError={() => {
+            setFailedUrl(url)
+            media.onError()
+          }}
+          className="w-full rounded-lg border border-border bg-black"
+        />
+      )}
+      <figcaption className="mt-1.5 text-sm text-muted-foreground">
+        {clip.caption}
+        <span aria-hidden="true"> · </span>
+        <span>{duration(clip.durationMs)}</span>
+      </figcaption>
+    </figure>
+  )
+}
+
 /** The run's wall-clock work time; NaN when it has no trustworthy end (still going, unparseable, or a restart). */
 function workedMs(run: Run): number {
   const elapsed = run.endedAt === null ? NaN : Date.parse(run.endedAt) - Date.parse(run.startedAt)
@@ -93,10 +135,17 @@ export function RunUsage({ run, items }: { run: Run; items: readonly AgentItem[]
 export function RunSummary({ run, items }: { run: Run; items: readonly AgentItem[] }) {
   const [open, setOpen] = useState(false)
   if (run.status === "running") return null
+  const clips = run.evidence?.clips ?? []
   const elapsed = workedMs(run)
   const label = run.interruptedByRestart ? "Interrupted by restart" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Worked"
   return (
-    <div className="tabular-nums">
+    <div className="flex flex-col gap-2 tabular-nums">
+      {clips.length > 0 && (
+        <div className="flex flex-col gap-3">
+          <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Saved evidence</h4>
+          {clips.map((clip) => <EvidenceClip key={clip.id} run={run} clip={clip} />)}
+        </div>
+      )}
       <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className={cn(ROW_CLASS, "w-fit")}>
         <span>
           {label}{Number.isNaN(elapsed) ? "" : ` for ${duration(elapsed)}`}
