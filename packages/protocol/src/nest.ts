@@ -66,6 +66,8 @@ export type NestGpuPolicy = typeof NestGpuPolicy.Type
 const PositiveInt = Schema.Number.pipe(Schema.int(), Schema.positive())
 const NonNegativeInt = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
 const Bytes = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
+const Money = Schema.Number.pipe(Schema.finite(), Schema.nonNegative())
+const Currency = Schema.String.pipe(Schema.trimmed(), Schema.minLength(1), Schema.maxLength(8))
 const Id = Schema.String.pipe(Schema.trimmed(), Schema.minLength(1), Schema.maxLength(200))
 /** Milliseconds since the Unix epoch. */
 const EpochMs = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
@@ -82,6 +84,41 @@ export const NestLimits = Schema.Struct({
   volumeBytes: Schema.Number.pipe(Schema.int(), Schema.between(NEST_MIN_VOLUME_BYTES, NEST_MAX_VOLUME_BYTES)),
 })
 export type NestLimits = typeof NestLimits.Type
+
+/**
+ * A hypothetical price list for a box shape, supplied by the operator. Nothing here is a bill. The defaults are the
+ * proposed shadow-billing rates in the production design; an operator can replace them with `KESTREL_NEST_RATES`.
+ */
+export const NestRates = Schema.Struct({
+  /** A currency label, such as `USD`. */
+  currency: Currency,
+  /** Per vCPU-hour while the VM runs at its vCPU limit. */
+  vcpuHour: Money,
+  /** Per GiB-hour of memory held while the VM runs at its memory limit. */
+  memoryGiBHour: Money,
+  /** Per hour a GPU is attached. */
+  gpuHour: Money,
+  /** Per GiB-month of volume while the box is running or suspended. */
+  diskGiBMonth: Money,
+  /** Per GiB-month of volume while the box is parked. */
+  parkedDiskGiBMonth: Money,
+})
+export type NestRates = typeof NestRates.Type
+
+/**
+ * A forecast from a box's limits and the operator's rates. It is not a bill: a box that idles below its limits costs
+ * less. `monthlyRunning` assumes the limits for a whole 730-hour month; `monthlyParked` is the volume alone.
+ */
+export const NestCostEstimate = Schema.Struct({
+  currency: Currency,
+  /** CPU, memory and an attached GPU at the shape's limits, per hour. */
+  hourlyRunning: Money,
+  /** `hourlyRunning` for 730 hours plus a month of volume at the running disk rate. */
+  monthlyRunning: Money,
+  /** The volume for a month while the box is parked. */
+  monthlyParked: Money,
+})
+export type NestCostEstimate = typeof NestCostEstimate.Type
 
 /** Where a parked volume's latest backup lives in object storage: an opaque manifest reference the host returned. */
 export const NestVolumeRef = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(1024))
@@ -304,12 +341,30 @@ export const NestBoxStatus = Schema.Struct({
   vcpus: NonNegativeInt,
   memoryBytes: Bytes,
   gpus: NonNegativeInt,
+  /** Absent when the operator has not configured a rate card. */
+  estimate: Schema.optional(NestCostEstimate),
 })
 export type NestBoxStatus = typeof NestBoxStatus.Type
 
 /** `POST ControlPaths.nestBoxes`: create a Nest box for the signed-in user. Limits default to the standard shape. */
 export const CreateNestBoxBody = Schema.Struct({ name: NestName, limits: Schema.optional(NestLimits) })
 export type CreateNestBoxBody = typeof CreateNestBoxBody.Type
+
+/**
+ * `POST ControlPaths.nestBoxPreview`: a dry run of `CreateNestBoxBody`. It reports whether a create would succeed now
+ * and what the box would cost, without creating anything or reserving a host.
+ */
+export const NestBoxPreview = Schema.Struct({
+  name: NestName,
+  limits: NestLimits,
+  /** True when a create with these limits would succeed right now. */
+  available: Schema.Boolean,
+  /** Why it would not, when `available` is false. */
+  reason: Schema.NullOr(Schema.String),
+  /** Absent when the operator has not configured a rate card. */
+  estimate: Schema.optional(NestCostEstimate),
+})
+export type NestBoxPreview = typeof NestBoxPreview.Type
 
 /** A Nest host as operators see it (Settings › Fleet). */
 export const NestHostStatus = Schema.Struct({

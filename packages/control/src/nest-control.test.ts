@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test"
 import type { NestHostCapacity, NestVmReport } from "@cloudagents/protocol"
 import {
+  DEFAULT_NEST_RATES,
   decideVm,
   enrollTokenHash,
+  estimateNestCost,
   nestLimitsError,
   nestStatusOf,
   newSecret,
+  parseNestRates,
   placeHost,
   publicUrlFor,
+  withNestEstimate,
   type PlacementCandidate,
 } from "./nest-control"
 import type { NestBoxRow } from "./nest-table"
@@ -161,6 +165,69 @@ describe("nestLimitsError", () => {
 describe("publicUrlFor", () => {
   test("is the box id under the host's slug under the Nest domain", () => {
     expect(publicUrlFor("box-1", "host-a", "nest.example.com")).toBe("https://box-1.host-a.nest.example.com")
+  })
+})
+
+describe("estimateNestCost", () => {
+  const limits = { maxVcpus: 4, maxMemoryBytes: 8 * GiB, gpu: "none" as const, volumeBytes: 64 * GiB }
+
+  test("prices the standard shape at its limits", () => {
+    const estimate = estimateNestCost(limits, DEFAULT_NEST_RATES)
+    expect(estimate.currency).toBe("USD")
+    expect(estimate.hourlyRunning).toBeCloseTo(0.328, 6)
+    expect(estimate.monthlyRunning).toBeCloseTo(245.84, 6)
+    expect(estimate.monthlyParked).toBeCloseTo(2.56, 6)
+  })
+
+  test("adds the GPU rate only for a shape that allows one", () => {
+    expect(estimateNestCost({ ...limits, gpu: "on-demand" }, DEFAULT_NEST_RATES).hourlyRunning).toBeCloseTo(1.528, 6)
+    expect(estimateNestCost({ ...limits, gpu: "none" }, DEFAULT_NEST_RATES).hourlyRunning).toBeCloseTo(0.328, 6)
+  })
+
+  test("scales with CPU, memory and volume", () => {
+    const small = estimateNestCost(
+      { maxVcpus: 1, maxMemoryBytes: GiB, gpu: "none", volumeBytes: 8 * GiB },
+      DEFAULT_NEST_RATES,
+    )
+    expect(small.hourlyRunning).toBeCloseTo(0.066, 6)
+    expect(small.monthlyParked).toBeCloseTo(0.32, 6)
+  })
+})
+
+describe("parseNestRates", () => {
+  test("uses the defaults when unset or empty", () => {
+    expect(parseNestRates(undefined)).toEqual(DEFAULT_NEST_RATES)
+    expect(parseNestRates("   ")).toEqual(DEFAULT_NEST_RATES)
+  })
+
+  test("reads an operator's card", () => {
+    const card = {
+      currency: "EUR",
+      vcpuHour: 1,
+      memoryGiBHour: 2,
+      gpuHour: 3,
+      diskGiBMonth: 4,
+      parkedDiskGiBMonth: 5,
+    }
+    expect(parseNestRates(JSON.stringify(card))).toEqual(card)
+  })
+
+  test("turns a malformed or negative card into no card, rather than failing", () => {
+    expect(parseNestRates("{")).toBeNull()
+    expect(parseNestRates(JSON.stringify({ ...DEFAULT_NEST_RATES, vcpuHour: -1 }))).toBeNull()
+    expect(parseNestRates(JSON.stringify({ ...DEFAULT_NEST_RATES, extra: 1 }))).toBeNull()
+  })
+})
+
+describe("withNestEstimate", () => {
+  test("leaves a status alone when the operator has no rate card", () => {
+    const status = nestStatusOf(row())
+    expect(withNestEstimate(status, null)).toBe(status)
+  })
+
+  test("adds the shape's estimate when rates exist", () => {
+    const status = withNestEstimate(nestStatusOf(row()), DEFAULT_NEST_RATES)
+    expect(status.estimate?.monthlyRunning).toBeCloseTo(245.84, 6)
   })
 })
 

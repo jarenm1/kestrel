@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ControlPaths, CreateBoxBody, MAX_USER_BOXES, type BoxList, type CreatedBox, type NestBoxStatus, type UserBox } from "@cloudagents/protocol"
+import { ControlPaths, CreateBoxBody, MAX_USER_BOXES, type BoxList, type CreatedBox, type NestBoxStatus, type NestCostEstimate, type UserBox } from "@cloudagents/protocol"
 import { Either, Schema } from "effect"
 import { Link } from "react-router-dom"
 import { api, type BoxHealth } from "@/api/client"
@@ -70,6 +70,18 @@ export const BOX_FORM_ERROR =
 
 /** How often a Nest box is read again while it starts or runs a command. */
 const NEST_POLL_MS = 2_000
+
+/** A hypothetical price in cents. Rates are the operator's and nothing here is a bill, so cents are precise enough. */
+const formatMoney = (value: number, currency: string): string => `${currency} ${value.toFixed(2)}`
+
+/** A shape's estimate in one line: running per hour, running per month, and parked per month. */
+function formatNestEstimate(estimate: NestCostEstimate): string {
+  return [
+    `${formatMoney(estimate.hourlyRunning, estimate.currency)}/hour`,
+    `${formatMoney(estimate.monthlyRunning, estimate.currency)}/month running`,
+    `${formatMoney(estimate.monthlyParked, estimate.currency)}/month parked`,
+  ].join(" · ")
+}
 
 /** What a Nest box is doing while a command runs; shown beside its state. */
 const NEST_PENDING_LABEL: Record<NonNullable<NestBoxStatus["pending"]>, string> = {
@@ -377,6 +389,11 @@ function NestBoxRow({
           <span className="text-xs text-muted-foreground">
             {nest.vcpus} vCPU · {formatSize(nest.memoryBytes)} RAM · {gpu} · {formatSize(nest.limits.volumeBytes)} disk
           </span>
+          {nest.estimate && (
+            <span className="text-xs text-muted-foreground">
+              Up to {formatNestEstimate(nest.estimate)} at this shape&apos;s limits
+            </span>
+          )}
         </div>
         {!active && !nest.failed && (
           <Button variant="soft" size="sm" disabled={busy || action.isPending} onClick={() => onUse(box.id)}>
@@ -439,29 +456,55 @@ function NestCreateForm() {
     mutationFn: () => api.createNestBox({ name: name.trim() }),
     onSuccess: async (next) => {
       setName("")
+      preview.reset()
       await applyBoxList(queryClient, next)
     },
   })
+  const preview = useMutation({
+    mutationFn: () => api.previewNestBox({ name: name.trim() }),
+  })
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault()
-        create.mutate()
-      }}
-      className="flex flex-wrap gap-2"
-    >
-      <Input
-        aria-label="Nest box name"
-        placeholder="Nest box name"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        className="sm:w-48"
-      />
-      <Button type="submit" size="sm" disabled={create.isPending || name.trim() === ""}>
-        Create Nest box
-      </Button>
+    <div className="flex flex-col gap-2">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          create.mutate()
+        }}
+        className="flex flex-wrap gap-2"
+      >
+        <Input
+          aria-label="Nest box name"
+          placeholder="Nest box name"
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value)
+            preview.reset()
+          }}
+          className="sm:w-48"
+        />
+        <Button type="submit" size="sm" disabled={create.isPending || name.trim() === ""}>
+          Create Nest box
+        </Button>
+        <Button
+          type="button"
+          variant="soft"
+          size="sm"
+          disabled={preview.isPending || name.trim() === ""}
+          onClick={() => preview.mutate()}
+        >
+          Dry run
+        </Button>
+      </form>
+      {preview.data && (
+        <span className="text-xs text-muted-foreground">
+          {preview.data.available
+            ? `Ready to create${preview.data.estimate ? `; up to ${formatNestEstimate(preview.data.estimate)} at this shape's limits` : ""}.`
+            : `Cannot create a box now: ${preview.data.reason}`}
+        </span>
+      )}
+      {preview.error && <Alert>{errorText(preview.error)}</Alert>}
       {create.error && <Alert>{errorText(create.error)}</Alert>}
-    </form>
+    </div>
   )
 }
 
