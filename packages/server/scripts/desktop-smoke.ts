@@ -1,11 +1,12 @@
 // Run with the desktop dependencies on PATH: bun packages/server/scripts/desktop-smoke.ts
 // Starts a real isolated display, without connecting to a box, control plane or agent harness.
 import assert from "node:assert/strict"
+import { tmpdir } from "node:os"
 import { Effect } from "effect"
 import { DesktopError, DesktopManager, DesktopManagerLive } from "../src/desktop"
 import { desktopNamespace, sandboxSettingsOf, stopTaskHolder } from "../src/sandbox"
 
-const holderSettings = sandboxSettingsOf({ sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null, sandboxPort: 0 })
+const holderSettings = sandboxSettingsOf({ dataDir: tmpdir(), sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null, sandboxPort: 0 })
 
 const probe = Effect.gen(function* () {
   const desktop = yield* DesktopManager

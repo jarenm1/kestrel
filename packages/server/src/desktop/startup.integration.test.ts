@@ -8,7 +8,7 @@ import { DesktopError, DesktopManager, DesktopManagerLive, type DesktopSink } fr
 import { desktopNamespace, sandboxSettingsOf, stopTaskHolder } from "../sandbox"
 
 /** The sandbox settings of the task namespace holder (level off: a bwrap holder). */
-const holderSettings = sandboxSettingsOf({ sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null, sandboxPort: 0 })
+const holderSettings = sandboxSettingsOf({ dataDir: tmpdir(), sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null, sandboxPort: 0 })
 
 // Opt in on a Linux machine with the desktop tools installed and a writable /tmp/.X11-unix.
 test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("an initialized hardware attempt survives the startup deadline", async () => {

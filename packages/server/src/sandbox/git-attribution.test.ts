@@ -33,7 +33,7 @@ test("task commits use their owner, not a stale home identity or another task's 
       const config = join(home, ".gitconfig")
       writeFileSync(config, "[user]\n\tname = Unrelated Person\n\temail = unrelated@example.com\n")
       const launch = await Effect.runPromise(prepareLaunch({
-        settings: { level: "off", binPath: null, sslCertFile: null, systemd: null, boxPort: 19001 },
+        settings: { level: "off", binPath: null, sslCertFile: null, systemd: null, boxPort: 19001, identityDir: join(root, "sandbox-etc") },
         taskId: owner,
         gitIdentity: await Effect.runPromise(github.commitIdentity(owner)),
         kind: "run",

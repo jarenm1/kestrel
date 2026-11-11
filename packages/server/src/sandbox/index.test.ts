@@ -1,10 +1,19 @@
 import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { hostname, tmpdir, userInfo } from "node:os"
 import { dirname, join } from "node:path"
+import { Effect } from "effect"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
-import { SANDBOX_HOME, buildBwrapArgv, cliBwrapArgs } from "."
+import {
+  SANDBOX_HOME,
+  SANDBOX_HOSTNAME,
+  SANDBOX_USER,
+  buildBwrapArgv,
+  cliBwrapArgs,
+  ensureIdentityFiles,
+  identityFileContents,
+} from "."
 
 const base = { workspacePath: "/w", cwd: "/w", mirrorDir: "/m", homeDir: "/h", env: {}, command: "true" }
 
@@ -109,6 +118,54 @@ describe("buildBwrapArgv", () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  // `basic` binds the host's whole /etc, so this also checks the identity files land over it.
+  test.skipIf(Bun.which("bwrap") === null)("the sandbox names the box user agent and shows none of the host's accounts or hostname", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kestrel-identity-"))
+    try {
+      const homeDir = join(root, "home")
+      const workspacePath = join(root, "workspace")
+      const mirrorDir = join(root, "mirror")
+      for (const dir of [homeDir, workspacePath, mirrorDir]) mkdirSync(dir, { recursive: true })
+      const identity = await Effect.runPromise(ensureIdentityFiles(join(root, "sandbox-etc")))
+      const argv = buildBwrapArgv({
+        level: "basic",
+        workspacePath,
+        cwd: workspacePath,
+        mirrorDir,
+        homeDir,
+        identity,
+        env: {},
+        // Builtins only: the sandbox env is empty, so hosts without coreutils in the default PATH still run this.
+        command: "while read -r line; do echo \"$line\"; done < /etc/passwd; read -r h < /proc/sys/kernel/hostname; echo \"HOST=$h\"",
+      })
+      const result = spawnSync(argv[0] as string, argv.slice(1), { encoding: "utf8" })
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain(`${SANDBOX_USER}:x:${process.getuid?.()}:${process.getgid?.()}::${SANDBOX_HOME}:/bin/bash`)
+      expect(result.stdout).toContain(`HOST=${SANDBOX_HOSTNAME}`)
+      expect(result.stdout).not.toContain(`HOST=${hostname()}\n`)
+      const hostUser = userInfo().username
+      if (hostUser !== SANDBOX_USER) expect(result.stdout).not.toContain(`${hostUser}:`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("identityFileContents", () => {
+  test("lists root, the box user and nobody, with their groups", () => {
+    const { passwd, group } = identityFileContents(1000, 100)
+    expect(passwd).toBe(
+      "root:x:0:0::/root:/bin/sh\nagent:x:1000:100::/home/agent:/bin/bash\nnobody:x:65534:65534::/var/empty:/bin/sh\n",
+    )
+    expect(group).toBe("root:x:0:\nagent:x:100:\nnogroup:x:65534:\n")
+  })
+
+  test("the box user's entry replaces one whose id it shares", () => {
+    const { passwd, group } = identityFileContents(65534, 65534)
+    expect(passwd).toBe("root:x:0:0::/root:/bin/sh\nagent:x:65534:65534::/home/agent:/bin/bash\n")
+    expect(group).toBe("root:x:0:\nagent:x:65534:\n")
   })
 })
 
