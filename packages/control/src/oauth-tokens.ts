@@ -3,12 +3,28 @@ import { UpstreamError } from "./http"
 import type { OAuthProvider } from "./providers"
 
 /**
- * An expiring access token is refreshed this long before it expires. GitHub App user tokens live eight hours; the
- * margin keeps a token read by a box or a background job from expiring mid-use.
+ * An expiring access token is refreshed this long before it expires: room for alarm latency and a few retries. Kept
+ * short on purpose: GitHub revokes the previous access token the moment its refresh token is spent, so a box holding
+ * that copy loses it early by exactly this much, until its next request fetches the new one.
  */
-export const REFRESH_MARGIN_MS = 30 * 60 * 1000
-/** A refresh that failed for any reason but a refused refresh token runs again after this long. */
+export const REFRESH_MARGIN_MS = 5 * 60 * 1000
+/** A refresh that failed for any reason but a refused refresh token runs again after this long, doubling per failure. */
 export const REFRESH_RETRY_MS = 60 * 1000
+/** The retry delay stops doubling here, so a permanent error (a wrong client secret) costs one call per row this often. */
+export const REFRESH_RETRY_MAX_MS = 15 * 60 * 1000
+/** The token endpoint is called from the Hub alarm; a request that hangs must not hold up the alarm's other work. */
+const TOKEN_REQUEST_TIMEOUT_MS = 10_000
+
+/** The delay before retrying a refresh that has failed `failures` times in a row (0 for the first failure). */
+export const refreshRetryMs = (failures: number): number =>
+  Math.min(REFRESH_RETRY_MS * 2 ** failures, REFRESH_RETRY_MAX_MS)
+
+/**
+ * When to refresh a token. Never earlier than one retry delay from `now`: a token living less than the margin would
+ * otherwise be due on arrival and refresh in a loop.
+ */
+export const refreshDueAt = (refresh: OAuthRefresh, now: number): number =>
+  Math.max(now + REFRESH_RETRY_MS, refresh.accessExpiresAt - REFRESH_MARGIN_MS)
 
 export interface OAuthClient {
   readonly clientId: string
@@ -55,6 +71,7 @@ const requestGrant = async (
       "user-agent": "kestrel-control-plane",
     },
     body: new URLSearchParams({ client_id: client.clientId, client_secret: client.clientSecret, ...params }),
+    signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
   })
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
   if (typeof body.access_token !== "string" || body.access_token.length === 0) {
