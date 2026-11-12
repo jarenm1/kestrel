@@ -407,13 +407,17 @@ export class Hub extends DurableObject<Env> {
       )`)
       // Expiring OAuth tokens (GitHub App user tokens) carry how they are renewed; the alarm refreshes each at
       // `refresh_at`, backing off by `refresh_failures`. Rows without a refresh secret never expire or can no longer
-      // be renewed.
-      const connectionColumns = sql.exec<{ name: string }>("PRAGMA table_info(connections)").toArray()
-      if (!connectionColumns.some((c) => c.name === "refresh_secret")) {
-        sql.exec("ALTER TABLE connections ADD COLUMN refresh_secret TEXT")
-        sql.exec("ALTER TABLE connections ADD COLUMN refresh_at INTEGER")
-        sql.exec("ALTER TABLE connections ADD COLUMN refresh_expires_at INTEGER")
-        sql.exec("ALTER TABLE connections ADD COLUMN refresh_failures INTEGER NOT NULL DEFAULT 0")
+      // be renewed. Each column is checked on its own, so a table that has some of them gains the rest.
+      const connectionColumns = new Set(
+        sql.exec<{ name: string }>("PRAGMA table_info(connections)").toArray().map((c) => c.name),
+      )
+      for (const [name, type] of [
+        ["refresh_secret", "TEXT"],
+        ["refresh_at", "INTEGER"],
+        ["refresh_expires_at", "INTEGER"],
+        ["refresh_failures", "INTEGER NOT NULL DEFAULT 0"],
+      ] as const) {
+        if (!connectionColumns.has(name)) sql.exec(`ALTER TABLE connections ADD COLUMN ${name} ${type}`)
       }
       sql.exec(`CREATE TABLE IF NOT EXISTS user_boxes (
         id TEXT PRIMARY KEY,

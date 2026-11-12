@@ -188,16 +188,28 @@ describe("expiring GitHub tokens", () => {
     expect(alarms.at(-1)).toBe(START + REFRESH_RETRY_MS)
   })
 
-  test("an existing connections table gains the refresh columns and keeps its tokens", () => {
+  test.each([
+    ["none of the refresh columns", ""],
+    // What this branch's first revision added, before `refresh_failures`.
+    ["some of them", ", refresh_secret TEXT, refresh_at INTEGER, refresh_expires_at INTEGER"],
+  ])("an existing connections table with %s gains the rest and keeps its tokens", async (_, columns) => {
+    setSystemTime(new Date(START))
     const db = new Database(":memory:")
     db.run(`CREATE TABLE connections (
-      login TEXT NOT NULL, provider TEXT NOT NULL, secret TEXT NOT NULL, account TEXT, updated_at INTEGER NOT NULL,
+      login TEXT NOT NULL, provider TEXT NOT NULL, secret TEXT NOT NULL, account TEXT, updated_at INTEGER NOT NULL${columns},
       PRIMARY KEY (login, provider)
     )`)
-    db.run("INSERT INTO connections VALUES ('octocat', 'github', 'gho_old', 'octocat', 1)")
+    db.run("INSERT INTO connections (login, provider, secret, account, updated_at) VALUES ('octocat', 'github', 'gho_old', 'octocat', 1)")
     const { hub } = newHub(db)
     expect(hub.credentials("octocat").github).toBe("gho_old")
     expect(refreshColumns(db)).toEqual({ secret: null, at: null })
+
+    // Every statement naming the new columns works: a reconnect stores a refresh, and the alarm refreshes it.
+    await connect(hub, "ghu_first", "ghr_first")
+    tokenEndpoint(() => granted("ghu_2", "ghr_2"))
+    setSystemTime(new Date(START + EIGHT_HOURS))
+    await hub.alarm()
+    expect(hub.credentials("octocat").github).toBe("ghu_2")
   })
 
   test("a reconnect while a refresh is in flight is kept", async () => {
