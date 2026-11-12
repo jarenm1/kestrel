@@ -133,7 +133,10 @@ import { ensureNestTables } from "./nest-table"
 import { NEST_STANDARD_LIMITS, newSecret, nestLimitsError, publicUrlFor } from "./nest-control"
 import { bumpTurnGeneration, ensureTurnGenerationsTable, turnGeneration } from "./turn-generations"
 import { findProvider } from "./providers"
-import { REFRESH_MARGIN_MS, REFRESH_RETRY_MS, RefreshRefused, oauthClient, refreshGrant, type OAuthRefresh } from "./oauth-tokens"
+import { RefreshRefused, oauthClient, refreshDueAt, refreshGrant, refreshRetryMs, type OAuthRefresh } from "./oauth-tokens"
+
+/** Token refreshes in flight at once during one alarm; sign-ins cluster, so many can fall due together. */
+const REFRESH_CONCURRENCY = 8
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -403,12 +406,14 @@ export class Hub extends DurableObject<Env> {
         PRIMARY KEY (login, provider)
       )`)
       // Expiring OAuth tokens (GitHub App user tokens) carry how they are renewed; the alarm refreshes each at
-      // `refresh_at`. Rows without a refresh secret never expire or can no longer be renewed.
+      // `refresh_at`, backing off by `refresh_failures`. Rows without a refresh secret never expire or can no longer
+      // be renewed.
       const connectionColumns = sql.exec<{ name: string }>("PRAGMA table_info(connections)").toArray()
       if (!connectionColumns.some((c) => c.name === "refresh_secret")) {
         sql.exec("ALTER TABLE connections ADD COLUMN refresh_secret TEXT")
         sql.exec("ALTER TABLE connections ADD COLUMN refresh_at INTEGER")
         sql.exec("ALTER TABLE connections ADD COLUMN refresh_expires_at INTEGER")
+        sql.exec("ALTER TABLE connections ADD COLUMN refresh_failures INTEGER NOT NULL DEFAULT 0")
       }
       sql.exec(`CREATE TABLE IF NOT EXISTS user_boxes (
         id TEXT PRIMARY KEY,
@@ -624,20 +629,22 @@ export class Hub extends DurableObject<Env> {
     account: string | null,
     refresh: OAuthRefresh | null = null,
   ): Promise<void> {
+    const now = Date.now()
     this.ctx.storage.sql.exec(
-      `INSERT INTO connections (login, provider, secret, account, updated_at, refresh_secret, refresh_at, refresh_expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO connections
+         (login, provider, secret, account, updated_at, refresh_secret, refresh_at, refresh_expires_at, refresh_failures)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
        ON CONFLICT(login, provider) DO UPDATE SET
          secret = excluded.secret, account = excluded.account, updated_at = excluded.updated_at,
          refresh_secret = excluded.refresh_secret, refresh_at = excluded.refresh_at,
-         refresh_expires_at = excluded.refresh_expires_at`,
+         refresh_expires_at = excluded.refresh_expires_at, refresh_failures = 0`,
       login,
       provider,
       secret,
       account,
-      Date.now(),
+      now,
       refresh?.token ?? null,
-      refresh === null ? null : refresh.accessExpiresAt - REFRESH_MARGIN_MS,
+      refresh === null ? null : refreshDueAt(refresh, now),
       refresh?.expiresAt ?? null,
     )
     await this.rearm()
@@ -645,58 +652,80 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * Renews every expiring OAuth token whose refresh is due, so readers of `connectionSecrets` always get a live one.
-   * Each row is claimed first by pushing `refresh_at` out by the retry delay: a concurrent alarm skips it, and a
-   * failure worth retrying needs no further write. Every write after the provider call matches the refresh secret it
-   * spent, so a reconnect that landed meanwhile is never overwritten.
+   * Every due row is claimed first, synchronously, by pushing `refresh_at` out by its backoff and counting the attempt:
+   * a concurrent alarm skips it, and a failure worth retrying needs no further write. The provider calls then run a
+   * few at a time. Every write after a provider call matches the refresh secret it spent, so a reconnect that landed
+   * meanwhile is never overwritten.
    */
   private async refreshConnections(now: number): Promise<void> {
     const sql = this.ctx.storage.sql
+    const match = "WHERE login = ? AND provider = ? AND refresh_secret = ?"
     const due = sql
-      .exec<{ login: string; provider: string; refreshSecret: string; refreshExpiresAt: number }>(
-        `SELECT login, provider, refresh_secret AS refreshSecret, refresh_expires_at AS refreshExpiresAt
+      .exec<{ login: string; provider: string; refreshSecret: string; refreshExpiresAt: number; failures: number }>(
+        `SELECT login, provider, refresh_secret AS refreshSecret, refresh_expires_at AS refreshExpiresAt,
+           refresh_failures AS failures
          FROM connections WHERE refresh_secret IS NOT NULL AND refresh_at <= ?`,
         now,
       )
       .toArray()
+    const claimed: (() => Promise<void>)[] = []
     for (const row of due) {
       const key = [row.login, row.provider, row.refreshSecret] as const
-      const match = "WHERE login = ? AND provider = ? AND refresh_secret = ?"
-      const provider = findProvider(row.provider)
-      const client = provider?.kind === "oauth" ? oauthClient(this.env, provider) : null
       const drop = (reason: string) => {
         console.warn(`${row.provider} connection for ${row.login} can no longer be refreshed: ${reason}`)
-        sql.exec(`UPDATE connections SET refresh_secret = NULL, refresh_at = NULL, refresh_expires_at = NULL ${match}`, ...key)
+        sql.exec(
+          `UPDATE connections SET refresh_secret = NULL, refresh_at = NULL, refresh_expires_at = NULL, refresh_failures = 0
+           ${match}`,
+          ...key,
+        )
       }
       if (row.refreshExpiresAt <= now) {
         drop("the refresh token expired")
         continue
       }
-      sql.exec(`UPDATE connections SET refresh_at = ? ${match}`, now + REFRESH_RETRY_MS, ...key)
+      const retryMs = refreshRetryMs(row.failures)
+      sql.exec(
+        `UPDATE connections SET refresh_at = ?, refresh_failures = refresh_failures + 1 ${match}`,
+        now + retryMs,
+        ...key,
+      )
+      const provider = findProvider(row.provider)
+      const client = provider?.kind === "oauth" ? oauthClient(this.env, provider) : null
       if (provider?.kind !== "oauth" || client === null) {
         console.error(`${row.provider} connection for ${row.login} is due a refresh but OAuth is not configured`)
         continue
       }
-      try {
-        const grant = await refreshGrant(provider, client, row.refreshSecret, now)
-        const { refresh } = grant
-        sql.exec(
-          `UPDATE connections SET secret = ?, updated_at = ?, refresh_secret = ?, refresh_at = ?, refresh_expires_at = ? ${match}`,
-          grant.accessToken,
-          Date.now(),
-          refresh?.token ?? null,
-          refresh === null ? null : refresh.accessExpiresAt - REFRESH_MARGIN_MS,
-          refresh?.expiresAt ?? null,
-          ...key,
-        )
-      } catch (error) {
-        if (error instanceof RefreshRefused) drop(error.message)
-        else console.error(`refreshing the ${row.provider} connection for ${row.login} failed; retrying`, error)
-      }
+      claimed.push(async () => {
+        try {
+          const grant = await refreshGrant(provider, client, row.refreshSecret)
+          const at = Date.now()
+          const { refresh } = grant
+          sql.exec(
+            `UPDATE connections SET secret = ?, updated_at = ?, refresh_secret = ?, refresh_at = ?, refresh_expires_at = ?,
+               refresh_failures = 0
+             ${match}`,
+            grant.accessToken,
+            at,
+            refresh?.token ?? null,
+            refresh === null ? null : refreshDueAt(refresh, at),
+            refresh?.expiresAt ?? null,
+            ...key,
+          )
+        } catch (error) {
+          if (error instanceof RefreshRefused) drop(error.message)
+          else console.error(`refreshing the ${row.provider} connection for ${row.login} failed; retrying in ${retryMs} ms`, error)
+        }
+      })
+    }
+    for (let i = 0; i < claimed.length; i += REFRESH_CONCURRENCY) {
+      await Promise.all(claimed.slice(i, i + REFRESH_CONCURRENCY).map((refresh) => refresh()))
     }
   }
 
-  deleteConnection(login: string, provider: string): void {
+  async deleteConnection(login: string, provider: string): Promise<void> {
     this.ctx.storage.sql.exec("DELETE FROM connections WHERE login = ? AND provider = ?", login, provider)
+    // The row may have held the only pending refresh deadline.
+    await this.rearm()
   }
 
   /** The stored secret of one connection, or null when it is not connected. */

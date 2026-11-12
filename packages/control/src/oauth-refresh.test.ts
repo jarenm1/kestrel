@@ -16,8 +16,8 @@ const SIX_MONTHS = 15_897_600 * 1000
 const github = PROVIDERS.find((p): p is OAuthProvider => p.id === "github")!
 const client = { clientId: "id", clientSecret: "secret" }
 
-const newHub = () => {
-  const db = new Database(":memory:")
+/** A Hub over `db`; pass a database that already holds tables to exercise the constructor's migrations. */
+const newHub = (db = new Database(":memory:")) => {
   const alarms: number[] = []
   const sql = {
     exec: (query: string, ...bindings: (string | number | null)[]) => {
@@ -68,11 +68,11 @@ const tokenEndpoint = (answer: (refreshToken: string) => Response | Promise<Resp
 }
 
 /** Connects GitHub as the OAuth callback does, from a code exchange answered with an expiring token. */
-const connect = async (hub: HubClass, access: string, refresh: string) => {
+const connect = async (hub: HubClass, access: string, refresh: string, login = "octocat") => {
   const exchange = spyOn(globalThis, "fetch").mockImplementation((async () => granted(access, refresh)) as typeof fetch)
   const grant = await exchangeCode(github, client, "code", "https://app.example/auth/github/callback")
   exchange.mockRestore()
-  await hub.putConnection("octocat", "github", grant.accessToken, "octocat", grant.refresh)
+  await hub.putConnection(login, "github", grant.accessToken, login, grant.refresh)
 }
 
 const refreshColumns = (db: Database) =>
@@ -130,7 +130,7 @@ describe("expiring GitHub tokens", () => {
     expect(spent).toEqual(["ghr_first"])
   })
 
-  test("an outage is retried with the same refresh token, not before the retry delay", async () => {
+  test("an outage is retried with the same refresh token, backing off on each failure", async () => {
     setSystemTime(new Date(START))
     const { hub, alarms } = newHub()
     await connect(hub, "ghu_first", "ghr_first")
@@ -140,14 +140,64 @@ describe("expiring GitHub tokens", () => {
     setSystemTime(new Date(due))
     await hub.alarm()
     expect(alarms.at(-1)).toBe(due + REFRESH_RETRY_MS)
+    // Not retried before the delay.
     await hub.alarm()
     expect(spent).toEqual(["ghr_first"])
 
-    down = false
-    setSystemTime(new Date(due + REFRESH_RETRY_MS))
+    // The second failure waits twice as long.
+    const retry = due + REFRESH_RETRY_MS
+    setSystemTime(new Date(retry))
     await hub.alarm()
-    expect(spent).toEqual(["ghr_first", "ghr_first"])
+    expect(alarms.at(-1)).toBe(retry + 2 * REFRESH_RETRY_MS)
+
+    down = false
+    setSystemTime(new Date(retry + 2 * REFRESH_RETRY_MS))
+    await hub.alarm()
+    expect(spent).toEqual(["ghr_first", "ghr_first", "ghr_first"])
     expect(hub.credentials("octocat").github).toBe("ghu_2")
+    // Success resets the backoff: the next refresh is due on the new token's schedule.
+    expect(alarms.at(-1)).toBe(retry + 2 * REFRESH_RETRY_MS + EIGHT_HOURS - REFRESH_MARGIN_MS)
+  })
+
+  test("connections due together are refreshed concurrently", async () => {
+    setSystemTime(new Date(START))
+    const { hub } = newHub()
+    await connect(hub, "ghu_a", "ghr_a", "alice")
+    await connect(hub, "ghu_b", "ghr_b", "bob")
+    // Neither answer comes until both requests are out; a serial loop would never send the second.
+    const both = Promise.withResolvers<void>()
+    const spent = tokenEndpoint(async (token) => {
+      if (spent.length === 2) both.resolve()
+      await both.promise
+      return granted(`${token}_access`, `${token}_next`)
+    })
+    setSystemTime(new Date(START + EIGHT_HOURS))
+    await hub.alarm()
+    expect(hub.credentials("alice").github).toBe("ghr_a_access")
+    expect(hub.credentials("bob").github).toBe("ghr_b_access")
+  })
+
+  test("a token living less than the margin is not due on arrival", async () => {
+    setSystemTime(new Date(START))
+    const { hub, alarms } = newHub()
+    await hub.putConnection("octocat", "github", "ghu_short", "octocat", {
+      token: "ghr_short",
+      accessExpiresAt: START + 60_000,
+      expiresAt: START + SIX_MONTHS,
+    })
+    expect(alarms.at(-1)).toBe(START + REFRESH_RETRY_MS)
+  })
+
+  test("an existing connections table gains the refresh columns and keeps its tokens", () => {
+    const db = new Database(":memory:")
+    db.run(`CREATE TABLE connections (
+      login TEXT NOT NULL, provider TEXT NOT NULL, secret TEXT NOT NULL, account TEXT, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (login, provider)
+    )`)
+    db.run("INSERT INTO connections VALUES ('octocat', 'github', 'gho_old', 'octocat', 1)")
+    const { hub } = newHub(db)
+    expect(hub.credentials("octocat").github).toBe("gho_old")
+    expect(refreshColumns(db)).toEqual({ secret: null, at: null })
   })
 
   test("a reconnect while a refresh is in flight is kept", async () => {

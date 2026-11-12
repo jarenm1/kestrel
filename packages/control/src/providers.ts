@@ -89,7 +89,7 @@ export const PROVIDERS: readonly Provider[] = [
     scopes: "read:user repo",
     clientIdEnv: "GITHUB_CLIENT_ID",
     clientSecretEnv: "GITHUB_CLIENT_SECRET",
-    // GitHub OAuth apps register a single callback URL; sign-in and re-consent share it.
+    // The GitHub App registers a single callback URL; sign-in and re-consent share it.
     callbackPath: "/auth/github/callback",
     fetchAccount: githubAccount,
     tokenRejected: githubTokenRejected,
