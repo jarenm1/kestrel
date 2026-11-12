@@ -490,8 +490,9 @@ export interface CoreShape {
   readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
   /**
    * Used by the MCP handler: writes `data` to `path` from inside the task's sandbox, so the write has the agent's own
-   * reach and follows no link the agent could not. A relative path is from the workspace root; missing parent dirs are
-   * made. Returns the absolute path as the agent sees it.
+   * reach and follows no link the agent could not. A relative path is from the workspace root, and the path must stay
+   * inside the workspace; missing parent dirs are made, and a failed write leaves an existing file intact. Returns the
+   * absolute path as the agent sees it.
    */
   readonly writeFileInTask: (taskId: string, path: string, data: Uint8Array) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
@@ -3067,7 +3068,7 @@ export const CoreLive = Layer.effect(
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
           const desktopNow = yield* desktop.status(taskId)
-          const launch = yield* launchFor(task, "exec", desktopNow.display, writeFileCommand(path)).pipe(
+          const launch = yield* launchFor(task, "exec", desktopNow.display, writeFileCommand(threadDirOf(task.id), path)).pipe(
             Effect.mapError(toInternal("write file")),
           )
           const result = yield* runProcess(launch.file, launch.args, {
