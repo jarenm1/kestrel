@@ -42,6 +42,31 @@ export const installToolkit = (
   homeDir: string,
   name: ToolkitName,
 ): Effect.Effect<ReadonlyArray<string>, InternalError> =>
+  buildAndLink(homeDir, name, `toolkit ${name}`, [`${flake}#toolkit-${name}`])
+
+/** A nixpkgs attribute path such as `ffmpeg` or `python3Packages.requests`; nothing that reads as another flake ref. */
+export const NIX_PACKAGE = /^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*$/
+
+/**
+ * Installs a nixpkgs package the way installToolkit installs a toolkit, from the nixpkgs the box's flake pins
+ * (`--inputs-from`). `--max-jobs 0` allows no local builds, so only what the binary cache already has installs: an
+ * agent cannot start an hours-long compile on the host. Out-links stay in `.kestrel/toolkits/nixpkgs.<attr>/`.
+ */
+export const installNixPackage = (
+  flake: string,
+  homeDir: string,
+  attr: string,
+): Effect.Effect<ReadonlyArray<string>, InternalError> =>
+  NIX_PACKAGE.test(attr)
+    ? buildAndLink(homeDir, `nixpkgs.${attr}`, `nixpkgs#${attr}`, ["--inputs-from", flake, "--max-jobs", "0", `nixpkgs#${attr}`])
+    : Effect.fail(new InternalError({ message: `not a nixpkgs attribute path: ${attr}` }))
+
+const buildAndLink = (
+  homeDir: string,
+  name: string,
+  label: string,
+  buildArgs: ReadonlyArray<string>,
+): Effect.Effect<ReadonlyArray<string>, InternalError> =>
   Effect.gen(function* () {
     const nix = findExecutable("nix")
     if (nix === null) return yield* Effect.fail(new InternalError({ message: "nix not found on the box's PATH" }))
@@ -55,14 +80,14 @@ export const installToolkit = (
       },
       catch: (e) => new InternalError({ message: `cannot prepare toolkit dirs: ${String(e)}` }),
     })
-    const build = yield* runProcess(nix, ["build", "--out-link", join(dir, "out"), `${flake}#toolkit-${name}`], {
+    const build = yield* runProcess(nix, ["build", "--out-link", join(dir, "out"), ...buildArgs], {
       cwd: homeDir,
       env: hostEnv(),
       timeoutMs: BUILD_TIMEOUT_MS,
     })
     if (build.exitCode !== 0) {
       const why = build.timedOut ? "timed out" : `failed (exit ${build.exitCode})`
-      return yield* Effect.fail(new InternalError({ message: `building toolkit ${name} ${why}: ${outputEnd(build.stderr)}` }))
+      return yield* Effect.fail(new InternalError({ message: `building ${label} ${why}: ${outputEnd(build.stderr)}` }))
     }
     return yield* Effect.tryPromise({
       try: async () => {
@@ -83,6 +108,6 @@ export const installToolkit = (
         }
         return exes
       },
-      catch: (e) => new InternalError({ message: `cannot link toolkit ${name}: ${String(e)}` }),
+      catch: (e) => new InternalError({ message: `cannot link ${label}: ${String(e)}` }),
     })
   })

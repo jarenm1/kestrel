@@ -60,7 +60,7 @@ import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, commentMismatch, type ApiRequest, type ApiResponse, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
-import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
+import { type ToolkitName, installNixPackage, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
 import { AgentHarness, agentCwd, type AgentChoice, type RunStart } from "./harness"
@@ -492,6 +492,8 @@ export interface CoreShape {
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
   readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
+  /** Used by the MCP handler (`nix_install`, only with a flake): installs a nixpkgs package as toolkitInstall does a toolkit. */
+  readonly nixPackageInstall: (taskId: string, attr: string) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
   /**
    * Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking
    * again returns it. `path` is the checkout's absolute directory, the same inside the sandbox. `instructionFiles`
@@ -3074,6 +3076,14 @@ export const CoreLive = Layer.effect(
           const flake = config.toolkitsFlake
           if (flake === null) return yield* Effect.fail(new InternalError({ message: "toolkits need CLOUDAGENTS_TOOLKITS_FLAKE" }))
           return yield* installToolkit(flake, join(config.homesDir, taskId), name)
+        }),
+
+      nixPackageInstall: (taskId, attr) =>
+        Effect.gen(function* () {
+          yield* requireTask(taskId)
+          const flake = config.toolkitsFlake
+          if (flake === null) return yield* Effect.fail(new InternalError({ message: "nix packages need CLOUDAGENTS_TOOLKITS_FLAKE" }))
+          return yield* installNixPackage(flake, join(config.homesDir, taskId), attr)
         }),
 
       checkout: (taskId, input) =>
