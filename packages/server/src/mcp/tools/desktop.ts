@@ -20,6 +20,8 @@ export interface DesktopToolDeps {
     readonly launch: (taskId: string, command: string) => Effect.Effect<string, unknown>
     readonly processes: (taskId: string) => Effect.Effect<ReadonlyArray<DesktopApp>, unknown>
     readonly kill: (taskId: string, id: string) => Effect.Effect<DesktopApp, unknown>
+    /** Writes a file from inside the task's sandbox, with the agent's own reach; returns its absolute path. */
+    readonly save: (taskId: string, path: string, data: Uint8Array) => Effect.Effect<string, unknown>
   }
 }
 
@@ -138,11 +140,10 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
 
   let previous: RgbFrame | null = null
 
-  /** Captures the desktop or a region as blocks. With `changes`, only the parts that differ from this session's previous capture. */
-  const look = (request: Look): Effect.Effect<Block[], unknown> =>
+  /** Grabs the desktop and checks `region` against it; the grab becomes this session's previous screenshot. */
+  const capture = (region: DesktopRegion | undefined) =>
     Effect.gen(function* () {
       const status = yield* deps.desktop.status(ctx.taskId)
-      const region = request.region
       if (region && (region.x + region.width > status.width || region.y + region.height > status.height)) {
         return yield* Effect.fail(new Error(`region is outside the ${status.width} x ${status.height} desktop`))
       }
@@ -151,6 +152,14 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       previous = frame
       const pointer = yield* deps.desktop.cursor(ctx.taskId)
       const area = region ?? { x: 0, y: 0, width: frame.width, height: frame.height }
+      return { frame, baseline, pointer, area }
+    })
+
+  /** Captures the desktop or a region as blocks. With `changes`, only the parts that differ from this session's previous capture. */
+  const look = (request: Look): Effect.Effect<Block[], unknown> =>
+    Effect.gen(function* () {
+      const region = request.region
+      const { frame, baseline, pointer, area } = yield* capture(region)
       const fullScale = request.scale ?? defaultScale(area)
       if (!request.changes) return viewBlocks(frame, area, fullScale, pointer, region)
       if (baseline === null) {
@@ -169,6 +178,22 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       return [
         note(`${boxes.length} changed region(s) since the previous screenshot`),
         ...boxes.flatMap((box) => viewBlocks(frame, box, boxScale, pointer, box)),
+      ]
+    })
+
+  /**
+   * Saves the desktop or a region as a PNG file at `path` (full resolution unless `scale` is given), then returns the
+   * usual view of it so the agent sees what it saved.
+   */
+  const save = (path: string, request: Look): Effect.Effect<Block[], unknown> =>
+    Effect.gen(function* () {
+      if (request.changes) return yield* Effect.fail(new Error("path saves a whole view; it does not combine with changes"))
+      const { frame, pointer, area } = yield* capture(request.region)
+      const image = resample(frame, area, request.scale ?? 1)
+      const saved = yield* deps.desktop.save(ctx.taskId, path, encodePng(image))
+      return [
+        note(`saved a ${image.width} x ${image.height} PNG to ${saved}`),
+        ...viewBlocks(frame, area, request.scale ?? defaultScale(area), pointer, request.region),
       ]
     })
 
@@ -212,7 +237,8 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
         "Take a screenshot of the task desktop as a PNG. Optional region crops to a rectangle; scale resizes it (default " +
         "fits the long edge within 1280 px). With changes, returns only the parts that changed since this session's " +
         "previous screenshot, each at full resolution. The result states how image pixels map to desktop pixels. Pixel " +
-        "coordinates for the other desktop_* tools are desktop pixels, origin at top-left.",
+        "coordinates for the other desktop_* tools are desktop pixels, origin at top-left. With path, also saves the PNG " +
+        "as a file (at full resolution unless scale is given), for example to commit it or attach it to a pull request.",
       inputSchema: {
         region: z
           .object({
@@ -236,10 +262,24 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
             "Return only what changed since the previous screenshot, as full-resolution crops; the full view when there is " +
               "none or most of the area changed. Default false",
           ),
+        path: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Also save the screenshot as a PNG file here; relative to the workspace root, parent directories are " +
+              "created. Not with changes",
+          ),
       },
     },
-    ({ region, scale, changes }: Look) =>
-      guard(() => runDesktopTool(look({ region, scale, changes }).pipe(Effect.map((content): CallToolResult => ({ content }))))),
+    ({ region, scale, changes, path }: Look & { path?: string }) =>
+      guard(() =>
+        runDesktopTool(
+          (path === undefined ? look({ region, scale, changes }) : save(path, { region, scale, changes })).pipe(
+            Effect.map((content): CallToolResult => ({ content })),
+          ),
+        ),
+      ),
   )
 
   server.registerTool(

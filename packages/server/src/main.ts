@@ -172,6 +172,7 @@ const program = Effect.gen(function* () {
       launch: (taskId, command) => core.desktopLaunch(taskId, command),
       processes: (taskId) => desktop.processes(taskId),
       kill: (taskId, id) => desktop.kill(taskId, id),
+      save: (taskId, path, data) => core.writeFileInTask(taskId, path, data),
     },
     workspace: {
       checkout: core.checkout,
