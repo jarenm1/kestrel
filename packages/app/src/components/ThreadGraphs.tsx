@@ -6,7 +6,7 @@ import {
   type TaskStatsSample,
 } from "@cloudagents/protocol"
 import { useTaskStats } from "@/hooks/useTaskStats"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@cloudagents/ui/tabs"
 import { cn } from "@/lib/utils"
 import { formatSize } from "@/util"
 

@@ -38,6 +38,10 @@ import {
   SendMessageResponse,
   Task,
   TextGenerationSettings,
+  type ThreadPullRequestAction,
+  ThreadPullRequestDetail,
+  ThreadPullRequestDiff,
+  ThreadPullRequests,
   ThreadSettings,
   TriggerAutomationBody,
   UpdateAutomationBody,
@@ -159,6 +163,12 @@ export interface ApiClient {
   /** Turns a thread's armed usage-limit auto-resume on or off; the box answers with the thread as stored. */
   setUsageLimitAutoResume(taskId: string, autoResume: boolean): Promise<Task>;
   getDiff(taskId: string): Promise<DiffResponse>;
+  /** Every pull request the thread owns or manages, with GitHub's live view of each. */
+  getThreadPullRequests(taskId: string): Promise<ThreadPullRequests>;
+  getThreadPullRequest(taskId: string, repo: string, number: number): Promise<ThreadPullRequestDetail>;
+  getThreadPullRequestDiff(taskId: string, repo: string, number: number): Promise<ThreadPullRequestDiff>;
+  /** Comments, reviews, merges and the rest; the box answers with the thread as stored. */
+  actOnThreadPullRequest(taskId: string, action: ThreadPullRequestAction): Promise<Task>;
   getDesktop(taskId: string): Promise<DesktopStatus>;
   startDesktop(taskId: string): Promise<DesktopStatus>;
   stopDesktop(taskId: string): Promise<void>;
@@ -444,6 +454,15 @@ export function createApiClient(
     setUsageLimitAutoResume: (taskId, autoResume) =>
       boxRequest(Task, "PUT", Paths.taskUsageLimit(taskId), { autoResume }),
     getDiff: (taskId) => boxRequest(DiffResponse, "GET", Paths.taskDiff(taskId)),
+    /** Every pull request the thread owns or manages, with GitHub's live view of each. */
+    getThreadPullRequests: (taskId) => boxRequest(ThreadPullRequests, "GET", Paths.taskPullRequests(taskId)),
+    getThreadPullRequest: (taskId, repo, number) =>
+      boxRequest(ThreadPullRequestDetail, "GET", Paths.taskPullRequest(taskId, repo, number)),
+    getThreadPullRequestDiff: (taskId, repo, number) =>
+      boxRequest(ThreadPullRequestDiff, "GET", Paths.taskPullRequestDiff(taskId, repo, number)),
+    /** Comments, reviews, merges and the rest; the box answers with the thread as stored. */
+    actOnThreadPullRequest: (taskId, action) =>
+      boxRequest(Task, "POST", Paths.taskPullRequestAction(taskId), action),
     getDesktop: (taskId) => boxRequest(DesktopStatus, "GET", Paths.taskDesktop(taskId)),
     startDesktop: (taskId) => boxRequest(DesktopStatus, "POST", Paths.taskDesktop(taskId)),
     stopDesktop: (taskId) => boxRequest(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)).then(() => undefined),

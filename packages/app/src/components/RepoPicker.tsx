@@ -15,7 +15,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
 import { errorText } from "@/util"

@@ -17,7 +17,7 @@ import { isRouteModel, modelDisplayName } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@cloudagents/ui/badge"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
@@ -28,7 +28,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 
 import { setShownModels, storedShownModels, useShownModels } from "@/hooks/useShownModels"

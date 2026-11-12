@@ -10,8 +10,8 @@ import {
   displayPath,
   isRenamed,
   type DiffFileStatus,
-} from "@/lib/pierreDiff"
-import { cn } from "@/lib/utils"
+} from "./pierreDiff"
+import { cn } from "../cn"
 
 /** Files with more changed lines than this start collapsed, so one huge file does not bury the rest. */
 const LARGE_FILE_LINES = 1500

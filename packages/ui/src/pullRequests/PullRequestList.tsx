@@ -1,11 +1,10 @@
 import { useMemo } from "react"
-import type { UseQueryResult } from "@tanstack/react-query"
 import { Eye } from "lucide-react"
-import type { ThreadPullRequests, ThreadPullRequestSummary } from "@cloudagents/protocol"
-import { Button } from "@cloudagents/ui/button"
-import { Alert } from "@cloudagents/ui/alert"
-import { cn } from "@/lib/utils"
-import { errorText, formatAgo, repoShortName } from "@/util"
+import type { ThreadPullRequestSummary } from "@cloudagents/protocol"
+import { Alert } from "../alert"
+import { Button } from "../button"
+import { cn } from "../cn"
+import { formatAgo, repoShortName } from "../format"
 import {
   PullRequestChecksGlyph,
   PullRequestReviewGlyph,
@@ -16,6 +15,16 @@ import {
   useNow,
 } from "./presentation"
 
+export interface PullRequestListProps {
+  /** Null until the first successful read. */
+  pullRequests: readonly ThreadPullRequestSummary[] | null
+  /** Display text of the read error. */
+  error: string | null
+  fetching: boolean
+  onRetry: () => void
+  onSelect: (repo: string, number: number) => void
+}
+
 /** Open pull requests first, then the most recently updated; a registry entry without a snapshot falls back to `addedAt`. */
 function comparePullRequests(a: ThreadPullRequestSummary, b: ThreadPullRequestSummary): number {
   const open = Number(b.snapshot?.state === "open") - Number(a.snapshot?.state === "open")
@@ -24,34 +33,30 @@ function comparePullRequests(a: ThreadPullRequestSummary, b: ThreadPullRequestSu
 }
 
 /**
- * The thread's pull requests: one row each, open ones first. Refreshed by the panel's query; a pull request whose
+ * The thread's pull requests: one row each, open ones first. Refreshed by the host's query; a pull request whose
  * snapshot failed still keeps its row, with GitHub's error in place of the meta line.
  */
-export function PullRequestList({
-  query,
-  onSelect,
-}: {
-  query: UseQueryResult<ThreadPullRequests, Error>
-  onSelect: (pullRequest: ThreadPullRequestSummary) => void
-}) {
+export function PullRequestList({ pullRequests, error, fetching, onRetry, onSelect }: PullRequestListProps) {
   const now = useNow()
-  const pullRequests = useMemo(() => [...(query.data?.pullRequests ?? [])].sort(comparePullRequests), [query.data])
+  const rows = useMemo(() => [...(pullRequests ?? [])].sort(comparePullRequests), [pullRequests])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col p-3">
-      {query.error && (
+      {error !== null && (
         <Alert className="mb-2 w-auto">
           <div className="flex items-center gap-2">
-            <span className="min-w-0 flex-1">{errorText(query.error)}</span>
-            <Button variant="soft" size="sm" onClick={() => void query.refetch()} disabled={query.isFetching}>
+            <span className="min-w-0 flex-1">{error}</span>
+            <Button variant="soft" size="sm" onClick={onRetry} disabled={fetching}>
               Retry
             </Button>
           </div>
         </Alert>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto rounded-xl bg-background/60 p-1.5 shadow-well">
-        {query.isPending && <p className="px-2.5 py-2 text-xs text-muted-foreground">Loading…</p>}
-        {query.isSuccess && pullRequests.length === 0 && (
+        {pullRequests === null && error === null && (
+          <p className="px-2.5 py-2 text-xs text-muted-foreground">Loading…</p>
+        )}
+        {pullRequests !== null && pullRequests.length === 0 && (
           <div className="px-2.5 py-8 text-center">
             <p className="text-xs font-medium">No pull requests</p>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -59,7 +64,7 @@ export function PullRequestList({
             </p>
           </div>
         )}
-        {pullRequests.map((pullRequest) => (
+        {rows.map((pullRequest) => (
           <PullRequestRow key={pullRequest.id} pullRequest={pullRequest} now={now} onSelect={onSelect} />
         ))}
       </div>
@@ -74,7 +79,7 @@ function PullRequestRow({
 }: {
   pullRequest: ThreadPullRequestSummary
   now: number
-  onSelect: (pullRequest: ThreadPullRequestSummary) => void
+  onSelect: (repo: string, number: number) => void
 }) {
   const snapshot = pullRequest.snapshot
   const state = pullRequestState(snapshot)
@@ -83,7 +88,7 @@ function PullRequestRow({
   return (
     <button
       type="button"
-      onClick={() => onSelect(pullRequest)}
+      onClick={() => onSelect(pullRequest.repo, pullRequest.number)}
       aria-label={`${state.label} pull request #${pullRequest.number}${snapshot === undefined ? "" : `: ${snapshot.title}`}`}
       className="flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left text-xs outline-none transition-[color,background-color,box-shadow] duration-200 ease-out hover:bg-white/[0.06] focus-visible:shadow-glow"
     >

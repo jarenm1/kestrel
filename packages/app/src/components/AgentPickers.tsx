@@ -20,7 +20,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { HarnessLogo } from "@/components/HarnessLogo"
 import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"

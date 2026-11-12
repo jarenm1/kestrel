@@ -15,8 +15,8 @@ import {
   type LucideIcon,
 } from "lucide-react"
 import type { ThreadPullRequestSnapshot } from "@cloudagents/protocol"
-import { Button } from "@cloudagents/ui/button"
-import { cn } from "@/lib/utils"
+import { Button } from "../button"
+import { cn } from "../cn"
 
 /** A badge tone shared with `Badge`, plus the colour a state glyph takes. */
 export type PullRequestTone = "neutral" | "info" | "success" | "warning" | "destructive"

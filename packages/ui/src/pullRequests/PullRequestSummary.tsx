@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react"
 import { CircleCheck, CircleDashed, CircleDot, CircleX } from "lucide-react"
 import type { ThreadPullRequestDetail, ThreadPullRequestSnapshot } from "@cloudagents/protocol"
-import { Markdown } from "@cloudagents/ui/markdown"
-import { cn } from "@/lib/utils"
+import { Markdown } from "../transcript/Markdown"
+import { cn } from "../cn"
 import { CommentCard } from "./Activity"
 import {
   type PullRequestOrder,

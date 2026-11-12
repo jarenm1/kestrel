@@ -9,7 +9,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
 

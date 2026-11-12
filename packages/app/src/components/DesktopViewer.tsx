@@ -16,7 +16,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import type { RtcPath, RtcStats } from "@/desktop/webrtc"
 import { errorText } from "@/util"
 import { DesktopScreen } from "./DesktopScreen"

@@ -12,7 +12,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { BAR_TRIGGER_CLASS } from "@/components/RepoPicker"
 import { cn } from "@/lib/utils"
 
