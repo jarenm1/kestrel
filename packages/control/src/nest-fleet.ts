@@ -32,7 +32,7 @@ import {
   type PlacementCandidate,
   withPlannedBoots,
 } from "./nest-control"
-import { applyNestBoxEvent, nestBoxPhaseOf, transitionNestBox } from "./nest-transition"
+import { applyNestBoxEvent, nestBoxPhaseOf, restoreNestBox, transitionNestBox } from "./nest-transition"
 import {
   deleteNestBox,
   insertNestBox,
@@ -546,7 +546,8 @@ export class NestFleet {
         ? { ...stored, enrollToken: enrollToken ?? newSecret() }
         : { ...stored, enrollToken }
     if (!this.link.send(hostId, { _tag: "command", commandId: pendingId, command })) {
-      Object.assign(current, previous)
+      current.enrollHash = previous.enrollHash
+      current.enrollExpiresAt = previous.enrollExpiresAt
       saveNestBox(this.sql, current)
     }
   }
@@ -621,7 +622,8 @@ export class NestFleet {
     }
     row.retryKind = null
     if (!this.dispatch(row, command)) {
-      Object.assign(row, previous)
+      row.enrollHash = previous.enrollHash
+      row.enrollExpiresAt = previous.enrollExpiresAt
       row.retryKind = "create"
       saveNestBox(this.sql, row)
     }
@@ -665,13 +667,8 @@ export class NestFleet {
     }
     // A new placement: a higher epoch and a new VM incarnation, so the old host's copy is evicted on its next report. The
     // claim is kept only once the resume is sent; if it is not, the box stays unplaced for the next wake.
-    const previous = {
-      hostId: row.hostId,
-      ownerEpoch: row.ownerEpoch,
-      vmId: row.vmId,
-      vmSince: row.vmSince,
-      ...this.enrollFields(row),
-    }
+    const previous = nestBoxPhaseOf(row)
+    const previousEnroll = this.enrollFields(row)
     const url = publicUrlFor(row.boxId, target.slug, this.domain)
     applyNestBoxEvent(row, {
       _tag: "placementChosen",
@@ -681,7 +678,9 @@ export class NestFleet {
     })
     const enrollToken = this.adoptToken(row, minted)
     if (!this.dispatch(row, this.resumeCommand(row, enrollToken, url))) {
-      Object.assign(row, previous)
+      restoreNestBox(row, previous)
+      row.enrollHash = previousEnroll.enrollHash
+      row.enrollExpiresAt = previousEnroll.enrollExpiresAt
       this.holdWake(row)
       return
     }
@@ -722,7 +721,8 @@ export class NestFleet {
     const previous = this.enrollFields(row)
     const enrollToken = this.adoptToken(row, minted)
     if (!this.dispatch(row, this.resumeCommand(row, enrollToken, this.boxUrl(row.boxId)))) {
-      Object.assign(row, previous)
+      row.enrollHash = previous.enrollHash
+      row.enrollExpiresAt = previous.enrollExpiresAt
       this.holdWake(row)
     }
   }
