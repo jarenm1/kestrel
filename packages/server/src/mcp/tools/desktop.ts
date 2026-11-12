@@ -484,7 +484,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     {
       description:
         "Start a GUI or terminal command on the task desktop, detached, so it appears on the desktop " +
-        "(e.g. 'firefox', 'xterm'). Returns an app id for desktop_processes and desktop_kill. " +
+        "(e.g. 'firefox', 'chromium', 'xterm'). Returns an app id for desktop_processes and desktop_kill. " +
         `Does not wait for it to exit, but an app that exits within ${LAUNCH_CHECK_MS} ms is reported with its ` +
         "exit status and output; a non-zero exit is a tool error.",
       inputSchema: {
