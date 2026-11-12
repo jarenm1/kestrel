@@ -68,6 +68,10 @@
           export FONTCONFIG_FILE=${sandboxFontsConf}
           exec ${pkgs.firefox}/bin/firefox "$@"
         '';
+        sandboxChromium = pkgs.writeShellScriptBin "chromium" ''
+          export FONTCONFIG_FILE=${sandboxFontsConf}
+          exec ${pkgs.chromium}/bin/chromium "$@"
+        '';
         # xterm's bitmap fonts don't scale, so it draws DejaVu at the desktop's HiDPI factor (GDK_SCALE, set by the box).
         # Colors and padding follow the app's palette (packages/app/src/styles.css).
         xtermStyle = pkgs.lib.escapeShellArgs (pkgs.lib.concatMap (r: [ "-xrm" "XTerm*${r}" ]) [
@@ -170,6 +174,7 @@
             util-linux # `script`: Devin CLI reads its sign-in code only from a terminal
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
             sandboxFirefox # a browser for desktop_launch
+            sandboxChromium # a second one, for Chromium-only pages and DevTools/CDP
           ];
         };
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
