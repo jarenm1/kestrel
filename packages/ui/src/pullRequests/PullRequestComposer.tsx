@@ -1,25 +1,23 @@
 import { useId, useState } from "react"
 import type { ThreadPullRequestAction } from "@cloudagents/protocol"
-import { Button } from "@cloudagents/ui/button"
-import { Textarea } from "@/components/ui/textarea"
+import { Button } from "../button"
+import { Textarea } from "../textarea"
 
 type Verdict = "comment" | "approve" | "request-changes"
 
-/**
- * Comment and review forms at the bottom of a pull request's detail. The panel owns the request, pending state and
- * errors; a successful submit clears the textarea it sent.
- */
-export function PullRequestComposer({
-  repo,
-  number,
-  pending,
-  onAction,
-}: {
+export interface PullRequestComposerProps {
   repo: string
   number: number
   pending: boolean
-  onAction: (action: ThreadPullRequestAction) => Promise<unknown>
-}) {
+  /** Resolves null on success, or the message to show on failure. */
+  onAction: (action: ThreadPullRequestAction) => Promise<string | null>
+}
+
+/**
+ * Comment and review forms at the bottom of a pull request's detail. The host owns the request, pending state and
+ * errors; a successful submit clears the textarea it sent.
+ */
+export function PullRequestComposer({ repo, number, pending, onAction }: PullRequestComposerProps) {
   const [comment, setComment] = useState("")
   const [verdict, setVerdict] = useState<Verdict>("comment")
   const [summary, setSummary] = useState("")
@@ -27,22 +25,14 @@ export function PullRequestComposer({
 
   async function submitComment() {
     if (comment.trim() === "" || pending) return
-    try {
-      await onAction({ action: "comment", repo, number, body: comment })
-      setComment("")
-    } catch {
-      // The detail shows the error at the top and leaves the draft in place.
-    }
+    const failure = await onAction({ action: "comment", repo, number, body: comment })
+    if (failure === null) setComment("")
   }
 
   async function submitReview() {
     if (pending) return
-    try {
-      await onAction({ action: "review", repo, number, body: summary, verdict })
-      setSummary("")
-    } catch {
-      // The detail shows the error at the top and leaves the draft in place.
-    }
+    const failure = await onAction({ action: "review", repo, number, body: summary, verdict })
+    if (failure === null) setSummary("")
   }
 
   return (

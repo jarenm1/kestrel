@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
-import { Paths, type AgentItem, type Message, type Run } from "@cloudagents/protocol";
+import { Paths, type AgentItem, type Message, type Run, type Task } from "@cloudagents/protocol";
 import { openTaskEvents } from "@/api/events";
 import { createQueries, boxKeys, invalidateRunItems, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
@@ -9,6 +9,10 @@ import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protoc
 
 const MAX_LOG_LINES = 2000;
 const RECONNECT_MS = 2000;
+
+/** What the pull request panel shows of the registry: adding, dropping or toggling a watch changes it. */
+const registrySignature = (task: Task | undefined): string =>
+  (task?.pullRequests ?? []).map((pr) => `${pr.id}:${pr.watching === true ? 1 : 0}`).join(",");
 
 /**
  * Task chat state: REST snapshots in the query cache, kept current by the task events WebSocket.
@@ -64,9 +68,16 @@ export function useTaskState(taskId: string) {
         },
         onEvent: (event) => {
           switch (event._tag) {
-            case "task.updated":
+            case "task.updated": {
+              const before = registrySignature(queryClient.getQueryData<Task>(keys.task(taskId)));
               storeTask(queryClient, event.task, api.boxScope);
+              // The pull request panel polls GitHub on its own; refetch it only when the registry itself changed
+              // (a pull request was opened, linked or watched), not on every task update of a run.
+              if (before !== registrySignature(event.task)) {
+                void queryClient.invalidateQueries({ queryKey: keys.pullRequests(taskId), exact: true });
+              }
               break;
+            }
             case "message.created":
               queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
                 upsert(list, event.message)

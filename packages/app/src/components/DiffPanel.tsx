@@ -1,12 +1,18 @@
 import { useMemo, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import type { CheckoutDiff } from "@cloudagents/protocol"
-import type { FileDiffMetadata } from "@pierre/diffs/types"
 import { queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
-import { DiffFileList, isLargeDiffFile } from "@/components/DiffFiles"
-import { diffFileKey, diffFileStats, parseDiff, patchCacheKey } from "@/lib/pierreDiff"
+import {
+  DiffFileList,
+  diffFileKey,
+  diffFileStats,
+  isLargeDiffFile,
+  parseDiff,
+  patchCacheKey,
+  type FileDiffMetadata,
+} from "@cloudagents/ui/diff"
 import { errorText } from "@/util"
 
 /**

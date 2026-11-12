@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react"
 import { GitCommitHorizontal } from "lucide-react"
 import type { PullRequestComment, PullRequestReview, ThreadPullRequestDetail } from "@cloudagents/protocol"
-import { cn } from "@/lib/utils"
-import { formatAgo } from "@/util"
+import { cn } from "../cn"
+import { formatAgo } from "../format"
 import { CommentCard, ReviewCard } from "./Activity"
 import {
   type PullRequestOrder,

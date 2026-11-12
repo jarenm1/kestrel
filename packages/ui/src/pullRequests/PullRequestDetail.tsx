@@ -1,5 +1,4 @@
 import { useState } from "react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   ArrowLeft,
   Copy,
@@ -12,11 +11,14 @@ import {
   MoreHorizontal,
   RefreshCw,
 } from "lucide-react"
-import type { ThreadPullRequestAction } from "@cloudagents/protocol"
-import { actOnPullRequest, keys, queries } from "@/api/queries"
-import { Alert } from "@cloudagents/ui/alert"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@cloudagents/ui/button"
+import type {
+  ThreadPullRequestAction,
+  ThreadPullRequestDetail,
+  ThreadPullRequestDiff,
+} from "@cloudagents/protocol"
+import { Alert } from "../alert"
+import { Badge } from "../badge"
+import { Button } from "../button"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,17 +28,18 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { cn } from "@/lib/utils"
-import { errorText, formatAgo } from "@/util"
+} from "../dropdown-menu"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../tabs"
+import { cn } from "../cn"
+import { formatAgo } from "../format"
+import { externalClick, useTranscriptHost } from "../transcript/host"
 import { PullRequestCode } from "./PullRequestCode"
 import { PullRequestComposer } from "./PullRequestComposer"
 import { PullRequestSummary } from "./PullRequestSummary"
 import { PullRequestTimeline } from "./PullRequestTimeline"
 import { PullRequestStat, pullRequestState, useNow } from "./presentation"
 
-type Tab = "summary" | "timeline" | "code"
+export type PullRequestTab = "summary" | "timeline" | "code"
 type MergeMethod = "squash" | "merge" | "rebase"
 type Confirm = "merge" | "close" | "reopen"
 
@@ -46,64 +49,69 @@ const MERGE_LABEL: Record<MergeMethod, string> = {
   rebase: "Rebase and merge",
 }
 
-/**
- * One pull request: state and branches up top, Summary/Timeline/Code below, and the comment and review forms at the
- * end. The list this came from stays mounted behind the panel, so the registry keeps refreshing while it is open.
- */
-export function PullRequestDetail({
-  taskId,
-  repo,
-  number,
-  onBack,
-}: {
-  taskId: string
+export interface PullRequestDetailProps {
   repo: string
   number: number
+  /** Null while loading or after a failed read. */
+  detail: ThreadPullRequestDetail | null
+  error: string | null
+  fetching: boolean
+  diff: ThreadPullRequestDiff | null
+  diffError: string | null
+  diffFetching: boolean
+  tab: PullRequestTab
+  actionError: string | null
+  actionPending: boolean
   onBack: () => void
-}) {
-  const queryClient = useQueryClient()
-  const query = useQuery(queries.pullRequest(taskId, repo, number))
+  onRefresh: () => void
+  onTabChange: (tab: PullRequestTab) => void
+  onRetryDiff: () => void
+  /** Resolves null on success, or the message to show on failure. */
+  onAction: (action: ThreadPullRequestAction) => Promise<string | null>
+}
+
+/**
+ * One pull request: state and branches up top, Summary/Timeline/Code below, and the comment and review forms at the
+ * end. The host keeps the list mounted behind the panel, so the registry keeps refreshing while it is open.
+ */
+export function PullRequestDetail({
+  repo,
+  number,
+  detail,
+  error,
+  fetching,
+  diff,
+  diffError,
+  diffFetching,
+  tab,
+  actionError,
+  actionPending,
+  onBack,
+  onRefresh,
+  onTabChange,
+  onRetryDiff,
+  onAction,
+}: PullRequestDetailProps) {
   const now = useNow()
-  const [tab, setTab] = useState<Tab>("summary")
+  const host = useTranscriptHost()
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirm, setConfirm] = useState<Confirm | null>(null)
   const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash")
-  const [actionError, setActionError] = useState<string | null>(null)
-  const action = useMutation({
-    mutationFn: (next: ThreadPullRequestAction) => actOnPullRequest(queryClient, taskId, next),
-    onSuccess: () => setActionError(null),
-    onError: (error) => setActionError(errorText(error)),
-  })
 
   async function act(next: ThreadPullRequestAction, after?: () => void) {
-    try {
-      await action.mutateAsync(next)
-      after?.()
-    } catch {
-      // The action error is shown at the top of the detail.
-    }
+    const failure = await onAction(next)
+    if (failure === null) after?.()
   }
 
-  function refresh() {
-    void query.refetch()
-    void queryClient.invalidateQueries({ queryKey: keys.pullRequestDiff(taskId, repo, number) })
-  }
-
-  if (query.isPending) {
+  if (detail === null && error === null) {
     return <p className="p-4 text-xs text-muted-foreground">Loading…</p>
   }
-  if (query.data === undefined) {
+  if (detail === null) {
     return (
       <div className="p-4">
         <Alert className="w-auto">
-          <p>{query.error === null ? "The pull request could not be read." : errorText(query.error)}</p>
-          <Button
-            variant="soft"
-            size="sm"
-            className="mt-2"
-            onClick={() => void query.refetch()}
-            disabled={query.isFetching}
-          >
+          <p>{error ?? "The pull request could not be read."}</p>
+          <Button variant="soft" size="sm" className="mt-2" onClick={onRefresh} disabled={fetching}>
             Retry
           </Button>
         </Alert>
@@ -111,7 +119,6 @@ export function PullRequestDetail({
     )
   }
 
-  const detail = query.data
   const summary = detail.summary
   const snapshot = summary.snapshot
   const state = pullRequestState(snapshot)
@@ -139,7 +146,13 @@ export function PullRequestDetail({
           </Button>
           <span className="font-mono text-xs text-muted-foreground">#{number}</span>
           <Button asChild variant="ghost" size="icon" className="size-7" title="Open on GitHub">
-            <a href={summary.url} target="_blank" rel="noreferrer" aria-label="Open on GitHub">
+            <a
+              href={summary.url}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open on GitHub"
+              onClick={externalClick(host, summary.url)}
+            >
               <ExternalLink />
             </a>
           </Button>
@@ -150,10 +163,10 @@ export function PullRequestDetail({
               className="size-7"
               aria-label="Refresh pull request"
               title="Refresh"
-              onClick={refresh}
-              disabled={query.isFetching}
+              onClick={onRefresh}
+              disabled={fetching}
             >
-              <RefreshCw className={cn(query.isFetching && "animate-spin")} />
+              <RefreshCw className={cn(fetching && "animate-spin")} />
             </Button>
             <DropdownMenu
               open={menuOpen}
@@ -193,7 +206,7 @@ export function PullRequestDetail({
                         ))}
                       </DropdownMenuRadioGroup>
                       <DropdownMenuItem
-                        disabled={action.isPending}
+                        disabled={actionPending}
                         onSelect={() =>
                           void act(
                             { action: "merge", repo, number, method: mergeMethod },
@@ -202,13 +215,13 @@ export function PullRequestDetail({
                         }
                       >
                         <GitMerge />
-                        {action.isPending ? "Merging…" : MERGE_LABEL[mergeMethod]}
+                        {actionPending ? "Merging…" : MERGE_LABEL[mergeMethod]}
                       </DropdownMenuItem>
                       <DropdownMenuItem onSelect={() => setConfirm(null)}>Cancel</DropdownMenuItem>
                     </>
                   ) : (
                     <DropdownMenuItem
-                      disabled={action.isPending}
+                      disabled={actionPending}
                       onSelect={(event) => {
                         event.preventDefault()
                         setConfirm("merge")
@@ -224,20 +237,20 @@ export function PullRequestDetail({
                     <>
                       <DropdownMenuLabel>Close this pull request?</DropdownMenuLabel>
                       <DropdownMenuItem
-                        disabled={action.isPending}
+                        disabled={actionPending}
                         className="text-destructive focus:text-destructive"
                         onSelect={() =>
                           void act({ action: "close", repo, number }, closeMenu)
                         }
                       >
                         <GitPullRequestClosed />
-                        {action.isPending ? "Closing…" : "Close"}
+                        {actionPending ? "Closing…" : "Close"}
                       </DropdownMenuItem>
                       <DropdownMenuItem onSelect={() => setConfirm(null)}>Cancel</DropdownMenuItem>
                     </>
                   ) : (
                     <DropdownMenuItem
-                      disabled={action.isPending}
+                      disabled={actionPending}
                       onSelect={(event) => {
                         event.preventDefault()
                         setConfirm("close")
@@ -253,19 +266,19 @@ export function PullRequestDetail({
                     <>
                       <DropdownMenuLabel>Reopen this pull request?</DropdownMenuLabel>
                       <DropdownMenuItem
-                        disabled={action.isPending}
+                        disabled={actionPending}
                         onSelect={() =>
                           void act({ action: "reopen", repo, number }, closeMenu)
                         }
                       >
                         <GitPullRequestArrow />
-                        {action.isPending ? "Reopening…" : "Reopen"}
+                        {actionPending ? "Reopening…" : "Reopen"}
                       </DropdownMenuItem>
                       <DropdownMenuItem onSelect={() => setConfirm(null)}>Cancel</DropdownMenuItem>
                     </>
                   ) : (
                     <DropdownMenuItem
-                      disabled={action.isPending}
+                      disabled={actionPending}
                       onSelect={(event) => {
                         event.preventDefault()
                         setConfirm("reopen")
@@ -280,19 +293,24 @@ export function PullRequestDetail({
                   <DropdownMenuSeparator />
                 )}
                 <DropdownMenuItem
-                  onSelect={() => void navigator.clipboard.writeText(summary.url).catch(() => undefined)}
+                  onSelect={() => void navigator.clipboard?.writeText(summary.url).catch(() => undefined)}
                 >
                   <Copy />
                   Copy link
                 </DropdownMenuItem>
                 <DropdownMenuItem asChild>
-                  <a href={summary.url} target="_blank" rel="noreferrer">
+                  <a
+                    href={summary.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={externalClick(host, summary.url)}
+                  >
                     <ExternalLink />
                     Open on GitHub
                   </a>
                 </DropdownMenuItem>
                 <DropdownMenuItem
-                  disabled={action.isPending}
+                  disabled={actionPending}
                   onSelect={() =>
                     void act({ action: "watch", repo, number, watching: !watching })
                   }
@@ -328,21 +346,21 @@ export function PullRequestDetail({
         )}
       </header>
 
-      {query.error && (
+      {error !== null && (
         <Alert className="mx-4 mt-2 w-auto">
           <div className="flex items-center gap-2">
-            <span className="min-w-0 flex-1">{errorText(query.error)}</span>
-            <Button variant="soft" size="sm" onClick={refresh} disabled={query.isFetching}>
+            <span className="min-w-0 flex-1">{error}</span>
+            <Button variant="soft" size="sm" onClick={onRefresh} disabled={fetching}>
               Retry
             </Button>
           </div>
         </Alert>
       )}
-      {query.error === null && summary.error !== undefined && (
+      {error === null && summary.error !== undefined && (
         <Alert className="mx-4 mt-2 w-auto">
           <div className="flex items-center gap-2">
             <span className="min-w-0 flex-1">{summary.error}</span>
-            <Button variant="soft" size="sm" onClick={refresh} disabled={query.isFetching}>
+            <Button variant="soft" size="sm" onClick={onRefresh} disabled={fetching}>
               Retry
             </Button>
           </div>
@@ -352,7 +370,7 @@ export function PullRequestDetail({
 
       <Tabs
         value={tab}
-        onValueChange={(value) => setTab(value as Tab)}
+        onValueChange={(value) => onTabChange(value as PullRequestTab)}
         className="mt-3 flex min-h-0 flex-1 flex-col"
       >
         <div className="px-4">
@@ -377,19 +395,22 @@ export function PullRequestDetail({
           </TabsContent>
           <TabsContent value="code">
             <PullRequestCode
-              taskId={taskId}
               repo={repo}
               number={number}
               headRef={snapshot?.headRef ?? summary.branch ?? "head"}
-              active={tab === "code"}
+              patch={diff?.patch ?? null}
+              truncated={diff?.truncated === true}
+              error={diffError}
+              fetching={diffFetching}
+              onRetry={onRetryDiff}
             />
           </TabsContent>
           <div className="mt-4">
             <PullRequestComposer
               repo={repo}
               number={number}
-              pending={action.isPending}
-              onAction={(next) => action.mutateAsync(next)}
+              pending={actionPending}
+              onAction={onAction}
             />
           </div>
         </div>

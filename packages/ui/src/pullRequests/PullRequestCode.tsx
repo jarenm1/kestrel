@@ -1,13 +1,17 @@
 import { useEffect, useId, useMemo, useState } from "react"
-import { useQuery } from "@tanstack/react-query"
-import type { FileDiffMetadata } from "@pierre/diffs/types"
-import { queries } from "@/api/queries"
-import { Alert } from "@cloudagents/ui/alert"
-import { Button } from "@cloudagents/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
-import { DiffFileList, isLargeDiffFile } from "@/components/DiffFiles"
-import { diffFileKey, displayPath, parseDiff, patchCacheKey } from "@/lib/pierreDiff"
-import { errorText } from "@/util"
+import { Alert } from "../alert"
+import { Button } from "../button"
+import { Checkbox } from "../checkbox"
+import {
+  DiffFileList,
+  diffFileKey,
+  displayPath,
+  isLargeDiffFile,
+  parseDiff,
+  patchCacheKey,
+  type FileDiffMetadata,
+  type ParsedDiff,
+} from "../diff"
 
 /** Viewed files live per pull request head: a new push makes every file unviewed again. */
 const viewedStorageKey = (repo: string, number: number, headRef: string) =>
@@ -22,30 +26,39 @@ function readViewed(key: string): ReadonlySet<string> {
   }
 }
 
-/**
- * The pull request's unified diff, one collapsible section per file, each with a Viewed mark kept in localStorage for
- * this head. The diff is only read while this tab is open.
- */
-export function PullRequestCode({
-  taskId,
-  repo,
-  number,
-  headRef,
-  active,
-}: {
-  taskId: string
+export interface PullRequestCodeProps {
   repo: string
   number: number
   headRef: string
-  active: boolean
-}) {
-  const diff = useQuery({ ...queries.pullRequestDiff(taskId, repo, number), enabled: active })
+  patch: string | null
+  truncated: boolean
+  error: string | null
+  fetching: boolean
+  onRetry: () => void
+}
+
+const EMPTY_DIFF: ParsedDiff = { files: [], binary: new Set<string>() }
+
+/**
+ * The pull request's unified diff, one collapsible section per file, each with a Viewed mark kept in localStorage for
+ * this head. The host only reads the diff while this tab is open.
+ */
+export function PullRequestCode({
+  repo,
+  number,
+  headRef,
+  patch,
+  truncated,
+  error,
+  fetching,
+  onRetry,
+}: PullRequestCodeProps) {
   const parsed = useMemo(
     () =>
-      diff.data === undefined
-        ? { files: [], binary: new Set<string>() }
-        : parseDiff(diff.data.patch, patchCacheKey(`pr:${repo}#${number}@${headRef}`, diff.data.patch)),
-    [diff.data, repo, number, headRef],
+      patch === null
+        ? EMPTY_DIFF
+        : parseDiff(patch, patchCacheKey(`pr:${repo}#${number}@${headRef}`, patch)),
+    [patch, repo, number, headRef],
   )
   const files = parsed.files
   const storageKey = viewedStorageKey(repo, number, headRef)
@@ -71,23 +84,23 @@ export function PullRequestCode({
 
   return (
     <div className="flex flex-col gap-2">
-      {diff.data?.truncated === true && (
+      {truncated && (
         <p className="text-xs text-warning">
           This diff was shortened because the pull request is too large; the rest is on GitHub.
         </p>
       )}
-      {diff.error && (
+      {error !== null && (
         <Alert className="w-auto">
           <div className="flex items-center gap-2">
-            <span className="min-w-0 flex-1">{errorText(diff.error)}</span>
-            <Button variant="soft" size="sm" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
+            <span className="min-w-0 flex-1">{error}</span>
+            <Button variant="soft" size="sm" onClick={onRetry} disabled={fetching}>
               Retry
             </Button>
           </div>
         </Alert>
       )}
-      {diff.isPending && <p className="text-xs text-muted-foreground">Loading…</p>}
-      {diff.data !== undefined && (
+      {patch === null && error === null && <p className="text-xs text-muted-foreground">Loading…</p>}
+      {patch !== null && (
         <DiffFileList
           files={files}
           binary={parsed.binary}

@@ -16,7 +16,7 @@ import { keys, queries } from "@/api/queries"
 import { harnessById } from "@/lib/harnesses"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
+import { Checkbox } from "@cloudagents/ui/checkbox"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
@@ -27,9 +27,9 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
+import { Textarea } from "@cloudagents/ui/textarea"
 import { useShownModels } from "@/hooks/useShownModels"
 import { EVENT_LABELS, splitList } from "@/lib/automations"
 import { errorText } from "@/util"

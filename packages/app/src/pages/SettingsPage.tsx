@@ -23,7 +23,7 @@ import { Boxes } from "@/components/Boxes"
 import { Connections } from "@/components/Connections"
 import { Fleet } from "@/components/Fleet"
 import { Alert } from "@cloudagents/ui/alert"
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@cloudagents/ui/badge"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
@@ -32,9 +32,9 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { Slider } from "@/components/ui/slider"
-import { Textarea } from "@/components/ui/textarea"
+import { Textarea } from "@cloudagents/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import { SERVER_URL } from "@/config"
 import { useShownModels } from "@/hooks/useShownModels"

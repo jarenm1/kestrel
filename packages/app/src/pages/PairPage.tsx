@@ -10,7 +10,7 @@ import { pairingApproved, pairingConflict, pairingPhase, pairingPollMs } from "@
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
+import { Checkbox } from "@cloudagents/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { errorText, formatTime } from "@/util"
 

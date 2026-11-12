@@ -6,7 +6,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@cloudagents/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 
 export type SidebarTabId = "desktop" | "preview" | "diff" | "files" | "pull-requests"

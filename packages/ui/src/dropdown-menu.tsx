@@ -1,7 +1,7 @@
 import type { ComponentProps } from "react"
 import { Check } from "lucide-react"
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui"
-import { cn } from "@/lib/utils"
+import { cn } from "./cn"
 
 function DropdownMenu(props: ComponentProps<typeof DropdownMenuPrimitive.Root>) {
   return <DropdownMenuPrimitive.Root data-slot="dropdown-menu" {...props} />

@@ -1,11 +1,13 @@
 import { ExternalLink } from "lucide-react"
 import type { PullRequestComment, PullRequestReview } from "@cloudagents/protocol"
-import { Markdown } from "@cloudagents/ui/markdown"
-import { formatAgo } from "@/util"
+import { Markdown } from "../transcript/Markdown"
+import { formatAgo } from "../format"
+import { externalClick, useTranscriptHost } from "../transcript/host"
 import { reviewStateLabel } from "./presentation"
 
 /** One conversation/comment row: actor, time, the diff location when it has one, and its markdown body. */
 export function CommentCard({ comment, now }: { comment: PullRequestComment; now: number }) {
+  const host = useTranscriptHost()
   const kind =
     comment.kind === "conversation" ? "commented" : comment.kind === "review" ? "left a review" : "left a review comment"
   return (
@@ -24,6 +26,7 @@ export function CommentCard({ comment, now }: { comment: PullRequestComment; now
           href={comment.url}
           target="_blank"
           rel="noreferrer"
+          onClick={externalClick(host, comment.url)}
           aria-label="Open comment on GitHub"
           title="Open comment on GitHub"
           className="ml-auto shrink-0 text-muted-foreground transition-colors hover:text-foreground"
@@ -38,6 +41,7 @@ export function CommentCard({ comment, now }: { comment: PullRequestComment; now
 
 /** One submitted review: actor, verdict, time, and its summary when there is one. */
 export function ReviewCard({ review, now }: { review: PullRequestReview; now: number }) {
+  const host = useTranscriptHost()
   return (
     <article className="rounded-xl bg-background/60 p-3 shadow-well">
       <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -48,6 +52,7 @@ export function ReviewCard({ review, now }: { review: PullRequestReview; now: nu
           href={review.url}
           target="_blank"
           rel="noreferrer"
+          onClick={externalClick(host, review.url)}
           aria-label="Open review on GitHub"
           title="Open review on GitHub"
           className="ml-auto shrink-0 text-muted-foreground transition-colors hover:text-foreground"

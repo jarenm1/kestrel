@@ -15,6 +15,7 @@ import { ChatPanel } from "@/components/ChatPanel";
 import { DesktopViewer } from "@/components/DesktopViewer";
 import { DiffView } from "@/components/DiffView";
 import { PreviewViewer } from "@/components/PreviewViewer";
+import { PullRequestsPanel } from "@/components/PullRequestsPanel";
 import { ThreadLinks } from "@/components/ThreadLinks";
 import { ContentPanel, TopBar } from "@/components/TopBar";
 import { Alert } from "@/components/ui/Alert";
@@ -27,9 +28,10 @@ import { repoShortName } from "@/lib/format";
 import { useShell } from "@/nav/navigation";
 import { colors, radius, spacing } from "@/theme";
 
-type TabId = "desktop" | "preview" | "diff";
+type TabId = "desktop" | "preview" | "diff" | "pull-requests";
 
-// Add a panel tab by adding an entry here and a case in PanelBody.
+// Add an always-available panel tab by adding an entry here and a case in PanelBody. The pull requests tab is added
+// below, and only while the thread has one.
 const PANEL_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "desktop", label: "Desktop", icon: Monitor },
   { id: "preview", label: "Preview", icon: AppWindow },
@@ -131,12 +133,26 @@ function ThreadView({ taskId, box, boxName, bottomInset }: ThreadViewProps) {
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined;
 
+  // Pull requests get a fourth tab once the thread has one; a single one names itself, as the desktop's tab does.
+  const onlyPullRequest = threadPullRequests.length === 1 ? threadPullRequests[0] : undefined;
+  const panelTabs: readonly { id: TabId; label: string; icon: LucideIcon }[] =
+    threadPullRequests.length === 0
+      ? PANEL_TABS
+      : [
+          ...PANEL_TABS,
+          {
+            id: "pull-requests",
+            label: onlyPullRequest === undefined ? "Pull requests" : `PR #${onlyPullRequest.number}`,
+            icon: GitPullRequest,
+          },
+        ];
+
   // The web's collapsed panel rail: one button per tab, then the thread's pull requests and GitHub repositories. Those
   // share one button once there are several, so the bar fits a narrow phone whatever the thread checked out. The top
   // bar stays above the open panel, so the links stay reachable while it is open.
   const rail = (
     <>
-      {PANEL_TABS.map((t) => (
+      {panelTabs.map((t) => (
         <Button key={t.id} variant="ghost" size="icon" icon={t.icon} accessibilityLabel={t.label} onPress={() => openTab(t.id)} />
       ))}
       <ThreadLinks pullRequests={pullRequests} checkouts={checkouts} />
@@ -172,7 +188,7 @@ function ThreadView({ taskId, box, boxName, bottomInset }: ThreadViewProps) {
           <Animated.View style={[styles.panel, { bottom: bottomInset + PANEL_INSET }, panelStyle]}>
             <GestureDetector gesture={headerClosePan}>
               <View style={styles.panelHeader}>
-                {PANEL_TABS.map((t) => (
+                {panelTabs.map((t) => (
                   <Button
                     key={t.id}
                     variant={tab === t.id ? "soft" : "ghost"}
@@ -240,6 +256,8 @@ function PanelBody({
       return <PreviewViewer taskId={taskId} port={previewPort} />;
     case "diff":
       return <DiffView taskId={taskId} running={running} />;
+    case "pull-requests":
+      return <PullRequestsPanel taskId={taskId} />;
   }
 }
 

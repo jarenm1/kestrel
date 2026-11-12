@@ -7,6 +7,7 @@ import {
   type ModelProvider,
   type Run,
   type Task,
+  type ThreadPullRequestAction,
 } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
 import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol";
@@ -75,6 +76,13 @@ export const boxKeys = (scope: string) => ({
     activeRunProvider: ModelProvider | undefined,
   ) => ["box-data", scope, "tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["box-data", scope, "tasks", taskId, "diff"] as const,
+  /** The thread's pull request registry, each with GitHub's live view. */
+  pullRequests: (taskId: string) => ["box-data", scope, "tasks", taskId, "pull-requests"] as const,
+  /** Everything about one pull request of the thread, named by its repository and number. */
+  pullRequest: (taskId: string, repo: string, number: number) =>
+    ["box-data", scope, "tasks", taskId, "pull-requests", repo, number] as const,
+  pullRequestDiff: (taskId: string, repo: string, number: number) =>
+    ["box-data", scope, "tasks", taskId, "pull-requests", repo, number, "diff"] as const,
   desktop: (taskId: string) => ["box-data", scope, "tasks", taskId, "desktop"] as const,
 });
 
@@ -164,6 +172,27 @@ export function invalidateRunItems(client: QueryClient, runIds: readonly string[
   }
 }
 
+/**
+ * Sends one pull request action and adopts the thread the box answers with. The list, detail and diff are refetched
+ * because the action changes what GitHub reports; the panel keeps reading the same cache entries.
+ */
+export async function actOnPullRequest(
+  client: QueryClient,
+  api: ApiClient,
+  taskId: string,
+  action: ThreadPullRequestAction
+): Promise<Task> {
+  const scoped = boxKeys(api.boxScope);
+  const task = await api.actOnThreadPullRequest(taskId, action);
+  storeTask(client, task, api.boxScope);
+  await Promise.all([
+    client.invalidateQueries({ queryKey: scoped.pullRequests(taskId), exact: true }),
+    client.invalidateQueries({ queryKey: scoped.pullRequest(taskId, action.repo, action.number) }),
+    client.invalidateQueries({ queryKey: scoped.pullRequestDiff(taskId, action.repo, action.number) }),
+  ]);
+  return task;
+}
+
 export function createQueries(api: ApiClient) {
   const scoped = boxKeys(api.boxScope);
 
@@ -219,6 +248,22 @@ export function createQueries(api: ApiClient) {
         queryKey: scoped.diff(taskId),
         queryFn: () => api.getDiff(taskId),
         refetchInterval: running ? DIFF_POLL_MS : false,
+      }),
+    pullRequests: (taskId: string) =>
+      queryOptions({
+        queryKey: scoped.pullRequests(taskId),
+        queryFn: () => api.getThreadPullRequests(taskId),
+        refetchInterval: 60_000,
+      }),
+    pullRequest: (taskId: string, repo: string, number: number) =>
+      queryOptions({
+        queryKey: scoped.pullRequest(taskId, repo, number),
+        queryFn: () => api.getThreadPullRequest(taskId, repo, number),
+      }),
+    pullRequestDiff: (taskId: string, repo: string, number: number) =>
+      queryOptions({
+        queryKey: scoped.pullRequestDiff(taskId, repo, number),
+        queryFn: () => api.getThreadPullRequestDiff(taskId, repo, number),
       }),
     desktop: (taskId: string) =>
       queryOptions({
