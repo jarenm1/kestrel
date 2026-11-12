@@ -132,6 +132,8 @@ import { NestFleet, type NestOutcome } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
 import { NEST_STANDARD_LIMITS, newSecret, nestLimitsError, publicUrlFor } from "./nest-control"
 import { bumpTurnGeneration, ensureTurnGenerationsTable, turnGeneration } from "./turn-generations"
+import { findProvider } from "./providers"
+import { REFRESH_MARGIN_MS, REFRESH_RETRY_MS, RefreshRefused, oauthClient, refreshGrant, type OAuthRefresh } from "./oauth-tokens"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -400,6 +402,14 @@ export class Hub extends DurableObject<Env> {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (login, provider)
       )`)
+      // Expiring OAuth tokens (GitHub App user tokens) carry how they are renewed; the alarm refreshes each at
+      // `refresh_at`. Rows without a refresh secret never expire or can no longer be renewed.
+      const connectionColumns = sql.exec<{ name: string }>("PRAGMA table_info(connections)").toArray()
+      if (!connectionColumns.some((c) => c.name === "refresh_secret")) {
+        sql.exec("ALTER TABLE connections ADD COLUMN refresh_secret TEXT")
+        sql.exec("ALTER TABLE connections ADD COLUMN refresh_at INTEGER")
+        sql.exec("ALTER TABLE connections ADD COLUMN refresh_expires_at INTEGER")
+      }
       sql.exec(`CREATE TABLE IF NOT EXISTS user_boxes (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
@@ -606,17 +616,83 @@ export class Hub extends DurableObject<Env> {
       .toArray()
   }
 
-  putConnection(login: string, provider: string, secret: string, account: string | null): void {
+  /** Stores a connection's secret; `refresh` renews an expiring OAuth token, and the alarm is pointed at it. */
+  async putConnection(
+    login: string,
+    provider: string,
+    secret: string,
+    account: string | null,
+    refresh: OAuthRefresh | null = null,
+  ): Promise<void> {
     this.ctx.storage.sql.exec(
-      `INSERT INTO connections (login, provider, secret, account, updated_at) VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO connections (login, provider, secret, account, updated_at, refresh_secret, refresh_at, refresh_expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(login, provider) DO UPDATE SET
-         secret = excluded.secret, account = excluded.account, updated_at = excluded.updated_at`,
+         secret = excluded.secret, account = excluded.account, updated_at = excluded.updated_at,
+         refresh_secret = excluded.refresh_secret, refresh_at = excluded.refresh_at,
+         refresh_expires_at = excluded.refresh_expires_at`,
       login,
       provider,
       secret,
       account,
       Date.now(),
+      refresh?.token ?? null,
+      refresh === null ? null : refresh.accessExpiresAt - REFRESH_MARGIN_MS,
+      refresh?.expiresAt ?? null,
     )
+    await this.rearm()
+  }
+
+  /**
+   * Renews every expiring OAuth token whose refresh is due, so readers of `connectionSecrets` always get a live one.
+   * Each row is claimed first by pushing `refresh_at` out by the retry delay: a concurrent alarm skips it, and a
+   * failure worth retrying needs no further write. Every write after the provider call matches the refresh secret it
+   * spent, so a reconnect that landed meanwhile is never overwritten.
+   */
+  private async refreshConnections(now: number): Promise<void> {
+    const sql = this.ctx.storage.sql
+    const due = sql
+      .exec<{ login: string; provider: string; refreshSecret: string; refreshExpiresAt: number }>(
+        `SELECT login, provider, refresh_secret AS refreshSecret, refresh_expires_at AS refreshExpiresAt
+         FROM connections WHERE refresh_secret IS NOT NULL AND refresh_at <= ?`,
+        now,
+      )
+      .toArray()
+    for (const row of due) {
+      const key = [row.login, row.provider, row.refreshSecret] as const
+      const match = "WHERE login = ? AND provider = ? AND refresh_secret = ?"
+      const provider = findProvider(row.provider)
+      const client = provider?.kind === "oauth" ? oauthClient(this.env, provider) : null
+      const drop = (reason: string) => {
+        console.warn(`${row.provider} connection for ${row.login} can no longer be refreshed: ${reason}`)
+        sql.exec(`UPDATE connections SET refresh_secret = NULL, refresh_at = NULL, refresh_expires_at = NULL ${match}`, ...key)
+      }
+      if (row.refreshExpiresAt <= now) {
+        drop("the refresh token expired")
+        continue
+      }
+      sql.exec(`UPDATE connections SET refresh_at = ? ${match}`, now + REFRESH_RETRY_MS, ...key)
+      if (provider?.kind !== "oauth" || client === null) {
+        console.error(`${row.provider} connection for ${row.login} is due a refresh but OAuth is not configured`)
+        continue
+      }
+      try {
+        const grant = await refreshGrant(provider, client, row.refreshSecret, now)
+        const { refresh } = grant
+        sql.exec(
+          `UPDATE connections SET secret = ?, updated_at = ?, refresh_secret = ?, refresh_at = ?, refresh_expires_at = ? ${match}`,
+          grant.accessToken,
+          Date.now(),
+          refresh?.token ?? null,
+          refresh === null ? null : refresh.accessExpiresAt - REFRESH_MARGIN_MS,
+          refresh?.expiresAt ?? null,
+          ...key,
+        )
+      } catch (error) {
+        if (error instanceof RefreshRefused) drop(error.message)
+        else console.error(`refreshing the ${row.provider} connection for ${row.login} failed; retrying`, error)
+      }
+    }
   }
 
   deleteConnection(login: string, provider: string): void {
@@ -1665,6 +1741,8 @@ export class Hub extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const now = Date.now()
     this.pruneFires(now)
+    // First, so the schedules and deliveries below reach boxes with live tokens.
+    await this.refreshConnections(now)
     await this.nest.expire(now)
     const due = this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND next_run_at <= ?`, now)
@@ -1753,8 +1831,8 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
-   * Points the alarm at the earliest pending schedule, activity, fire, or Nest deadline; clears it when none is
-   * pending. A fire that is already running is revisited at its lease deadline, so a crashed start is bounded.
+   * Points the alarm at the earliest pending schedule, activity, fire, token refresh, or Nest deadline; clears it when
+   * none is pending. A fire that is already running is revisited at its lease deadline, so a crashed start is bounded.
    */
   private async rearm(): Promise<void> {
     await this.rearmStorage(this.ctx.storage)
@@ -1780,7 +1858,13 @@ export class Hub extends DurableObject<Env> {
         )
         .toArray()[0]?.at ?? null
     const scheduleAt = row?.at ?? null
-    const deadlines = [scheduleAt, activityAt, fireAt, this.nest.nextDeadline()].filter((at): at is number => at !== null)
+    const refreshAt =
+      storage.sql
+        .exec<{ at: number | null }>("SELECT MIN(refresh_at) AS at FROM connections WHERE refresh_secret IS NOT NULL")
+        .toArray()[0]?.at ?? null
+    const deadlines = [scheduleAt, activityAt, fireAt, refreshAt, this.nest.nextDeadline()].filter(
+      (at): at is number => at !== null,
+    )
     if (deadlines.length === 0) await storage.deleteAlarm()
     else await storage.setAlarm(Math.min(...deadlines))
   }

@@ -1,8 +1,9 @@
 import { ControlPaths } from "@cloudagents/protocol"
 import { findProvider, type OAuthProvider } from "./providers"
-import { UpstreamError, errorResponse, readCookie, safeReturnPath } from "./http"
+import { errorResponse, readCookie, safeReturnPath } from "./http"
 import { hub, isAllowedLogin, type Env } from "./env"
 import type { SessionRecord } from "./hub"
+import { exchangeCode, oauthClient } from "./oauth-tokens"
 
 export const SESSION_COOKIE = "session"
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -37,16 +38,6 @@ const redirect = (location: string, headers: HeadersInit = {}): Response => {
   return new Response(null, { status: 302, headers: h })
 }
 
-/** OAuth client credentials, or null when the provider is not configured on this Worker. */
-const oauthCredentials = (
-  env: Env,
-  provider: OAuthProvider,
-): { clientId: string; clientSecret: string } | null => {
-  const clientId = env[provider.clientIdEnv]
-  const clientSecret = env[provider.clientSecretEnv]
-  return clientId && clientSecret ? { clientId, clientSecret } : null
-}
-
 /** Starts an OAuth flow: stores single-use state, then redirects to the provider's consent page. */
 const beginOAuth = async (
   env: Env,
@@ -55,7 +46,7 @@ const beginOAuth = async (
   provider: OAuthProvider,
   returnTo: string,
 ): Promise<Response> => {
-  const creds = oauthCredentials(env, provider)
+  const creds = oauthClient(env, provider)
   if (!creds) return errorResponse(503, "NotConfigured", `${provider.label} OAuth is not configured`)
   // A native client passes its own one-time nonce to bind the callback to its sign-in. Never overwrite a live state:
   // a colliding caller-supplied nonce is a conflict, not an internal error.
@@ -71,38 +62,11 @@ const beginOAuth = async (
   return redirect(authorize.toString())
 }
 
-const exchangeCode = async (
-  provider: OAuthProvider,
-  creds: { clientId: string; clientSecret: string },
-  code: string,
-  redirectUri: string,
-): Promise<string> => {
-  const res = await fetch(provider.tokenUrl, {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/x-www-form-urlencoded",
-      "user-agent": "kestrel-control-plane",
-    },
-    body: new URLSearchParams({
-      client_id: creds.clientId,
-      client_secret: creds.clientSecret,
-      code,
-      redirect_uri: redirectUri,
-    }),
-  })
-  const body = (await res.json().catch(() => ({}))) as { access_token?: unknown; error?: unknown }
-  if (typeof body.access_token !== "string" || body.access_token.length === 0) {
-    throw new UpstreamError(`${provider.label} token exchange failed: ${String(body.error ?? res.status)}`)
-  }
-  return body.access_token
-}
-
 /** OAuth callback for both sign-in (`kind: login`) and connections (`kind: connect`). */
 const finishOAuth = async (request: Request, env: Env, url: URL, providerId: string): Promise<Response> => {
   const provider = findProvider(providerId)
   if (!provider || provider.kind !== "oauth") return errorResponse(404, "NotFound", `unknown provider ${providerId}`)
-  const creds = oauthCredentials(env, provider)
+  const creds = oauthClient(env, provider)
   if (!creds) return errorResponse(503, "NotConfigured", `${provider.label} OAuth is not configured`)
 
   const code = url.searchParams.get("code")
@@ -116,8 +80,8 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
     return htmlPage(400, "This sign-in link has expired or was already used. Please try again.")
   }
 
-  const token = await exchangeCode(provider, creds, code, `${url.origin}${provider.callbackPath}`)
-  const account = await provider.fetchAccount(token)
+  const grant = await exchangeCode(provider, creds, code, `${url.origin}${provider.callbackPath}`)
+  const account = await provider.fetchAccount(grant.accessToken)
 
   if (row.kind === "login") {
     if (!isAllowedLogin(env, account.login)) return htmlPage(403, "Forbidden: this account is not allowed to use Kestrel.")
@@ -127,7 +91,7 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
     }
     const stub = hub(env)
     await stub.upsertUser({ login: account.login, name: account.name, avatarUrl: account.avatarUrl })
-    await stub.putConnection(account.login, provider.id, token, account.login)
+    await stub.putConnection(account.login, provider.id, grant.accessToken, account.login, grant.refresh)
     const sessionId = randomToken(32)
     await stub.createSession(sessionId, account.login, Date.now() + SESSION_TTL_MS, false)
     const returnTo = row.returnTo.includes("?") ? `${row.returnTo}&state=${encodeURIComponent(state)}` : `${row.returnTo}?state=${encodeURIComponent(state)}`
@@ -142,7 +106,7 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   if ((await hub(env).consumeOAuthState(state, row.revision)) === null) {
     return htmlPage(400, "This sign-in link has expired or was already used. Please try again.")
   }
-  await hub(env).putConnection(login, provider.id, token, account.login)
+  await hub(env).putConnection(login, provider.id, grant.accessToken, account.login, grant.refresh)
   return redirect(row.returnTo)
 }
 
@@ -180,7 +144,7 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     const returnTo = safeReturnPath(url.searchParams.get("return"), "/")
     // Local stacks usually have no GitHub OAuth app. With DEV_SESSION_LOGIN set, the normal sign-in button signs in as
     // the dev user instead of answering NotConfigured.
-    if (oauthCredentials(env, provider) === null && env.DEV_SESSION_LOGIN) {
+    if (oauthClient(env, provider) === null && env.DEV_SESSION_LOGIN) {
       const state = url.searchParams.get("state")
       const q = state === null ? "" : `&state=${encodeURIComponent(state)}`
       return redirect(`/auth/dev-login?return=${encodeURIComponent(returnTo)}${q}`)
