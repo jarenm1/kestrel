@@ -64,10 +64,6 @@
 
         # The sandbox has no /etc/fonts, so the browser gets its font config explicitly.
         sandboxFontsConf = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
-        sandboxFirefox = pkgs.writeShellScriptBin "firefox" ''
-          export FONTCONFIG_FILE=${sandboxFontsConf}
-          exec ${pkgs.firefox}/bin/firefox "$@"
-        '';
         sandboxChromium = pkgs.writeShellScriptBin "chromium" ''
           export FONTCONFIG_FILE=${sandboxFontsConf}
           exec ${pkgs.chromium}/bin/chromium "$@"
@@ -173,8 +169,7 @@
             devin
             util-linux # `script`: Devin CLI reads its sign-in code only from a terminal
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
-            sandboxFirefox # a browser for desktop_launch
-            sandboxChromium # a second one, for Chromium-only pages and DevTools/CDP
+            sandboxChromium # the browser for desktop_launch; Firefox is the `firefox` toolkit
           ];
         };
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
@@ -236,9 +231,11 @@
         # Vinegar is x86_64-linux only; the box is too, in practice.
         toolkits = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           toolkit-blender = mkToolkit "blender" [ pkgs.blender ];
+          toolkit-firefox = mkToolkit "firefox" [ pkgs.firefox ];
           # Roblox Studio through Vinegar (Wine); Vinegar downloads Studio itself on first `vinegar run`.
           # Rojo and Wally sync and package the project from the workspace; Rojo still needs its Studio plugin.
-          toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.rojo pkgs.wally ];
+          # Its sign-in goes through Firefox (see robloxVinegar), so it brings its own.
+          toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.firefox pkgs.rojo pkgs.wally ];
         };
         # Nest crates and the box's dependency tree (packages/host/nix/packages.nix).
         nest = import ./packages/host/nix/packages.nix {
