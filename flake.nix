@@ -64,9 +64,10 @@
 
         # The sandbox has no /etc/fonts, so the browser gets its font config explicitly.
         sandboxFontsConf = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
+        # Chromium ignores GDK_SCALE on X11, so the desktop's HiDPI factor is passed as its device scale.
         sandboxChromium = pkgs.writeShellScriptBin "chromium" ''
           export FONTCONFIG_FILE=${sandboxFontsConf}
-          exec ${pkgs.chromium}/bin/chromium "$@"
+          exec ${pkgs.chromium}/bin/chromium --force-device-scale-factor=''${GDK_SCALE:-1} "$@"
         '';
         # xterm's bitmap fonts don't scale, so it draws DejaVu at the desktop's HiDPI factor (GDK_SCALE, set by the box).
         # Colors and padding follow the app's palette (packages/app/src/styles.css).
@@ -225,7 +226,7 @@
         robloxXdgOpen = pkgs.writeShellScriptBin "xdg-open" ''
           case "$1" in
             roblox-studio:* | roblox-studio-auth:*) exec vinegar "$1" ;;
-            *) exec firefox "$1" ;;
+            *) exec ${pkgs.firefox}/bin/firefox "$1" ;;
           esac
         '';
         # Vinegar is x86_64-linux only; the box is too, in practice.
