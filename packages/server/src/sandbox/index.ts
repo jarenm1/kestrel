@@ -974,16 +974,31 @@ class OutputWindow {
   }
 }
 
+const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
+
+/**
+ * A sandbox command that writes its stdin to `path` (relative to its cwd), making missing parent dirs, and prints the
+ * file's absolute path. Run inside the sandbox, the write reaches only what the agent itself can.
+ */
+export const writeFileCommand = (path: string): string =>
+  `p=${shellQuote(path)}; mkdir -p -- "$(dirname -- "$p")" && cat > "$p" && realpath -- "$p"`
+
 /**
  * Runs a process in its own process group and captures bounded output. A timeout kills the whole group and
  * returns what was printed, flagged `timedOut`. The result is reported once the main process has exited and
  * its pipes drained for a short grace: a backgrounded child that still holds the pipes is not waited for, so
- * its later writes to them fail (redirect its output to keep it running).
+ * its later writes to them fail (redirect its output to keep it running). `stdin`, when given, is written to the
+ * process; either way its stdin is then closed, so a reader sees end of input.
  */
 export const runProcess = (
   file: string,
   args: ReadonlyArray<string>,
-  opts: { readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly timeoutMs?: number },
+  opts: {
+    readonly cwd: string
+    readonly env: Readonly<Record<string, string>>
+    readonly timeoutMs?: number
+    readonly stdin?: Uint8Array
+  },
 ): Effect.Effect<ProcessResult, InternalError> =>
   Effect.async<ProcessResult, InternalError>((resume) => {
     let done = false
@@ -1011,9 +1026,12 @@ export const runProcess = (
         cwd: opts.cwd,
         env: { ...opts.env },
         detached: NEW_PROCESS_GROUP,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       }),
     )
+    // A process that exits without reading all of it fails the write with EPIPE; its exit status reports that.
+    child.stdin.on("error", () => {})
+    child.stdin.end(opts.stdin)
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk))
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
     if (opts.timeoutMs !== undefined) {

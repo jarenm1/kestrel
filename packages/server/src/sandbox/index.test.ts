@@ -13,6 +13,8 @@ import {
   cliBwrapArgs,
   ensureIdentityFiles,
   identityFileContents,
+  runProcess,
+  writeFileCommand,
 } from "."
 
 const base = { workspacePath: "/w", cwd: "/w", mirrorDir: "/m", homeDir: "/h", env: {}, command: "true" }
@@ -238,6 +240,46 @@ describe("cliBwrapArgs", () => {
       expect(masked.stdout).toContain("own-login")
       expect(masked.stdout).toContain("accounts")
       expect(`${masked.stdout}${masked.stderr}`).not.toContain("SECRET")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("writeFileCommand", () => {
+  test.skipIf(Bun.which("bwrap") === null)("writes stdin from inside the sandbox and cannot follow a link out of it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kestrel-write-"))
+    try {
+      const homeDir = join(root, "home")
+      const workspacePath = join(root, "workspace")
+      const mirrorDir = join(root, "mirror")
+      const outside = join(root, "outside")
+      for (const dir of [homeDir, workspacePath, mirrorDir, outside]) mkdirSync(dir, { recursive: true })
+      // The host dir behind this link is not bound into the sandbox.
+      symlinkSync(outside, join(workspacePath, "escape"))
+      const write = (path: string, data: Uint8Array) => {
+        const argv = buildBwrapArgv({
+          level: "basic",
+          workspacePath,
+          cwd: workspacePath,
+          mirrorDir,
+          homeDir,
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          command: writeFileCommand(path),
+        })
+        return Effect.runPromise(runProcess(Bun.which("bwrap") as string, argv.slice(1), { cwd: root, env: {}, stdin: data }))
+      }
+
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 255, 10, 13])
+      const name = `shots/it's a "$HOME" test.png`
+      const written = await write(name, png)
+      expect(written.exitCode).toBe(0)
+      expect(written.stdout.head.trim()).toBe(join(workspacePath, name))
+      expect(new Uint8Array(readFileSync(join(workspacePath, name)))).toEqual(png)
+
+      // Inside, the link leads into the sandbox's own /tmp; the host dir behind it stays untouched.
+      await write("escape/x.png", png)
+      expect(readdirSync(outside)).toEqual([])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
