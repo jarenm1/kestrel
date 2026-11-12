@@ -267,8 +267,8 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
           .min(1)
           .optional()
           .describe(
-            "Also save the screenshot as a PNG file here; relative to the workspace root, parent directories are " +
-              "created. Not with changes",
+            "Also save the screenshot as a PNG file here, inside the workspace: relative to the workspace root, parent " +
+              "directories are created. Not with changes",
           ),
       },
     },

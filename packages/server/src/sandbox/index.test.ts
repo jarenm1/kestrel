@@ -265,7 +265,7 @@ describe("writeFileCommand", () => {
           mirrorDir,
           homeDir,
           env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
-          command: writeFileCommand(path),
+          command: writeFileCommand(workspacePath, path),
         })
         return Effect.runPromise(runProcess(Bun.which("bwrap") as string, argv.slice(1), { cwd: root, env: {}, stdin: data }))
       }
@@ -277,9 +277,30 @@ describe("writeFileCommand", () => {
       expect(written.stdout.head.trim()).toBe(join(workspacePath, name))
       expect(new Uint8Array(readFileSync(join(workspacePath, name)))).toEqual(png)
 
-      // Inside, the link leads into the sandbox's own /tmp; the host dir behind it stays untouched.
-      await write("escape/x.png", png)
+      // Overwriting replaces the file and leaves no temp file beside it.
+      const next = new Uint8Array([1, 2, 3])
+      expect((await write(name, next)).exitCode).toBe(0)
+      expect(new Uint8Array(readFileSync(join(workspacePath, name)))).toEqual(next)
+      expect(readdirSync(join(workspacePath, "shots"))).toEqual([`it's a "$HOME" test.png`])
+
+      // Paths that resolve outside the workspace are refused: the sandbox's own /tmp would vanish with the launch.
+      for (const path of ["/tmp/x.png", "../outside/x.png", "escape/x.png"]) {
+        const refused = await write(path, png)
+        expect(refused.exitCode).not.toBe(0)
+        expect(refused.stderr.head).toContain("not inside the workspace")
+      }
       expect(readdirSync(outside)).toEqual([])
+
+      // A write that fails partway leaves the existing file as it was. The dir is read-only, the file still
+      // writable, so writing in place would have truncated it.
+      const locked = join(workspacePath, "locked")
+      mkdirSync(locked)
+      writeFileSync(join(locked, "before.png"), png)
+      chmodSync(locked, 0o555)
+      expect((await write("locked/before.png", next)).exitCode).not.toBe(0)
+      expect(new Uint8Array(readFileSync(join(locked, "before.png")))).toEqual(png)
+      expect(readdirSync(locked)).toEqual(["before.png"])
+      chmodSync(locked, 0o755)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
