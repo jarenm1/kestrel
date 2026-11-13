@@ -50,6 +50,7 @@ export function describeTrigger(trigger: AutomationTrigger): string {
   if (trigger._tag === "quickAction") return "Runs on the pull requests you pick";
   const parts = [`Pull requests: ${trigger.events.map((e) => EVENT_LABELS[e]).join(", ")}`];
   if (trigger.reviewers?.length) parts.push(`reviewers ${trigger.reviewers.join(", ")}`);
+  if (trigger.authors?.length) parts.push(`by ${trigger.authors.join(", ")}`);
   if (trigger.baseBranches?.length) parts.push(`into ${trigger.baseBranches.join(", ")}`);
   if (trigger.includeDrafts) parts.push("drafts included");
   return parts.join(" · ");

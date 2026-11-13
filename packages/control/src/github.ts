@@ -82,8 +82,9 @@ export const pullRequestEventOf = (hook: typeof PullRequestWebhook.Type): PullRe
 
 /**
  * Reason string when `event` should start `trigger`, or null. Filters: the event must be listed; for
- * review_requested with reviewers set, the requested login must be one of them (case-insensitive); with
- * baseBranches set, the PR must target one of them; drafts only when includeDrafts is true.
+ * review_requested with reviewers set, the requested login must be one of them (case-insensitive); with authors
+ * set, the PR's author must be one of them (case-insensitive); with baseBranches set, the PR must target one of
+ * them; drafts only when includeDrafts is true.
  */
 export const matchGithubTrigger = (trigger: GithubTrigger, event: PullRequestEvent): string | null => {
   const name = `pull_request.${event.action}`
@@ -91,6 +92,10 @@ export const matchGithubTrigger = (trigger: GithubTrigger, event: PullRequestEve
   if (name === "pull_request.review_requested" && trigger.reviewers !== undefined && trigger.reviewers.length > 0) {
     const wanted = trigger.reviewers.map((login) => login.toLowerCase())
     if (event.requestedReviewer === null || !wanted.includes(event.requestedReviewer.toLowerCase())) return null
+  }
+  if (trigger.authors !== undefined && trigger.authors.length > 0) {
+    const wanted = trigger.authors.map((login) => login.toLowerCase())
+    if (!wanted.includes(event.pr.author.toLowerCase())) return null
   }
   if (trigger.baseBranches !== undefined && trigger.baseBranches.length > 0) {
     if (!trigger.baseBranches.includes(event.pr.baseRef)) return null
