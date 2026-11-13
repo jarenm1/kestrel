@@ -37,15 +37,15 @@ import { errorText } from "@/util"
 const TIMEZONES = Intl.supportedValuesOf("timeZone")
 
 export type AutomationDialogTarget =
-  | { readonly kind: "create" }
+  | { readonly kind: "create"; readonly quickAction: boolean }
   | { readonly kind: "edit"; readonly automation: Automation }
 
 type TriggerKind = AutomationTrigger["_tag"]
 
 /**
- * Creates an automation, or edits one's name, prompt, model and trigger settings. Editing keeps the trigger kind and
- * repository; creating also picks them together with the enabled state. The server validates everything and its
- * messages (e.g. a bad cron) show inline.
+ * Creates an automation or quick action, or edits one's name, prompt, model and trigger settings. Editing keeps the
+ * trigger kind and repository; creating an automation also picks them together with the enabled state. The server
+ * validates everything and its messages (e.g. a bad cron) show inline.
  */
 export function AutomationDialog({ target, onClose }: { target: AutomationDialogTarget | null; onClose: () => void }) {
   return (
@@ -81,7 +81,9 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
     sections?.some((section) => section.models.some((candidate) => candidate.id === selected.id)) === true
   const [name, setName] = useState(seed?.name ?? "")
   const [prompt, setPrompt] = useState(seed?.prompt ?? "")
-  const [kind, setKind] = useState<TriggerKind>(seedTrigger?._tag ?? "schedule")
+  const [kind, setKind] = useState<TriggerKind>(
+    seedTrigger?._tag ?? (target.kind === "create" && target.quickAction ? "quickAction" : "schedule"),
+  )
   const [cron, setCron] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.cron : "")
   const [timezone, setTimezone] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.timezone : "")
   const [events, setEvents] = useState<readonly GithubAutomationEvent[]>(
@@ -99,6 +101,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
   /** Throws (shown as the save error) when a GitHub automation has no event picked. */
   function buildTrigger(): AutomationTrigger {
     if (kind === "schedule") return { _tag: "schedule", cron: cron.trim(), timezone: timezone.trim() }
+    if (kind === "quickAction") return { _tag: "quickAction" }
     const [first, ...rest] = events
     if (first === undefined) throw new Error("Pick at least one pull request event.")
     return {
@@ -137,14 +140,24 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
   })
 
   const repoRequired = target.kind === "create" && kind === "github"
-  const triggerReady = kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : events.length > 0
+  const triggerReady =
+    kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : kind === "github" ? events.length > 0 : true
   const canSave = name.trim() !== "" && prompt.trim() !== "" && triggerReady && (!repoRequired || repo !== null)
+  const quickAction = kind === "quickAction"
+  // A quick action without a repository runs on whichever repository the picked pull request is in.
+  const noRepoLabel = quickAction ? "Any repository" : "No repository"
 
   return (
     <>
-      <DialogTitle>{target.kind === "edit" ? "Edit automation" : "New automation"}</DialogTitle>
+      <DialogTitle>
+        {target.kind === "edit" ? "Edit" : "New"} {quickAction ? "quick action" : "automation"}
+      </DialogTitle>
       <DialogDescription>
-        {kind === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
+        {kind === "schedule"
+          ? "Runs on a schedule."
+          : kind === "github"
+            ? "Runs on pull request events."
+            : "Never runs on its own: pick it for pull requests in a thread's Pull requests tab."}
       </DialogDescription>
       <form
         className="flex flex-col gap-4"
@@ -202,7 +215,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
           </DropdownMenu>
         </Field>
 
-        {target.kind === "create" && (
+        {target.kind === "create" && !quickAction && (
           <div className="flex flex-col gap-1.5" role="group" aria-labelledby="automation-trigger">
             <span id="automation-trigger" className="text-xs text-muted-foreground">
               Trigger
@@ -230,12 +243,12 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
 
         <Field label="Repository">
           {target.kind === "edit" ? (
-            <span className="font-mono text-xs text-muted-foreground">{target.automation.repo ?? "No repository"}</span>
+            <span className="font-mono text-xs text-muted-foreground">{target.automation.repo ?? noRepoLabel}</span>
           ) : (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button type="button" variant="secondary" className="justify-between">
-                  {repo ?? (kind === "schedule" ? "No repository" : "Select a repository")}
+                  {repo ?? (kind === "github" ? "Select a repository" : noRepoLabel)}
                   <ChevronDown />
                 </Button>
               </DropdownMenuTrigger>
@@ -244,7 +257,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
                   value={repo ?? ""}
                   onValueChange={(value) => setRepo(value === "" ? null : value)}
                 >
-                  <DropdownMenuRadioItem value="">No repository</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="">{noRepoLabel}</DropdownMenuRadioItem>
                   {repos.data?.map((candidate) => (
                     <DropdownMenuRadioItem key={candidate.fullName} value={candidate.fullName}>
                       {candidate.fullName}
@@ -262,7 +275,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
           )}
         </Field>
 
-        {kind === "schedule" ? (
+        {kind === "schedule" && (
           <>
             <Field label="Cron (minute hour day-of-month month day-of-week)">
               <Input
@@ -286,7 +299,8 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
               </datalist>
             </Field>
           </>
-        ) : (
+        )}
+        {kind === "github" && (
           <>
             <fieldset className="flex flex-col gap-2.5">
               <legend className="mb-1 text-xs text-muted-foreground">Pull request events</legend>
@@ -315,7 +329,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
           </>
         )}
 
-        {target.kind === "create" && (
+        {target.kind === "create" && !quickAction && (
           <label className="flex items-center justify-between gap-3">
             Enabled
             <Switch checked={enabled} onCheckedChange={setEnabled} />

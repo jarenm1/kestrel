@@ -16,7 +16,6 @@ import {
   fetchPullRequest,
   fetchRepository,
   pullRequestHookExists,
-  type PullRequestInfo,
 } from "./github"
 
 const badRequest = (message: string): Response => errorResponse(400, "BadRequest", message)
@@ -142,29 +141,39 @@ const deleteAutomation = async (env: Env, login: string, id: string): Promise<Re
 }
 
 /**
- * "Run now". A GitHub automation needs the pull request to review (fetched with the owner's token so the
- * reason and PR details match what a webhook delivery would produce); a schedule runs as a plain manual run.
+ * "Run now". A GitHub automation or quick action needs the pull request to work on (fetched with the owner's token so
+ * the reason and PR details match what a webhook delivery would produce); a schedule runs as a plain manual run. A
+ * quick action without a repository runs on the pull request's repository, named in the body.
  */
 const triggerAutomation = async (request: Request, env: Env, login: string, id: string): Promise<Response> => {
   const current = await hub(env).automation(login, id)
   if (current === null) return notFound()
   const body = await readBody(request, TriggerAutomationBody, true)
   if (body instanceof Response) return body
-  let reason = "manual"
-  let pr: PullRequestInfo | null = null
-  if (current.trigger._tag === "github") {
-    if (body.pullRequest === undefined) return badRequest("pullRequest is required for GitHub automations")
-    const slug = current.repo
-    if (slug === null) return badRequest("GitHub triggers need a GitHub repository")
-    const token = await githubToken(env, login, "connect GitHub to use GitHub triggers")
-    if (token instanceof Response) return token
-    pr = await fetchPullRequest(token, slug, body.pullRequest)
-    if (pr === null) return errorResponse(404, "NotFound", `pull request #${body.pullRequest} not found`)
-    reason = `manual #${body.pullRequest}`
-  } else if (body.pullRequest !== undefined) {
-    return badRequest("pullRequest only applies to GitHub automations")
+  if (current.trigger._tag === "schedule") {
+    if (body.pullRequest !== undefined || body.repo !== undefined) {
+      return badRequest("pullRequest and repo only apply to pull request automations")
+    }
+    const run = await hub(env).fireAutomation(login, id, "manual", null)
+    return run === null ? notFound() : json(run, 201)
   }
-  const run = await hub(env).fireAutomation(login, id, reason, pr)
+  const quickAction = current.trigger._tag === "quickAction"
+  if (body.pullRequest === undefined) {
+    return badRequest(`pullRequest is required for ${quickAction ? "quick actions" : "GitHub automations"}`)
+  }
+  if (current.repo !== null && body.repo !== undefined && current.repo.toLowerCase() !== body.repo.toLowerCase()) {
+    return badRequest(`this automation only runs on ${current.repo}`)
+  }
+  const slug = current.repo ?? (quickAction ? body.repo : undefined)
+  if (slug === undefined) {
+    return badRequest(quickAction ? "repo is required for quick actions without a repository" : "GitHub triggers need a GitHub repository")
+  }
+  const token = await githubToken(env, login, "connect GitHub to run automations on pull requests")
+  if (token instanceof Response) return token
+  const pr = await fetchPullRequest(token, slug, body.pullRequest)
+  if (pr === null) return errorResponse(404, "NotFound", `pull request ${slug}#${body.pullRequest} not found`)
+  const reason = quickAction ? `quick action ${slug}#${body.pullRequest}` : `manual #${body.pullRequest}`
+  const run = await hub(env).fireAutomation(login, id, reason, { repo: slug, pr })
   return run === null ? notFound() : json(run, 201)
 }
 

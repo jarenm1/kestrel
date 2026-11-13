@@ -68,7 +68,13 @@ import {
   type NestLimits,
 } from "@cloudagents/protocol"
 import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
-import { fetchPullRequest, matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
+import {
+  fetchPullRequest,
+  matchGithubTrigger,
+  type PullRequestEvent,
+  type PullRequestInfo,
+  type PullRequestTarget,
+} from "./github"
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
@@ -271,6 +277,9 @@ const PAIRING_COLUMNS = "id, code, name, url, expires_at AS expiresAt, box_id AS
 const MAX_LIVE_PAIRINGS = 500
 
 const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownSync(AutomationTrigger)(JSON.parse(json))
+
+/** An `automation_fires.pr_json` value. `repo` is absent on fires stored before it was recorded. */
+type StoredFirePullRequest = PullRequestInfo & { readonly repo?: string }
 
 /** Next fire (epoch ms) after `now` for an enabled schedule; null for everything else. */
 const nextRunMs = (trigger: AutomationTrigger, enabled: boolean, now: number): number | null =>
@@ -1622,11 +1631,11 @@ export class Hub extends DurableObject<Env> {
     login: string,
     id: string,
     reason: string,
-    pr: PullRequestInfo | null,
+    target: PullRequestTarget | null,
   ): Promise<AutomationRun | null> {
     const row = this.automationRow(login, id)
     if (row === null) return null
-    const fireId = this.claimFire(row, `manual:${crypto.randomUUID()}`, reason, pr)
+    const fireId = this.claimFire(row, `manual:${crypto.randomUUID()}`, reason, target)
     // Durable claim first, then its lease alarm, then the external effect.
     await this.rearm()
     const run = await this.runFire(fireId)
@@ -1657,7 +1666,7 @@ export class Hub extends DurableObject<Env> {
         const reason = matchGithubTrigger(trigger, event)
         if (reason === null) continue
         matched++
-        this.claimFire(row, `delivery:${deliveryId}`, reason, event.pr)
+        this.claimFire(row, `delivery:${deliveryId}`, reason, { repo: event.repo, pr: event.pr })
       }
       return matched
     })
@@ -1902,8 +1911,11 @@ export class Hub extends DurableObject<Env> {
     else await storage.setAlarm(Math.min(...deadlines))
   }
 
-  /** Writes a fire intent under its stable key, or returns the existing intent's id when it was already claimed. */
-  private claimFire(row: AutomationRow, fireKey: string, reason: string, pr: PullRequestInfo | null): string {
+  /**
+   * Writes a fire intent under its stable key, or returns the existing intent's id when it was already claimed. The
+   * pull request is stored with its repository, which a quick action without its own repository runs on.
+   */
+  private claimFire(row: AutomationRow, fireKey: string, reason: string, target: PullRequestTarget | null): string {
     const sql = this.ctx.storage.sql
     sql.exec(
       `INSERT INTO automation_fires (id, automation_id, fire_key, reason, pr_json, claimed_at)
@@ -1913,7 +1925,7 @@ export class Hub extends DurableObject<Env> {
       row.id,
       fireKey,
       reason,
-      pr === null ? null : JSON.stringify(pr),
+      target === null ? null : JSON.stringify({ ...target.pr, repo: target.repo } satisfies StoredFirePullRequest),
       Date.now(),
     )
     const stored = sql
@@ -1982,18 +1994,20 @@ export class Hub extends DurableObject<Env> {
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE id = ?`, fire.automationId)
       .toArray()[0]
     if (row === undefined) return this.finishFire(fire, "failed", null, "automation no longer exists")
-    const pr = fire.prJson === null ? null : (JSON.parse(fire.prJson) as PullRequestInfo)
+    // Fires stored before the repository was recorded with the pull request omit it; their automation names one.
+    const pr = fire.prJson === null ? null : (JSON.parse(fire.prJson) as StoredFirePullRequest)
+    const repo = row.repo ?? pr?.repo ?? null
     const now = Date.now()
     const trigger = decodeTrigger(row.triggerJson)
     const timeZone = trigger._tag === "schedule" ? trigger.timezone : "UTC"
     const title = pr === null ? `${row.name} · ${localDate(now, timeZone)}` : `${row.name} · PR #${pr.number}`
-    const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason: fire.reason, repo: row.repo, pr })
+    const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason: fire.reason, repo, pr })
     // A PR run checks the repository out at the PR head; the base branch stays the diff base. It stays detached: a push
     // to the PR's branch would fire the automation again.
     const checkout =
-      row.repo === null
+      repo === null
         ? {}
-        : { checkout: { repo: row.repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number, detached: true }) } }
+        : { checkout: { repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number, detached: true }) } }
     const outcome = await this.startTask(row.login, { title, ...checkout }, prompt, row.model)
     return this.finishFire(fire, outcome.error === null ? "started" : "failed", outcome.taskId, outcome.error)
   }

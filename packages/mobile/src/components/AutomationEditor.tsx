@@ -40,7 +40,7 @@ export type AutomationEditorTarget =
   | { readonly kind: "create" }
   | { readonly kind: "edit"; readonly automation: Automation };
 
-type TriggerKind = "schedule" | "github";
+type TriggerKind = AutomationTrigger["_tag"];
 
 /**
  * Creates or edits an automation with the web dialog's fields and validation. Edit keeps the trigger kind and repo;
@@ -99,6 +99,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   /** Throws (shown as the save error) when a GitHub automation has no event picked. */
   function buildTrigger(): AutomationTrigger {
     if (kind === "schedule") return { _tag: "schedule", cron: cron.trim(), timezone: timezone.trim() };
+    if (kind === "quickAction") return { _tag: "quickAction" };
     const [first, ...rest] = events;
     if (first === undefined) throw new Error("Pick at least one pull request event.");
     return {
@@ -142,15 +143,25 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   }
 
   const repoRequired = target.kind === "create" && kind === "github";
-  const triggerReady = kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : events.length > 0;
+  const triggerReady =
+    kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : kind === "github" ? events.length > 0 : true;
   const canSave = name.trim() !== "" && prompt.trim() !== "" && triggerReady && (!repoRequired || repo !== null);
+  // A quick action without a repository runs on whichever repository the picked pull request is in.
+  const noRepoLabel = kind === "quickAction" ? "Any repository" : "No repository";
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScreenHeader title={target.kind === "edit" ? "Edit automation" : "New automation"} onBack={onClose} />
+      <ScreenHeader
+        title={`${target.kind === "edit" ? "Edit" : "New"} ${kind === "quickAction" ? "quick action" : "automation"}`}
+        onBack={onClose}
+      />
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.description}>
-          {kind === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
+          {kind === "schedule"
+            ? "Runs on a schedule."
+            : kind === "github"
+              ? "Runs on pull request events."
+              : "Never runs on its own: pick it for pull requests in a thread's pull requests."}
         </Text>
 
         <Field label="Name">
@@ -174,17 +185,18 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
             <View style={styles.segmented}>
               <Segment label="Schedule" selected={kind === "schedule"} onPress={() => setKind("schedule")} />
               <Segment label="Pull requests" selected={kind === "github"} onPress={() => setKind("github")} />
+              <Segment label="Quick action" selected={kind === "quickAction"} onPress={() => setKind("quickAction")} />
             </View>
           </Field>
         ) : null}
 
         <Field label="Repository">
           {target.kind === "edit" ? (
-            <Text style={styles.readonly}>{target.automation.repo ?? "No repository"}</Text>
+            <Text style={styles.readonly}>{target.automation.repo ?? noRepoLabel}</Text>
           ) : (
             <Pressable style={styles.select} onPress={() => setPickingRepo(true)} accessibilityRole="button">
               <Text style={[styles.selectText, repo === null && styles.placeholder]}>
-                {repo ?? (kind === "schedule" ? "No repository" : "Select a repository")}
+                {repo ?? (kind === "github" ? "Select a repository" : noRepoLabel)}
               </Text>
               <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
             </Pressable>
@@ -213,7 +225,8 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               />
             </Field>
           </>
-        ) : (
+        ) : null}
+        {kind === "github" ? (
           <>
             <Field label="Pull request events">
               {GithubAutomationEvent.literals.map((event) => {
@@ -260,9 +273,9 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               />
             </View>
           </>
-        )}
+        ) : null}
 
-        {target.kind === "create" ? (
+        {target.kind === "create" && kind !== "quickAction" ? (
           <View style={styles.switchRow}>
             <Text style={styles.switchLabel}>Enabled</Text>
             <Switch
@@ -287,7 +300,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
       <RepoPicker
         visible={pickingRepo}
         selected={repo}
-        allowNone={kind === "schedule"}
+        allowNone={kind !== "github"}
         onSelect={(picked) => {
           setRepo(picked);
           setPickingRepo(false);

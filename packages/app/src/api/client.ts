@@ -4,6 +4,7 @@ import {
   ApprovePairingBody,
   Attachment,
   Automation,
+  AutomationRun,
   BOX_API,
   BOX_TOKEN_QUERY,
   BoxCapabilities,
@@ -60,6 +61,7 @@ import {
   ThreadPullRequests,
   ThreadSettings,
   ToolFailureList,
+  type TriggerAutomationBody,
   UpdateAutomationBody,
   UpdateBoxBody,
   UpdateFleetBoxBody,
@@ -711,6 +713,9 @@ export const api = {
     run(request(Automation, "PATCH", ControlPaths.automation(id), body)),
   deleteAutomation: (id: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.automation(id)))),
+  /** "Run now": starts one run; a quick action names the pull request (and, without its own repository, its repo). */
+  triggerAutomation: (id: string, body: TriggerAutomationBody) =>
+    run(request(AutomationRun, "POST", ControlPaths.automationTrigger(id), body)),
 
   /** The user's boxes; reading them also makes the active one the target of box calls. */
   boxes: loadBoxes,

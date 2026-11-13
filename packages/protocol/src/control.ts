@@ -739,6 +739,9 @@ export type GithubAutomationEvent = typeof GithubAutomationEvent.Type
  *   `pull_request.review_requested` by the requested reviewer's login (case-insensitive); `baseBranches` keeps
  *   only PRs targeting those branches; `includeDrafts` (default false) also fires on draft PRs. An absent or empty
  *   list means no filter.
+ * - quickAction: never fires on its own. The user runs it on pull requests they pick (one or several at once); each
+ *   run checks out its pull request. With a `repo` it is offered only for that repository's pull requests, without
+ *   one for any. `enabled` has no effect on it.
  */
 export const AutomationTrigger = Schema.Union(
   Schema.Struct({
@@ -753,6 +756,9 @@ export const AutomationTrigger = Schema.Union(
     baseBranches: Schema.optional(Schema.Array(Schema.String)),
     includeDrafts: Schema.optional(Schema.Boolean),
   }),
+  Schema.Struct({
+    _tag: Schema.Literal("quickAction"),
+  }),
 )
 export type AutomationTrigger = typeof AutomationTrigger.Type
 
@@ -761,7 +767,8 @@ export const Automation = Schema.Struct({
   name: Schema.String,
   /**
    * GitHub "owner/name" the automation works on, or null for one that starts a thread with no repository.
-   * Its threads start with this repository checked out (at the pull request head for github triggers).
+   * Its threads start with this repository checked out (at the pull request head for github triggers). A quick action
+   * with null runs on any repository's pull requests, checking out the pull request's own repository.
    */
   repo: Schema.NullOr(Schema.String),
   prompt: Schema.String,
@@ -793,7 +800,10 @@ export type AutomationShare = typeof AutomationShare.Type
 
 export const CreateAutomationBody = Schema.Struct({
   name: Schema.String.pipe(Schema.minLength(1)),
-  /** GitHub "owner/name" the owner's GitHub connection can read. Required for github triggers, optional for schedules. */
+  /**
+   * GitHub "owner/name" the owner's GitHub connection can read. Required for github triggers, optional for schedules
+   * and quick actions.
+   */
   repo: Schema.optional(GithubRepoSlug),
   prompt: Schema.String.pipe(Schema.minLength(1)),
   model: Schema.optional(Schema.NullOr(AgentModel)),
@@ -820,7 +830,7 @@ export const AutomationRun = Schema.Struct({
   id: Schema.String,
   automationId: Schema.String,
   firedAt: Schema.String, // ISO-8601
-  /** "schedule", "manual", "manual #12", or the webhook event, e.g. "pull_request.opened #12". */
+  /** "schedule", "manual", "manual #12", "quick action acme/app#12", or the webhook event, e.g. "pull_request.opened #12". */
   reason: Schema.String,
   status: Schema.Literal("started", "failed"),
   taskId: Schema.NullOr(Schema.String),
@@ -828,8 +838,13 @@ export const AutomationRun = Schema.Struct({
 })
 export type AutomationRun = typeof AutomationRun.Type
 
-/** Manual "run now". `pullRequest` is required for github automations and rejected for schedules. */
+/**
+ * Manual "run now". `pullRequest` is required for github automations and quick actions, and rejected for schedules.
+ * `repo` names the pull request's repository; a quick action without a repository needs it, and anywhere else it must
+ * match the automation's repository when given.
+ */
 export const TriggerAutomationBody = Schema.Struct({
   pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
+  repo: Schema.optional(GithubRepoSlug),
 })
 export type TriggerAutomationBody = typeof TriggerAutomationBody.Type

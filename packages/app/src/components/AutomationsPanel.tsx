@@ -37,8 +37,30 @@ export function AutomationsPanel() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.automations }),
   })
 
-  const rows = automations.data ?? []
+  const all = automations.data ?? []
+  const scheduled = all.filter((automation) => automation.trigger._tag !== "quickAction")
+  const quickActions = all.filter((automation) => automation.trigger._tag === "quickAction")
   const error = automations.error ?? toggle.error ?? remove.error
+
+  const rowList = (rows: readonly Automation[]) => (
+    <Card className="py-0">
+      <CardContent className="divide-y divide-white/[0.04] px-0">
+        {rows.map((automation) => (
+          <AutomationRow
+            key={automation.id}
+            automation={automation}
+            toggling={toggle.isPending && toggle.variables?.id === automation.id}
+            toggleDisabled={onUserBox}
+            removing={remove.isPending && remove.variables === automation.id}
+            onEdit={() => setDialog({ kind: "edit", automation })}
+            onShare={() => setSharing(automation)}
+            onToggle={(enabled) => toggle.mutate({ id: automation.id, enabled })}
+            onRemove={() => remove.mutate(automation.id)}
+          />
+        ))}
+      </CardContent>
+    </Card>
+  )
 
   return (
     <>
@@ -52,7 +74,7 @@ export function AutomationsPanel() {
         <Button
           disabled={onUserBox}
           title={onUserBox ? "Switch to Kestrel's box to create automations." : undefined}
-          onClick={() => setDialog({ kind: "create" })}
+          onClick={() => setDialog({ kind: "create", quickAction: false })}
         >
           <Plus />
           New automation
@@ -67,7 +89,7 @@ export function AutomationsPanel() {
       )}
       {automations.isPending && <p className="text-muted-foreground">Loading…</p>}
 
-      {automations.data && rows.length === 0 && (
+      {automations.data && scheduled.length === 0 && (
         <Card>
           <CardContent className="items-center gap-2 py-10 text-center text-muted-foreground">
             <p className="font-medium text-foreground">No automations yet.</p>
@@ -79,25 +101,32 @@ export function AutomationsPanel() {
         </Card>
       )}
 
-      {rows.length > 0 && (
-        <Card className="py-0">
-          <CardContent className="divide-y divide-white/[0.04] px-0">
-            {rows.map((automation) => (
-              <AutomationRow
-                key={automation.id}
-                automation={automation}
-                toggling={toggle.isPending && toggle.variables?.id === automation.id}
-                toggleDisabled={onUserBox}
-                removing={remove.isPending && remove.variables === automation.id}
-                onEdit={() => setDialog({ kind: "edit", automation })}
-                onShare={() => setSharing(automation)}
-                onToggle={(enabled) => toggle.mutate({ id: automation.id, enabled })}
-                onRemove={() => remove.mutate(automation.id)}
-              />
-            ))}
+      {scheduled.length > 0 && rowList(scheduled)}
+
+      <div className="mt-4 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">Quick actions</h2>
+          <p className="text-muted-foreground">
+            Prompts you run on pull requests yourself. They never run on their own: in a thread's Pull requests tab,
+            hover a pull request and pick one, or select several to run it on each.
+          </p>
+        </div>
+        <Button variant="secondary" onClick={() => setDialog({ kind: "create", quickAction: true })}>
+          <Plus />
+          New quick action
+        </Button>
+      </div>
+
+      {automations.data && quickActions.length === 0 && (
+        <Card>
+          <CardContent className="items-center gap-2 py-10 text-center text-muted-foreground">
+            <p className="font-medium text-foreground">No quick actions yet.</p>
+            <p>For example “Review this pull request and post your findings”, for any repository.</p>
           </CardContent>
         </Card>
       )}
+
+      {quickActions.length > 0 && rowList(quickActions)}
 
       <AutomationDialog target={dialog} onClose={() => setDialog(null)} />
       {sharing && <ShareAutomationDialog automation={sharing} onClose={() => setSharing(null)} />}
@@ -125,6 +154,8 @@ function AutomationRow({
   onRemove: () => void
 }) {
   const [confirming, setConfirming] = useState(false)
+  // A quick action only runs when picked, so it has no enabled state to show or switch.
+  const quickAction = automation.trigger._tag === "quickAction"
 
   return (
     <div className="flex flex-col gap-2.5 px-5 py-4">
@@ -132,21 +163,25 @@ function AutomationRow({
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex min-w-0 items-center gap-2">
             <span className="truncate font-medium">{automation.name}</span>
-            <Badge variant={automation.enabled ? "success" : "neutral"}>
-              {automation.enabled ? "enabled" : "disabled"}
-            </Badge>
+            {!quickAction && (
+              <Badge variant={automation.enabled ? "success" : "neutral"}>
+                {automation.enabled ? "enabled" : "disabled"}
+              </Badge>
+            )}
             <span className="truncate font-mono text-xs text-muted-foreground">
-              {automation.repo ?? "No repository"}
+              {automation.repo ?? (quickAction ? "Any repository" : "No repository")}
             </span>
           </div>
           <span className="text-xs text-muted-foreground">{describeTrigger(automation.trigger)}</span>
         </div>
-        <Switch
-          aria-label={`Enabled: ${automation.name}`}
-          checked={automation.enabled}
-          disabled={toggling || toggleDisabled}
-          onCheckedChange={onToggle}
-        />
+        {!quickAction && (
+          <Switch
+            aria-label={`Enabled: ${automation.name}`}
+            checked={automation.enabled}
+            disabled={toggling || toggleDisabled}
+            onCheckedChange={onToggle}
+          />
+        )}
       </div>
 
       <p className="line-clamp-2 text-sm text-muted-foreground">{promptPreview(automation.prompt)}</p>

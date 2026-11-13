@@ -44,10 +44,14 @@ const triggerSchema = z.union([
     baseBranches: z.array(z.string()).optional().describe("Only pull requests into one of these branches"),
     includeDrafts: z.boolean().optional().describe("Also run for draft pull requests (default false)"),
   }),
+  z.object({
+    _tag: z.literal("quickAction"),
+  }),
 ])
 
 const describeTrigger = (trigger: AutomationTrigger): string => {
   if (trigger._tag === "schedule") return `schedule "${trigger.cron}" ${trigger.timezone}`
+  if (trigger._tag === "quickAction") return "quick action (run by the user on pull requests they pick)"
   const parts = [`on ${trigger.events.join(", ")}`]
   if (trigger.reviewers !== undefined) parts.push(`reviewers ${trigger.reviewers.join(", ")}`)
   if (trigger.baseBranches !== undefined) parts.push(`base ${trigger.baseBranches.join(", ")}`)
@@ -150,6 +154,8 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
         "Create an automation for this thread's owner. Each run starts a new thread with the prompt, checking out `repo` " +
         "when one is given. A schedule trigger fires on a five-field cron in an IANA time zone. A github trigger fires on " +
         "pull request events in `repo` and needs the owner's GitHub connection, so it cannot be enabled without one. " +
+        "A quickAction trigger never fires on its own: the user runs it on pull requests they pick in the app, each run " +
+        "checking out its pull request; with `repo` it is offered only for that repository's pull requests. " +
         "Pass enabled: false to create it paused.",
       inputSchema: {
         name: z.string().min(1).describe("Short name shown in the app"),
