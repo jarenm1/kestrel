@@ -60,7 +60,7 @@ import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, commentMismatch, type ApiRequest, type ApiResponse, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, writeFileCommand, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
-import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
+import { type Installed, type ToolkitName, installNixPackage, installToolkit, shadowedExes } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
 import { AgentHarness, agentCwd, type AgentChoice, type RunStart } from "./harness"
@@ -315,6 +315,9 @@ export class AskError extends Data.TaggedError("AskError")<{ readonly message: s
 /** How a question's wait ended: the user's reply, or the run ended first. */
 type AskOutcome = { readonly _tag: "answered"; readonly text: string } | { readonly _tag: "ended" }
 
+/** An install, plus its executables that the sandbox's own PATH shadows, so they do not run. */
+export type InstalledOnPath = Installed & { readonly shadowed: ReadonlyArray<string> }
+
 export interface CoreShape {
   readonly health: () => Effect.Effect<void>
   /** The signed-in user's text-generation preferences on this box. */
@@ -498,7 +501,9 @@ export interface CoreShape {
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
-  readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
+  readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<InstalledOnPath, NotFound | InternalError>
+  /** Used by the MCP handler (`nix_install`, only with a flake): installs a nixpkgs package as toolkitInstall does a toolkit. */
+  readonly nixPackageInstall: (taskId: string, attr: string) => Effect.Effect<InstalledOnPath, NotFound | InternalError>
   /**
    * Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking
    * again returns it. `path` is the checkout's absolute directory, the same inside the sandbox. `instructionFiles`
@@ -900,6 +905,12 @@ export const CoreLive = Layer.effect(
         state.tasks.find((t) => t.id === taskId),
         () => new NotFound({ message: `task ${taskId} not found` }),
       )
+
+    // Sandboxed launches search the toolchain (strict) or the host's PATH before the toolkit bin dir.
+    const withShadowed = (installed: Installed): InstalledOnPath => ({
+      ...installed,
+      shadowed: shadowedExes(installed.exes, config.sandboxPath ?? process.env.PATH ?? ""),
+    })
 
     const requireTask = (taskId: string): Effect.Effect<Task, NotFound> =>
       Effect.flatMap(store.read, (state) => Either.match(findTask(state, taskId), {
@@ -3103,7 +3114,15 @@ export const CoreLive = Layer.effect(
           yield* requireTask(taskId)
           const flake = config.toolkitsFlake
           if (flake === null) return yield* Effect.fail(new InternalError({ message: "toolkits need CLOUDAGENTS_TOOLKITS_FLAKE" }))
-          return yield* installToolkit(flake, join(config.homesDir, taskId), name)
+          return yield* Effect.map(installToolkit(flake, join(config.homesDir, taskId), name), withShadowed)
+        }),
+
+      nixPackageInstall: (taskId, attr) =>
+        Effect.gen(function* () {
+          yield* requireTask(taskId)
+          const flake = config.toolkitsFlake
+          if (flake === null) return yield* Effect.fail(new InternalError({ message: "nix packages need CLOUDAGENTS_TOOLKITS_FLAKE" }))
+          return yield* Effect.map(installNixPackage(flake, join(config.homesDir, taskId), attr), withShadowed)
         }),
 
       checkout: (taskId, input) =>

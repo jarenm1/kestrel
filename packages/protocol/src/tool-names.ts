@@ -14,6 +14,7 @@ const KESTREL_TOOLS: Readonly<Record<string, string>> = {
   repo_checkout: "Check out repository",
   workspace_exec: "Run workspace command",
   toolkit_install: "Install desktop app",
+  nix_install: "Install Nix package",
   preview_open: "Open app preview",
   task_report: "Report progress",
   task_ask: "Ask you a question",
