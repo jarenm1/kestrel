@@ -771,7 +771,10 @@ export const CheckoutRequest = Schema.Struct({
    * stays the pull request's base; the checkout's diff is against the head it started at.
    */
   pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
-  /** With `pullRequest`: start at its head on a new thread branch, unlinked, so nothing the run pushes can move it. */
+  /**
+   * With `pullRequest`: start at its head on a new thread branch that pushes cannot move it. The pull request is
+   * still recorded on the thread, but the checkout is not linked to it.
+   */
   detached: Schema.optional(Schema.Boolean),
 })
 export type CheckoutRequest = typeof CheckoutRequest.Type

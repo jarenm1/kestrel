@@ -360,17 +360,23 @@ describe("repo_checkout with a pull request", () => {
     expect(writes).toEqual([])
   })
 
-  test("detached starts a thread branch at the head, unlinked, as automations ask", async () => {
+  test("detached starts a thread branch at the head and records the pull request unlinked, as automations ask", async () => {
     const root = await newRoot()
     const { origin } = await makeOrigin(root, "topic")
     const prHead = git(origin, ["rev-parse", "refs/pull/7/head"])
-    await withCore(prStatus({}), origin, root, (core, threadDir) =>
+    await withCore(prStatus({}), origin, root, (core, threadDir, store) =>
       Effect.gen(function* () {
         const { checkout, pullRequest, note } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7, detached: true } as never)
         expect(checkout.branch).toStartWith("cloudagents/")
-        expect(pullRequest).toBeUndefined()
+        // The thread owns the pull request, but the checkout's pushes do not update it.
+        expect(pullRequest?.number).toBe(7)
+        expect(pullRequest?.source).toBe("linked")
+        expect(pullRequest?.checkoutId).toBeUndefined()
+        expect(pullRequest?.branch).toBeUndefined()
         expect(note).toBeNull()
         expect(git(join(threadDir, checkout.dir), ["rev-parse", "HEAD"])).toBe(prHead)
+        const task = yield* store.read.pipe(Effect.map((s) => s.tasks.find((t) => t.id === "t1")))
+        expect(task?.pullRequests?.map((pr) => `${pr.repo}#${pr.number}`)).toEqual([`${REPO}#7`])
       }),
     )
   })
