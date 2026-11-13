@@ -11,7 +11,7 @@ import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { GitHub } from "../github/api"
 import { AgentHarness, type RunStart, type SteerResult } from "./harness"
-import { EventHub, EventHubLive } from "./events"
+import { EventHub, EventHubLive, type EventHubShape } from "./events"
 import { CoreLive, CoreService, type CoreShape } from "./service"
 import { StateLive, StateStore, type StoreShape } from "./state"
 import { WorkspaceService } from "./workspace"
@@ -30,6 +30,7 @@ const withCore = async (
     config: ServerConfig
     harness: HarnessState
     events: ServerEvent[]
+    hub: EventHubShape
   }) => Effect.Effect<void, unknown>,
 ): Promise<void> => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-pending-"))
@@ -73,7 +74,7 @@ const withCore = async (
           events.push(event)
         })
       })
-      yield* body({ store, core, config, harness, events })
+      yield* body({ store, core, config, harness, events, hub })
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))))
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -262,5 +263,65 @@ test("a resumed run's delta prompt leaves held messages out too", () =>
       expect(resume?.sessionId).toBe("session-1")
       expect(resume?.prompt).toContain("continue")
       expect(resume?.prompt).not.toContain("never sent to the agent")
+    }),
+  ))
+
+/** Settles `runId` with `status` and announces it, as the harness does when a run ends. */
+const settle = (store: StoreShape, hub: EventHubShape, runId: string, status: Run["status"]) =>
+  Effect.gen(function* () {
+    const settled = yield* store.update((s) => {
+      const found = s.runs.find((r) => r.id === runId)!
+      found.status = status
+      found.endedAt = new Date().toISOString()
+      return Either.right({ ...found })
+    })
+    hub.publish({ _tag: "run.updated", run: settled })
+  })
+
+test("a run that finishes its turn sends what it held as the thread's next run, on the run's thinking level", () =>
+  withCore(({ store, hub, harness, events }) =>
+    Effect.gen(function* () {
+      yield* store.update((s) => {
+        s.tasks.push(task("task", "running"))
+        s.runs.push({ ...run("run", "task", "running"), effort: "high" })
+        s.messages.push(
+          userMessage("h1", "task", "run", "first part", { pending: "held", createdAt: new Date(Date.UTC(2026, 0, 1, 0, 1, 1)).toISOString() }),
+          userMessage("h2", "task", "run", "second part", { pending: "held", createdAt: new Date(Date.UTC(2026, 0, 1, 0, 1, 2)).toISOString() }),
+        )
+        return Either.right(undefined)
+      })
+      yield* settle(store, hub, "run", "succeeded")
+      for (let i = 0; i < 100 && harness.spawned.length === 0; i++) yield* Effect.sleep("10 millis")
+      expect(harness.spawned).toHaveLength(1)
+      expect(harness.spawned[0]!.fresh).toContain("first part\n\nsecond part")
+      const state = yield* store.read
+      expect(state.messages.some((m) => m.pending !== undefined)).toBe(false)
+      expect(state.runs.at(-1)).toMatchObject({ status: "running", effort: "high", prompt: "first part\n\nsecond part" })
+      expect(removedIds(events)).toEqual(["h1", "h2"])
+    }),
+  ))
+
+test("held messages of a stopped run, or with an earlier run's still waiting, stay for the user", () =>
+  withCore(({ store, hub, harness }) =>
+    Effect.gen(function* () {
+      yield* store.update((s) => {
+        s.tasks.push(task("task", "running"))
+        s.runs.push(run("stopped", "task", "running", 0))
+        s.messages.push(userMessage("h1", "task", "stopped", "after the stop", { pending: "held" }))
+        return Either.right(undefined)
+      })
+      yield* settle(store, hub, "stopped", "cancelled")
+      yield* Effect.sleep("100 millis")
+      expect(harness.spawned).toHaveLength(0)
+
+      yield* store.update((s) => {
+        s.runs.push(run("later", "task", "running", 1))
+        s.messages.push(userMessage("h2", "task", "later", "during the later run", { pending: "held" }))
+        return Either.right(undefined)
+      })
+      yield* settle(store, hub, "later", "succeeded")
+      yield* Effect.sleep("100 millis")
+      expect(harness.spawned).toHaveLength(0)
+      expect((yield* store.read).messages.filter((m) => m.pending === "held").map((m) => m.id)).toEqual(["h1", "h2"])
     }),
   ))

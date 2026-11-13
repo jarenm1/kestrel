@@ -1,4 +1,4 @@
-import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
+import { Cause, Context, Data, Deferred, Effect, Either, Layer, Queue, Schedule } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import Ajv from "ajv"
 import { copyFile, mkdir, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises"
@@ -2143,6 +2143,35 @@ export const CoreLive = Layer.effect(
 
     const sendHeldMessages: CoreShape["sendHeldMessages"] = (user, taskId, choice) =>
       deliverMessage(user, taskId, "", choice, [], false, null, undefined, undefined, undefined, true)
+
+    /**
+     * Sends what a run held when it finished its turn, as the thread's next message, the way a queue would: an ACP agent
+     * that never read its inbox, or a turn that ended right after the message came in. A run that was stopped, failed or
+     * interrupted leaves its held messages for the user to send or remove, and so does a thread that still holds
+     * messages of an earlier run: sending them along would decide for the user.
+     */
+    const sendHeldAfterTurn = (run: Run) =>
+      Effect.gen(function* () {
+        const state = yield* store.read
+        const task = state.tasks.find((t) => t.id === run.taskId)
+        if (task === undefined || task.archivedAt !== undefined) return
+        const held = state.messages.filter((m) => m.taskId === run.taskId && m.pending === "held")
+        if (held.length === 0 || held.some((m) => m.runId !== run.id)) return
+        yield* sendHeldMessages(task.owner, task.id, {
+          ...(run.model === undefined ? {} : { model: run.model }),
+          ...(run.effort === null || run.effort === undefined ? {} : { effort: run.effort }),
+        })
+      }).pipe(
+        // A conflict is the user (or another run start) getting there first: the held messages are already gone.
+        Effect.catchAll((e) =>
+          e._tag === "Conflict" ? Effect.void : Effect.logWarning(`task ${run.taskId}: could not send held messages: ${e.message}`),
+        ),
+      )
+    const finishedTurns = yield* Queue.unbounded<Run>()
+    hub.subscribeAll((event) => {
+      if (event._tag === "run.updated" && event.run.status === "succeeded") Queue.unsafeOffer(finishedTurns, event.run)
+    })
+    yield* Effect.forkDaemon(Effect.forever(Effect.flatMap(Queue.take(finishedTurns), sendHeldAfterTurn)))
 
     const setUsageLimitAutoResume: CoreShape["setUsageLimitAutoResume"] = (user, taskId, autoResume) =>
       Effect.gen(function* () {
