@@ -37,11 +37,22 @@ const platformOf = (probe: CapabilityProbe): BoxCapabilities["platform"] => {
   return /microsoft/i.test(probe.release) ? "wsl" : "linux"
 }
 
+/** Facts outside host probing: what the box can install, how many runs it takes, and whether it has a control plane. */
+export interface CapabilityFacts {
+  /** Toolkit names it can build; empty when it has no flake or cannot build them (not x86_64 Linux). */
+  readonly toolkitNames?: readonly string[]
+  /** Configured concurrent agent runs; 0 means unlimited. */
+  readonly maxConcurrentRuns?: number
+  /** Whether a control plane client exists for automations and PR watches. */
+  readonly automations?: boolean
+}
+
 /** Startup snapshot only: runtime resources, drivers and permissions can still prevent a desktop from starting. */
 export const boxCapabilities = (
   sandbox: BoxCapabilities["sandbox"],
   probe: CapabilityProbe = hostProbe(),
   hardware: PlatformHardware | null = null,
+  facts: CapabilityFacts = {},
 ): BoxCapabilities => {
   const platform = platformOf(probe)
   // Only what a desktop start needs; optional tools (see requirements.ts) do not change the answer.
@@ -52,6 +63,16 @@ export const boxCapabilities = (
   }
   const gpu = hardware?.gpu ?? (probe.renderNode() ? "static" : "none")
   const suspend = hardware?.suspend ?? false
+  // NVENC needs an NVIDIA device. Without one x264 is the only possible encoder; with one, only starting an encoder
+  // proves NVENC initializes, so the answer stays unknown. WSL always encodes on the CPU (desktop/manager.ts).
+  const nvidia = probe.exists("/dev/nvidia0") || probe.exists("/dev/nvidiactl")
+  const encoder: BoxCapabilities["encoder"] = !desktop
+    ? "none"
+    : platform === "wsl"
+      ? "x264"
+      : nvidia || gpu === "on-demand"
+        ? "unknown"
+        : "x264"
   return {
     version: 1,
     platform,
@@ -59,6 +80,11 @@ export const boxCapabilities = (
     desktop: desktop ? "prerequisites-present" : "unavailable",
     gpu,
     suspend,
+    encoder,
+    gpuRendering: desktop ? (gpu === "none" ? "software" : "hardware") : "none",
+    toolkits: [...(facts.toolkitNames ?? [])],
+    capacity: { maxConcurrentRuns: facts.maxConcurrentRuns ?? 0 },
+    automations: facts.automations ?? false,
   }
 }
 

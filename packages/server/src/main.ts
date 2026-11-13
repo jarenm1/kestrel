@@ -21,6 +21,7 @@ import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { idleStopLoopEnabled, stopIdleDesktops } from "./desktop/idle-stop"
 import { createMcpHandler } from "./mcp"
+import { TOOLKIT_NAMES } from "./sandbox/toolkits"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
@@ -138,14 +139,22 @@ const program = Effect.gen(function* () {
   const models = yield* makeModelDiscovery({ credentials, native: cliAuth, dataDir: config.dataDir })
   const platform = yield* BoxPlatform
   const tracker = yield* ActivityTracker
-  // The box's startup snapshot: which harness CLIs it found.
+  // One client for the control plane: the automations' watch tools and the pull request view's watch action share it.
+  const control = boxControl(config)
+  // The flake's toolkit-<name> packages exist only for x86_64 Linux; elsewhere toolkit_install is not offered, nor
+  // reported, even when a flake path is set.
+  const toolkitsAvailable =
+    config.toolkitsFlake !== null && process.platform === "linux" && process.arch === "x64"
+  // The box's startup snapshot: which harness CLIs it found, and the facts outside host probing.
   const capabilities = {
-    ...boxCapabilities(config.sandbox, undefined, platform.hardware),
+    ...boxCapabilities(config.sandbox, undefined, platform.hardware, {
+      toolkitNames: toolkitsAvailable ? TOOLKIT_NAMES : [],
+      maxConcurrentRuns: config.maxConcurrentRuns,
+      automations: control !== null,
+    }),
     harnesses: availableHarnesses(config),
     modelHarnesses: availableModelHarnesses(config),
   }
-  // One client for the control plane: the automations' watch tools and the pull request view's watch action share it.
-  const control = boxControl(config)
   const webHandler = yield* makeWebHandler(core, cliAuth, capabilities, models, {
     watchPullRequest: control === null ? null : (user, taskId, repo, number, watching) =>
       (watching ? control.watchPr(user, taskId, repo, number) : control.unwatchPr(user, taskId, repo, number)).pipe(
@@ -178,7 +187,7 @@ const program = Effect.gen(function* () {
       checkout: core.checkout,
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),
     },
-    toolkits: config.toolkitsFlake === null ? null : { install: core.toolkitInstall },
+    toolkits: toolkitsAvailable ? { install: core.toolkitInstall } : null,
     report: core.report,
     github: {
       push: core.gitPush,

@@ -79,23 +79,45 @@ The contract is what the interface and control plane may assume about any box. I
 - Automation and PR-watch wake-ups.
 
 **Capabilities replace mode checks.** A box reports what it has, and the apps and agent tools adapt. Nothing branches on
-"is this the Nest". The fields below are illustrative:
+"is this the Nest". Version 1 reports the fields below; the optional ones are absent on older boxes and mean unknown,
+except where their schema says otherwise. Evidence capabilities (for example `rollingEvidence`) belong to the evidence
+work, not this contract:
 
 ```ts
 interface BoxCapabilities {
-  readonly os: "linux" | "wsl" | "lima"
+  readonly version: 1
+  readonly platform: "linux" | "wsl" | "lima" | "other"
   readonly sandbox: "strict" | "basic" | "off"
-  readonly desktop: boolean
-  readonly gpuRendering: "hardware" | "software" | "none"
-  readonly encoder: "nvenc" | "x264" | "none"
-  readonly toolkits: readonly string[]
-  readonly rollingEvidence: boolean
+  readonly desktop: "prerequisites-present" | "unavailable"
+  readonly harnesses?: readonly (
+    | "anthropic"
+    | "openai"
+    | "openrouter"
+    | "zai"
+    | "deepseek"
+    | "minimax"
+    | "moonshot"
+    | "opencode"
+    | "opencode-go"
+    | "google"
+    | "devin"
+  )[]
+  readonly modelHarnesses?: readonly ("claude" | "codex" | "opencode" | "antigravity" | "devin")[]
+  readonly gpu?: "none" | "static" | "on-demand"
+  readonly suspend?: boolean
+  readonly encoder?: "nvenc" | "x264" | "none" | "unknown"
+  readonly gpuRendering?: "hardware" | "software" | "none"
+  readonly toolkits?: readonly string[]
+  readonly capacity?: { readonly maxConcurrentRuns: number }
+  readonly automations?: boolean
 }
 ```
 
 **A conformance suite enforces the contract.** It runs the same checks against a Linux box and a Nest VM, with reduced
-expectations where a capability is absent. `scripts/box-ubuntu/test.ts` already starts a real agent run in Docker and is
-the natural place to begin.
+expectations where a capability is absent. `scripts/box-ubuntu/test.ts` starts a real agent run in Docker by default,
+and checks an existing box when given `BOX_URL` (with `BOX_TOKEN`, or `BOX_ID` and `BOX_SECRET`). It asserts the version
+1 fields and runs desktop, encoder, GPU, toolkit, capacity and automation checks only for facts the box reports; an
+absent fact is skipped with its reason. A Nest VM run of the suite is still needed.
 
 | Must match on every box | May differ, and is reported as a capability |
 |---|---|
@@ -337,7 +359,7 @@ Desktop video, audio and input are on WebRTC: H.264 video and Opus audio sent di
 - **Done:** WebRTC from box to viewer. The fMP4 WebSocket path is deleted; WebSocket media is not kept as a fallback.
 - **No fallback, by decision:** keeping the WebSocket stream for a tunnel-only box would have sent video through the Hub or another relay Kestrel pays for, which breaks requirement 1. The tradeoff: a box reachable only over an HTTPS tunnel, with no LAN, tailnet or public UDP path and no operator-configured TURN, cannot stream. It needs a direct UDP path or its operator's TURN server.
 - **Relay:** the Hub carries only desktop signaling and status for boxes on the legacy relay, a handful of requests per session. No media passes through it, so it adds no media cost.
-- **Every platform streams.** WSL and Lima boxes use x264 on the CPU, so their limit is frame rate and resolution, which the apps should set from the encoder capability.
+- **Every platform streams.** WSL boxes always use x264 on the CPU. Other Linux and Lima boxes report `x264` when no NVIDIA device is present and `unknown` when one is, because NVENC is not proven until a desktop starts. The apps should set quality from the encoder capability rather than infer it from the platform.
 
 ## Saved evidence
 
@@ -405,7 +427,11 @@ charges and frees the GPU for someone else.
 
 Each step is useful by itself, and the Nest work comes after the BYOB and evidence work it reuses.
 
-1. **Contract:** define capabilities, report them from the box, and build the conformance suite.
+1. **Contract:** define capabilities, report them from the box, and build the conformance suite. In progress: version 1
+   reports `platform`, `sandbox`, `desktop`, `harnesses`, `modelHarnesses`, `gpu`, `suspend`, `encoder`, `gpuRendering`,
+   `toolkits`, `capacity` and `automations` from startup facts, and `scripts/box-ubuntu/test.ts` runs the same checks in
+   Docker or against an existing box, skipping facts the box reports absent. Missing: evidence capabilities (step 5) and
+   a Nest VM run of the suite.
 2. **BYOB reach:** split the sandbox listener and run the WebRTC spike.
 3. **Relay:** finish the cutover and delete it.
 4. **Platform tiers:** ship desktop dependencies, fix WSL setup, and get hardware graphics working on Ubuntu.

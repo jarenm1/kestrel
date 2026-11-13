@@ -508,6 +508,29 @@ permissions, graphics and runtime resources still matter. `unavailable` means th
 Additive fields within version 1 may be ignored. The response is a startup snapshot; restart the box after installing
 desktop tools to refresh it.
 
+Version 1 also reports these optional facts. They are absent on boxes from before they were reported, and absent means
+unknown unless the entry says otherwise:
+
+- `harnesses` and `modelHarnesses`: the providers' harness CLIs the box found at startup, and the harness kinds it can
+  launch for routed models (see [Models and harnesses](#models-and-harnesses)).
+- `gpu` (`none`, `static`, `on-demand`) and `suspend` (boolean, absent means false): the machine's GPU and whether the
+  box is a Nest VM that suspends when idle.
+- `encoder` (`nvenc`, `x264`, `none`, `unknown`): desktop video's encoder. It is `none` when no desktop can start.
+  WSL reports `x264` whenever a desktop can start (never NVENC). Linux or Lima with a desktop and no NVIDIA device
+  (`/dev/nvidia0` or `/dev/nvidiactl`) reports `x264`, because NVENC cannot initialize there. One with an NVIDIA
+  device, or a host that lends a GPU on demand, reports `unknown`: only starting an encoder proves NVENC works, and it
+  can still fall back to x264 at runtime.
+- `gpuRendering` (`hardware`, `software`, `none`): `hardware` when a desktop can start and the box reports a GPU or a
+  DRI render node, `software` when a desktop can start without one (Mesa llvmpipe/lavapipe render), and `none` when the
+  desktop prerequisites are absent.
+- `toolkits`: the toolkit names `toolkit_install` can build from the box's flake (`blender`, `roblox-studio`) on
+  x86_64 Linux. It is `[]` when the box has no flake or runs elsewhere, so that box can install none; it is not a claim
+  about apps already installed in a task.
+- `capacity.maxConcurrentRuns`: the configured concurrent agent-run cap. `0` means unlimited.
+- `automations`: `true` when the box has a control plane (a managed direct box or the relay) and can manage automations
+  and PR watches; `false` means the automation tools refuse. Unlike the other optional fields, `false` is a fact, not
+  an absence.
+
 Discovery needs a signed-in user, like the other box routes: send the same box token. Without one it answers 401
 `{"_tag":"Unauthorized"}`; a 401 says nothing about the box and means the token is missing or was rejected. A 404 means
 an older box without this endpoint. Clients treat a 404 as unknown capabilities and keep their existing behavior. They

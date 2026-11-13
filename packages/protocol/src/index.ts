@@ -975,6 +975,33 @@ export const BoxCapabilities = Schema.Struct({
   gpu: Schema.optional(Schema.Literal("none", "static", "on-demand")),
   /** True on a Nest VM: the box suspends when idle and resumes on the next request. Absent means false. */
   suspend: Schema.optional(Schema.Boolean),
+  /**
+   * The encoder desktop video ends up on, as far as startup facts say: `x264` when the box has no NVIDIA device (NVENC
+   * cannot initialize there), `unknown` when it has one (only starting an encoder proves NVENC works; it may fall back
+   * to x264 at runtime), and `none` when no desktop can start. WSL always uses x264. Absent on older boxes.
+   */
+  encoder: Schema.optional(Schema.Literal("nvenc", "x264", "none", "unknown")),
+  /**
+   * How a desktop renders: `hardware` when the box can render on a GPU (a static GPU, a DRI render node, or a host
+   * that lends one on demand), `software` when it renders on the CPU (Mesa llvmpipe/lavapipe), and `none` when no
+   * desktop can start. Absent on older boxes.
+   */
+  gpuRendering: Schema.optional(Schema.Literal("hardware", "software", "none")),
+  /**
+   * Toolkit names `toolkit_install` can build from the box's flake (`blender`, `roblox-studio`). Empty when the box
+   * cannot install them: no flake, or not x86_64 Linux, which the flake's toolkit packages require. Absent on boxes from
+   * before it was reported; treat as unknown, not empty.
+   */
+  toolkits: Schema.optional(Schema.Array(Schema.String)),
+  /** The box's agent-run capacity. `maxConcurrentRuns` 0 means unlimited. Absent on older boxes. */
+  capacity: Schema.optional(
+    Schema.Struct({ maxConcurrentRuns: Schema.Number.pipe(Schema.int(), Schema.nonNegative()) }),
+  ),
+  /**
+   * Whether the box has a control plane and can therefore manage automations and PR watches. False means the
+   * automation tools refuse. Absent on older boxes; treat as unknown.
+   */
+  automations: Schema.optional(Schema.Boolean),
 })
 export type BoxCapabilities = typeof BoxCapabilities.Type
 
