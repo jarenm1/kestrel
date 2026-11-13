@@ -6,7 +6,7 @@ export const DESKTOP_SCALE = 2
 
 /**
  * Environment that makes desktop apps draw at DESKTOP_SCALE: GTK (and Firefox), Qt, the X cursor. The sandbox's
- * xterm wrapper sizes its font from GDK_SCALE. Blender and Wine keep their own UI scale settings.
+ * xterm wrapper sizes its font from GDK_SCALE, and its Chromium wrapper passes it as `--force-device-scale-factor`. Blender and Wine keep their own UI scale settings.
  */
 export const desktopScaleEnv: Readonly<Record<string, string>> = {
   GDK_SCALE: String(DESKTOP_SCALE),

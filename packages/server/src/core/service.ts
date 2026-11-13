@@ -59,7 +59,7 @@ import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, commentMismatch, type ApiRequest, type ApiResponse, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
-import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
+import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, writeFileCommand, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type Installed, type ToolkitName, installNixPackage, installToolkit, shadowedExes } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
@@ -491,6 +491,13 @@ export interface CoreShape {
   readonly runFor: (runId: string) => Effect.Effect<Run | null>
   /** Used by the MCP handler: runs a shell command at the thread workspace root. */
   readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
+  /**
+   * Used by the MCP handler: writes `data` to `path` from inside the task's sandbox, so the write has the agent's own
+   * reach and follows no link the agent could not. A relative path is from the workspace root, and the path must stay
+   * inside the workspace; missing parent dirs are made, and a failed write leaves an existing file intact. Returns the
+   * absolute path as the agent sees it.
+   */
+  readonly writeFileInTask: (taskId: string, path: string, data: Uint8Array) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
@@ -758,6 +765,9 @@ const snapshotOf = (status: PullRequestStatus): ThreadPullRequestSnapshot => ({
 
 /** A diff larger than this is cut before it reaches the browser; the view marks it `truncated`. */
 const MAX_DIFF_BYTES = 2 * 1024 * 1024
+
+/** writeFileInTask starts a sandbox and copies a few megabytes at most. */
+const WRITE_FILE_TIMEOUT_MS = 30_000
 
 const boundedDiff = (patch: string): ThreadPullRequestDiff =>
   Buffer.byteLength(patch, "utf8") <= MAX_DIFF_BYTES
@@ -3063,6 +3073,26 @@ export const CoreLive = Layer.effect(
             env: launch.env,
             timeoutMs,
           }).pipe(Effect.mapError(toInternal("exec")))
+        }),
+
+      writeFileInTask: (taskId, path, data) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const desktopNow = yield* desktop.status(taskId)
+          const launch = yield* launchFor(task, "exec", desktopNow.display, writeFileCommand(threadDirOf(task.id), path)).pipe(
+            Effect.mapError(toInternal("write file")),
+          )
+          const result = yield* runProcess(launch.file, launch.args, {
+            cwd: launch.cwd,
+            env: launch.env,
+            timeoutMs: WRITE_FILE_TIMEOUT_MS,
+            stdin: data,
+          }).pipe(Effect.mapError(toInternal("write file")))
+          if (result.exitCode !== 0) {
+            const why = result.timedOut ? "timed out" : (result.stderr.head + result.stderr.tail).trim()
+            return yield* Effect.fail(new InternalError({ message: `cannot write ${path}: ${why}` }))
+          }
+          return result.stdout.head.trim()
         }),
 
       desktopLaunch: (taskId, command) =>

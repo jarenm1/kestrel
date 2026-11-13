@@ -64,9 +64,10 @@
 
         # The sandbox has no /etc/fonts, so the browser gets its font config explicitly.
         sandboxFontsConf = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
-        sandboxFirefox = pkgs.writeShellScriptBin "firefox" ''
+        # Chromium ignores GDK_SCALE on X11, so the desktop's HiDPI factor is passed as its device scale.
+        sandboxChromium = pkgs.writeShellScriptBin "chromium" ''
           export FONTCONFIG_FILE=${sandboxFontsConf}
-          exec ${pkgs.firefox}/bin/firefox "$@"
+          exec ${pkgs.chromium}/bin/chromium --force-device-scale-factor=''${GDK_SCALE:-1} "$@"
         '';
         # xterm's bitmap fonts don't scale, so it draws DejaVu at the desktop's HiDPI factor (GDK_SCALE, set by the box).
         # Colors and padding follow the app's palette (packages/app/src/styles.css).
@@ -169,7 +170,7 @@
             devin
             util-linux # `script`: Devin CLI reads its sign-in code only from a terminal
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
-            sandboxFirefox # a browser for desktop_launch
+            sandboxChromium # the browser for desktop_launch; Firefox is the `firefox` toolkit
           ];
         };
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
@@ -225,15 +226,17 @@
         robloxXdgOpen = pkgs.writeShellScriptBin "xdg-open" ''
           case "$1" in
             roblox-studio:* | roblox-studio-auth:*) exec vinegar "$1" ;;
-            *) exec firefox "$1" ;;
+            *) exec ${pkgs.firefox}/bin/firefox "$1" ;;
           esac
         '';
         # Vinegar is x86_64-linux only; the box is too, in practice.
         toolkits = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           toolkit-blender = mkToolkit "blender" [ pkgs.blender ];
+          toolkit-firefox = mkToolkit "firefox" [ pkgs.firefox ];
           # Roblox Studio through Vinegar (Wine); Vinegar downloads Studio itself on first `vinegar run`.
           # Rojo and Wally sync and package the project from the workspace; Rojo still needs its Studio plugin.
-          toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.rojo pkgs.wally ];
+          # Its sign-in goes through Firefox (see robloxVinegar), so it brings its own.
+          toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.firefox pkgs.rojo pkgs.wally ];
         };
         # Nest crates and the box's dependency tree (packages/host/nix/packages.nix).
         nest = import ./packages/host/nix/packages.nix {
