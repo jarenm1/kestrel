@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
-import { AgentModel, type ModelProvider } from "./models"
+import { AgentEffort, AgentModel, modelInfo, type ModelProvider } from "./models"
 import { NestBoxStatus } from "./nest"
 
 /**
@@ -775,6 +775,8 @@ export const Automation = Schema.Struct({
   prompt: Schema.String,
   /** Null uses the box's default model. Older responses omit the field; decode those to the same default. */
   model: Schema.optionalWith(Schema.NullOr(AgentModel), { default: () => null, exact: true }),
+  /** Thinking level for each run; null (or no explicit model) uses the model's default. Older responses omit it. */
+  effort: Schema.optionalWith(Schema.NullOr(AgentEffort), { default: () => null, exact: true }),
   enabled: Schema.Boolean,
   trigger: AutomationTrigger,
   createdAt: Schema.String, // ISO-8601
@@ -783,6 +785,16 @@ export const Automation = Schema.Struct({
   nextRunAt: Schema.NullOr(Schema.String),
 })
 export type Automation = typeof Automation.Type
+
+/** A thinking level needs an explicit model that supports it. */
+const effortFitsModel = (body: {
+  readonly model?: AgentModel | null | undefined
+  readonly effort?: AgentEffort | null | undefined
+}): true | string =>
+  body.effort === undefined ||
+  body.effort === null ||
+  (body.model !== undefined && body.model !== null && modelInfo(body.model).efforts.includes(body.effort)) ||
+  `the "${body.effort}" thinking level needs a model that supports it`
 
 /**
  * The portable part of an automation, as carried by a share link. It holds what decides how the imported copy runs,
@@ -795,8 +807,9 @@ export const AutomationShare = Schema.Struct({
   repo: Schema.NullOr(GithubRepoSlug),
   prompt: Schema.String.pipe(Schema.minLength(1)),
   model: Schema.optionalWith(Schema.NullOr(AgentModel), { default: () => null, exact: true }),
+  effort: Schema.optionalWith(Schema.NullOr(AgentEffort), { default: () => null, exact: true }),
   trigger: AutomationTrigger,
-})
+}).pipe(Schema.filter(effortFitsModel))
 export type AutomationShare = typeof AutomationShare.Type
 
 export const CreateAutomationBody = Schema.Struct({
@@ -808,22 +821,30 @@ export const CreateAutomationBody = Schema.Struct({
   repo: Schema.optional(GithubRepoSlug),
   prompt: Schema.String.pipe(Schema.minLength(1)),
   model: Schema.optional(Schema.NullOr(AgentModel)),
+  /** Null or omitted uses the model's default thinking level. */
+  effort: Schema.optional(Schema.NullOr(AgentEffort)),
   trigger: AutomationTrigger,
   enabled: Schema.optional(Schema.Boolean),
 }).pipe(
   Schema.filter((body) => body.trigger._tag !== "github" || body.repo !== undefined || "github triggers need a repo"),
+  Schema.filter(effortFitsModel),
 )
 export type CreateAutomationBody = typeof CreateAutomationBody.Type
 
-/** Every field optional; `repo` cannot change. */
+/**
+ * Every field optional; `repo` cannot change. A stored thinking level the resulting model does not support (including
+ * the box default) resets to the model's default.
+ */
 export const UpdateAutomationBody = Schema.Struct({
   name: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
   prompt: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
   /** Omitted preserves the selection; null restores the box default. */
   model: Schema.optional(Schema.NullOr(AgentModel)),
+  /** Omitted preserves the level; null restores the model's default. */
+  effort: Schema.optional(Schema.NullOr(AgentEffort)),
   trigger: Schema.optional(AutomationTrigger),
   enabled: Schema.optional(Schema.Boolean),
-})
+}).pipe(Schema.filter((body) => body.model === undefined || effortFitsModel(body)))
 export type UpdateAutomationBody = typeof UpdateAutomationBody.Type
 
 /** One attempt to start a thread for an automation. `started` has a `taskId`; `failed` has an `error`. */

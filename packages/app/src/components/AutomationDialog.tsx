@@ -1,19 +1,19 @@
-import { Fragment, useState, type ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ChevronDown } from "lucide-react"
-import { Schema } from "effect"
 import {
   GithubAutomationEvent,
-  AgentModel,
   modelInfo,
+  type AgentEffort,
+  type AgentModel,
   type Automation,
   type AutomationTrigger,
   type CreateAutomationBody,
 } from "@cloudagents/protocol"
-import { modelDisplayName, offeredModelSections } from "@cloudagents/composer/models"
+import { offeredModelSections } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
-import { harnessById } from "@/lib/harnesses"
+import { ModelPicker, ThinkingPicker, effortOptions } from "@/components/AgentPickers"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Checkbox } from "@cloudagents/ui/checkbox"
@@ -25,7 +25,6 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@cloudagents/ui/dropdown-menu"
 import { Switch } from "@/components/ui/switch"
@@ -43,9 +42,9 @@ export type AutomationDialogTarget =
 type TriggerKind = AutomationTrigger["_tag"]
 
 /**
- * Creates an automation or quick action, or edits one's name, prompt, model and trigger settings. Editing keeps the
- * trigger kind and repository; creating an automation also picks them together with the enabled state. The server
- * validates everything and its messages (e.g. a bad cron) show inline.
+ * Creates an automation or quick action, or edits one's name, prompt, model, thinking level and trigger settings.
+ * Editing keeps the trigger kind and repository; creating an automation also picks them together with the enabled
+ * state. The server validates everything and its messages (e.g. a bad cron) show inline.
  */
 export function AutomationDialog({ target, onClose }: { target: AutomationDialogTarget | null; onClose: () => void }) {
   return (
@@ -75,10 +74,8 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
     ? offeredModelSections(connections.data, shown, capabilities.data?.modelHarnesses)
     : null
   const [model, setModel] = useState<AgentModel | null>(seed?.model ?? null)
-  const selected = model === null ? null : modelInfo(model)
-  const selectionListed =
-    selected !== null &&
-    sections?.some((section) => section.models.some((candidate) => candidate.id === selected.id)) === true
+  const [effort, setEffort] = useState<AgentEffort | null>(seed?.effort ?? null)
+  const selected = model === null ? undefined : modelInfo(model)
   const [name, setName] = useState(seed?.name ?? "")
   const [prompt, setPrompt] = useState(seed?.prompt ?? "")
   const [kind, setKind] = useState<TriggerKind>(
@@ -122,6 +119,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
           name: name.trim(),
           prompt: prompt.trim(),
           model,
+          effort,
           trigger: buildTrigger(),
         })
       }
@@ -129,6 +127,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
         name: name.trim(),
         prompt: prompt.trim(),
         model,
+        effort,
         trigger: buildTrigger(),
         enabled,
         ...(repo === null ? {} : { repo }),
@@ -174,48 +173,34 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
         <Field label="Prompt">
           <Textarea rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
         </Field>
-        <Field label="Model">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="secondary" className="justify-between">
-                {selected === null ? "Default (box model)" : modelDisplayName(selected)}
-                <ChevronDown />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="max-h-72 overflow-y-auto">
-              <DropdownMenuRadioGroup
-                value={model ?? ""}
-                onValueChange={(value) => {
-                  if (value === "") setModel(null)
-                  else if (Schema.is(AgentModel)(value)) setModel(value)
-                }}
-              >
-                <DropdownMenuRadioItem value="">Default (box model)</DropdownMenuRadioItem>
-                {selected !== null && !selectionListed && (
-                  <DropdownMenuRadioItem value={selected.id}>{modelDisplayName(selected)} (saved)</DropdownMenuRadioItem>
-                )}
-                {sections?.map((section) => (
-                  <Fragment key={`${section.harness}:${section.provider.id}`}>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel>
-                      {harnessById(section.harness).name} · {section.provider.name}
-                    </DropdownMenuLabel>
-                    {section.models.map((candidate) => (
-                      <DropdownMenuRadioItem key={candidate.id} value={candidate.id}>
-                        {modelDisplayName(candidate)}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </Fragment>
-                ))}
-              </DropdownMenuRadioGroup>
-              {connections.isPending && <DropdownMenuLabel>Loading models…</DropdownMenuLabel>}
-              {connections.error && <DropdownMenuLabel>Could not load connected models.</DropdownMenuLabel>}
-              {connections.isSuccess && sections !== null && sections.length === 0 && (
-                <DropdownMenuLabel>Connect Anthropic or OpenAI to choose a model.</DropdownMenuLabel>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </Field>
+        <div className="flex flex-col gap-1.5" role="group" aria-labelledby="automation-model">
+          <span id="automation-model" className="text-xs text-muted-foreground">
+            Model
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <ModelPicker
+              sections={sections}
+              value={selected}
+              onChange={(id) => {
+                setModel(id)
+                setEffort(effort !== null && modelInfo(id).efforts.includes(effort) ? effort : null)
+              }}
+              defaultLabel="Box default model"
+              onReset={() => {
+                setModel(null)
+                setEffort(null)
+              }}
+            />
+            {selected !== undefined && selected.efforts.length > 0 && (
+              <ThinkingPicker
+                value={effort ?? selected.defaultEffort ?? selected.efforts[0]}
+                options={effortOptions(selected)}
+                onChange={setEffort}
+              />
+            )}
+          </div>
+          {connections.error && <Alert>Could not load connected models: {errorText(connections.error)}</Alert>}
+        </div>
 
         {target.kind === "create" && !quickAction && (
           <div className="flex flex-col gap-1.5" role="group" aria-labelledby="automation-trigger">

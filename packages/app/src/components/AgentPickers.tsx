@@ -1,7 +1,7 @@
 import { Fragment, useState, type KeyboardEvent } from "react"
 import { Link } from "react-router-dom"
 import { Schema } from "effect"
-import { ChevronDown, Settings2 } from "lucide-react"
+import { ChevronDown, RotateCcw, Settings2 } from "lucide-react"
 import { Popover } from "radix-ui"
 import {
   AgentModel,
@@ -173,19 +173,22 @@ const HARNESS_RAIL_PX = 40
  * harness (up to a cap), so switching harnesses or searching never resizes it; longer lists scroll. In the search box,
  * ArrowLeft and ArrowRight step through the harnesses. `sections` is null while connections load.
  *
- * `defaultLabel` labels an unset choice without offering a model reset.
+ * `defaultLabel` labels an unset choice. With `onReset`, a set choice offers a menu item, under that label, to unset it.
  */
 export function ModelPicker({
   sections,
   value,
   onChange,
   defaultLabel,
+  onReset,
 }: {
   sections: readonly ModelSection[] | null
   value: ModelInfo | undefined
   onChange: (value: AgentModel) => void
   defaultLabel?: string
+  onReset?: () => void
 }) {
+  const resettable = onReset !== undefined && value !== undefined
   const tabs: readonly HarnessTab[] = HARNESSES.map((harness) => ({
     harness,
     sections: (sections ?? []).filter((section) => section.harness === harness.id),
@@ -220,7 +223,8 @@ export function ModelPicker({
       candidate.sections.reduce((sum, section) => sum + MODEL_LABEL_REM + section.models.length * MODEL_ROW_REM, 0),
     ),
   )
-  const menuHeight = `min(${Math.min(MODEL_MENU_MAX_REM, MODEL_MENU_CHROME_REM + tallestTabRem)}rem + 1px, var(--radix-dropdown-menu-content-available-height))`
+  const chromeRem = MODEL_MENU_CHROME_REM + (resettable ? MODEL_ROW_REM : 0)
+  const menuHeight = `min(${Math.min(MODEL_MENU_MAX_REM, chromeRem + tallestTabRem)}rem + 1px, var(--radix-dropdown-menu-content-available-height))`
 
   function stepHarness(delta: 1 | -1) {
     if (tab === undefined) return
@@ -339,6 +343,12 @@ export function ModelPicker({
             )}
           </div>
           <DropdownMenuSeparator />
+          {resettable && (
+            <DropdownMenuItem onSelect={onReset} className="text-muted-foreground">
+              <RotateCcw />
+              {defaultLabel ?? "Default model"}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem asChild>
             <Link to="/settings/connections" className="text-muted-foreground">
               <Settings2 />

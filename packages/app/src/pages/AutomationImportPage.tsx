@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate, useSearchParams } from "react-router-dom"
-import { modelInfo, type AutomationShare } from "@cloudagents/protocol"
+import { EFFORT_LABELS, modelInfo, type AutomationShare } from "@cloudagents/protocol"
 import { modelDisplayName } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
@@ -59,6 +59,7 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
         name: name.trim(),
         prompt: shared.prompt,
         model: shared.model,
+        effort: shared.effort,
         trigger: shared.trigger,
         enabled: false,
         ...(repo === undefined ? {} : { repo }),
@@ -114,7 +115,10 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
 
           <div className="flex flex-col gap-1">
             <span className="text-xs text-muted-foreground">Model</span>
-            <span className="text-sm">{model === null ? "Default (box model)" : modelDisplayName(model)}</span>
+            <span className="text-sm">
+              {model === null ? "Default (box model)" : modelDisplayName(model)}
+              {shared.effort !== null && ` · thinking: ${EFFORT_LABELS[shared.effort]}`}
+            </span>
           </div>
 
           <div className="flex flex-col gap-1.5">

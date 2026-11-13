@@ -22,6 +22,7 @@ import {
   MAX_NEST_FRAME_BYTES,
   NEST_HOST_ID_HEADER,
   NEST_HOST_PROTOCOL,
+  modelInfo,
   type ApprovePairingBody,
   type Automation,
   type AutomationRun,
@@ -251,6 +252,7 @@ type AutomationRow = {
   repo: string | null
   prompt: string
   model: Automation["model"]
+  effort: Automation["effort"]
   enabled: number
   triggerJson: string
   nextRunAt: number | null
@@ -259,7 +261,7 @@ type AutomationRow = {
 }
 
 const AUTOMATION_COLUMNS =
-  "id, login, name, repo, prompt, model, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
+  "id, login, name, repo, prompt, model, effort, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
 
 type PairingRow = {
   id: string
@@ -291,6 +293,7 @@ const automationView = (row: AutomationRow): Automation => ({
   repo: row.repo,
   prompt: row.prompt,
   model: row.model,
+  effort: row.effort,
   enabled: row.enabled === 1,
   trigger: decodeTrigger(row.triggerJson),
   createdAt: row.createdAt,
@@ -1543,6 +1546,7 @@ export class Hub extends DurableObject<Env> {
       repo: input.repo,
       prompt: input.prompt,
       model: input.model ?? null,
+      effort: input.effort ?? null,
       enabled: enabled ? 1 : 0,
       triggerJson: JSON.stringify(input.trigger),
       nextRunAt: nextRunMs(input.trigger, enabled, now),
@@ -1550,14 +1554,15 @@ export class Hub extends DurableObject<Env> {
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
-      `INSERT INTO automations (id, login, name, repo, prompt, model, enabled, trigger_json, next_run_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO automations (id, login, name, repo, prompt, model, effort, enabled, trigger_json, next_run_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.login,
       row.name,
       row.repo,
       row.prompt,
       row.model,
+      row.effort,
       row.enabled,
       row.triggerJson,
       row.nextRunAt,
@@ -1574,21 +1579,26 @@ export class Hub extends DurableObject<Env> {
     const now = Date.now()
     const trigger = changes.trigger ?? decodeTrigger(current.triggerJson)
     const enabled = changes.enabled ?? current.enabled === 1
+    const model = changes.model === undefined ? current.model : changes.model
+    const effort = changes.effort === undefined ? current.effort : changes.effort
     const next: AutomationRow = {
       ...current,
       name: changes.name ?? current.name,
       prompt: changes.prompt ?? current.prompt,
-      model: changes.model === undefined ? current.model : changes.model,
+      model,
+      // A level the resulting model cannot run (or the box default, which has no explicit model) resets to its default.
+      effort: effort !== null && model !== null && modelInfo(model).efforts.includes(effort) ? effort : null,
       enabled: enabled ? 1 : 0,
       triggerJson: JSON.stringify(trigger),
       nextRunAt: nextRunMs(trigger, enabled, now),
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
-      "UPDATE automations SET name = ?, prompt = ?, model = ?, enabled = ?, trigger_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND login = ?",
+      "UPDATE automations SET name = ?, prompt = ?, model = ?, effort = ?, enabled = ?, trigger_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND login = ?",
       next.name,
       next.prompt,
       next.model,
+      next.effort,
       next.enabled,
       next.triggerJson,
       next.nextRunAt,
@@ -2008,7 +2018,7 @@ export class Hub extends DurableObject<Env> {
       repo === null
         ? {}
         : { checkout: { repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number, detached: true }) } }
-    const outcome = await this.startTask(row.login, { title, ...checkout }, prompt, row.model)
+    const outcome = await this.startTask(row.login, { title, ...checkout }, prompt, row.model, row.effort)
     return this.finishFire(fire, outcome.error === null ? "started" : "failed", outcome.taskId, outcome.error)
   }
 
@@ -2122,14 +2132,20 @@ export class Hub extends DurableObject<Env> {
   }
 
   /** Creates the task (with its repository checked out, if any) and sends the prompt to start its run. */
-  private async startTask(login: string, body: CreateTaskBody, prompt: string, model: Automation["model"]): Promise<RunOutcome> {
+  private async startTask(
+    login: string,
+    body: CreateTaskBody,
+    prompt: string,
+    model: Automation["model"],
+    effort: Automation["effort"],
+  ): Promise<RunOutcome> {
     const created = await this.boxCall(login, "POST", Paths.tasks, body)
     if (!created.ok) return { taskId: null, error: boxError(created) }
     const task = decodeJson(CreatedTask, created.body)
     if (task === null) return { taskId: null, error: "agent box returned an unexpected task" }
     const sent = await this.boxCall(login, "POST", Paths.taskMessages(task.id), {
       text: prompt,
-      ...(model === null ? {} : { model }),
+      ...(model === null ? {} : { model, ...(effort === null ? {} : { effort }) }),
     })
     return sent.ok ? { taskId: task.id, error: null } : { taskId: task.id, error: boxError(sent) }
   }

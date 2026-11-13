@@ -13,7 +13,8 @@ const automation: Automation = {
   name: "Review pull requests",
   repo: "acme/app",
   prompt: "Review the pull request and report only real bugs.\n\nKeep it short — no style nits 🕵️",
-  model: null,
+  model: "claude-opus-5-5",
+  effort: "high",
   enabled: true,
   trigger: { _tag: "schedule", cron: "0 9 * * 1-5", timezone: "America/New_York" },
   createdAt: "2026-10-01T12:00:00.000Z",
@@ -28,7 +29,8 @@ describe("automation share links", () => {
       name: automation.name,
       repo: automation.repo,
       prompt: automation.prompt,
-      model: null,
+      model: automation.model,
+      effort: automation.effort,
       trigger: automation.trigger,
     })
   })
