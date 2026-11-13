@@ -41,6 +41,7 @@ const triggerSchema = z.union([
     _tag: z.literal("github"),
     events: eventList.describe("Pull request events that start a run, e.g. pull_request.opened"),
     reviewers: z.array(z.string()).optional().describe("Only pull requests requesting one of these reviewers"),
+    authors: z.array(z.string()).optional().describe("Only pull requests opened by one of these GitHub logins"),
     baseBranches: z.array(z.string()).optional().describe("Only pull requests into one of these branches"),
     includeDrafts: z.boolean().optional().describe("Also run for draft pull requests (default false)"),
   }),
@@ -54,6 +55,7 @@ const describeTrigger = (trigger: AutomationTrigger): string => {
   if (trigger._tag === "quickAction") return "quick action (run by the user on pull requests they pick)"
   const parts = [`on ${trigger.events.join(", ")}`]
   if (trigger.reviewers !== undefined) parts.push(`reviewers ${trigger.reviewers.join(", ")}`)
+  if (trigger.authors !== undefined) parts.push(`authors ${trigger.authors.join(", ")}`)
   if (trigger.baseBranches !== undefined) parts.push(`base ${trigger.baseBranches.join(", ")}`)
   if (trigger.includeDrafts === true) parts.push("drafts included")
   return `github ${parts.join("; ")}`

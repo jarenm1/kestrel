@@ -90,6 +90,16 @@ describe("matchGithubTrigger", () => {
     expect(matchGithubTrigger(trigger, event({ pr: pr({ baseRef: "release" }) }))).not.toBeNull()
   })
 
+  test("authors restricts by the pull request's author, case-insensitively", () => {
+    const trigger: GithubTrigger = { _tag: "github", events: ["pull_request.opened"], authors: ["Caayd"] }
+    expect(matchGithubTrigger(trigger, event())).toBeNull()
+    expect(matchGithubTrigger(trigger, event({ pr: pr({ author: "caayd" }) }))).toBe("pull_request.opened #12")
+  })
+
+  test("an empty authors list does not filter", () => {
+    expect(matchGithubTrigger({ ...opened, authors: [] }, event())).not.toBeNull()
+  })
+
   test("drafts are skipped unless includeDrafts is true", () => {
     const draft = event({ pr: pr({ draft: true }) })
     expect(matchGithubTrigger(opened, draft)).toBeNull()

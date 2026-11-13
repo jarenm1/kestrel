@@ -90,6 +90,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
     seedTrigger?._tag === "github" ? seedTrigger.events : [],
   )
   const [reviewers, setReviewers] = useState(seedTrigger?._tag === "github" ? (seedTrigger.reviewers ?? []).join(", ") : "")
+  const [authors, setAuthors] = useState(seedTrigger?._tag === "github" ? (seedTrigger.authors ?? []).join(", ") : "")
   const [baseBranches, setBaseBranches] = useState(
     seedTrigger?._tag === "github" ? (seedTrigger.baseBranches ?? []).join(", ") : "",
   )
@@ -108,6 +109,7 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
       _tag: "github",
       events: [first, ...rest],
       reviewers: splitList(reviewers),
+      authors: splitList(authors),
       baseBranches: splitList(baseBranches),
       includeDrafts,
     }
@@ -318,6 +320,9 @@ function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; on
             </fieldset>
             <Field label="Reviewers (comma-separated; empty means any)">
               <Input value={reviewers} placeholder="alice, bob" onChange={(e) => setReviewers(e.target.value)} />
+            </Field>
+            <Field label="Authors (comma-separated; empty means any)">
+              <Input value={authors} placeholder="caayd" onChange={(e) => setAuthors(e.target.value)} />
             </Field>
             <Field label="Base branches (comma-separated; empty means any)">
               <Input value={baseBranches} placeholder="main" onChange={(e) => setBaseBranches(e.target.value)} />

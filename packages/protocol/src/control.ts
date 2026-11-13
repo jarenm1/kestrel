@@ -736,9 +736,9 @@ export type GithubAutomationEvent = typeof GithubAutomationEvent.Type
  * - schedule: 5-field cron (minute hour day-of-month month day-of-week; `*`, lists, ranges, steps; 0 and 7 are Sunday)
  *   evaluated in an IANA `timezone`, e.g. `0 13 * * 2` in `America/New_York` is Tuesdays at 13:00.
  * - github: fires on matching pull request events of the automation's `repo` (required for this trigger). `reviewers` filters
- *   `pull_request.review_requested` by the requested reviewer's login (case-insensitive); `baseBranches` keeps
- *   only PRs targeting those branches; `includeDrafts` (default false) also fires on draft PRs. An absent or empty
- *   list means no filter.
+ *   `pull_request.review_requested` by the requested reviewer's login (case-insensitive); `authors` keeps only PRs
+ *   opened by those logins (case-insensitive); `baseBranches` keeps only PRs targeting those branches; `includeDrafts`
+ *   (default false) also fires on draft PRs. An absent or empty list means no filter.
  * - quickAction: never fires on its own. The user runs it on pull requests they pick (one or several at once); each
  *   run checks out its pull request. With a `repo` it is offered only for that repository's pull requests, without
  *   one for any. `enabled` has no effect on it.
@@ -753,6 +753,7 @@ export const AutomationTrigger = Schema.Union(
     _tag: Schema.Literal("github"),
     events: Schema.NonEmptyArray(GithubAutomationEvent),
     reviewers: Schema.optional(Schema.Array(Schema.String)),
+    authors: Schema.optional(Schema.Array(Schema.String)),
     baseBranches: Schema.optional(Schema.Array(Schema.String)),
     includeDrafts: Schema.optional(Schema.Boolean),
   }),

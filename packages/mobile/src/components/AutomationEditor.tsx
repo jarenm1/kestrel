@@ -88,6 +88,9 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   const [reviewers, setReviewers] = useState(
     seedTrigger?._tag === "github" ? (seedTrigger.reviewers ?? []).join(", ") : "",
   );
+  const [authors, setAuthors] = useState(
+    seedTrigger?._tag === "github" ? (seedTrigger.authors ?? []).join(", ") : "",
+  );
   const [baseBranches, setBaseBranches] = useState(
     seedTrigger?._tag === "github" ? (seedTrigger.baseBranches ?? []).join(", ") : "",
   );
@@ -106,6 +109,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
       _tag: "github",
       events: [first, ...rest],
       reviewers: splitList(reviewers),
+      authors: splitList(authors),
       baseBranches: splitList(baseBranches),
       includeDrafts,
     };
@@ -252,6 +256,15 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
                 value={reviewers}
                 placeholder="alice, bob"
                 onChangeText={setReviewers}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            </Field>
+            <Field label="Authors (comma-separated; empty means any)">
+              <Input
+                value={authors}
+                placeholder="caayd"
+                onChangeText={setAuthors}
                 autoCapitalize="none"
                 autoCorrect={false}
               />
