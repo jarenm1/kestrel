@@ -8,6 +8,7 @@ import { ReconnectBanner } from "@/components/ReconnectBanner"
 import { ThreadSidebar } from "@/components/ThreadSidebar"
 import { DesktopTranscriptHost } from "@/components/TranscriptHost"
 import { UsagePanelProvider } from "@/components/UsagePanel"
+import { useTabTitle } from "@/hooks/useTabTitle"
 import { useThreadListEvents } from "@/hooks/useThreadListEvents"
 
 const COLLAPSED_KEY = "kestrel.threadsCollapsed"
@@ -20,6 +21,7 @@ const COLLAPSED_KEY = "kestrel.threadsCollapsed"
 export function WorkspaceLayout() {
   const tasks = useQuery(queries.tasks())
   useThreadListEvents()
+  useTabTitle(tasks.data)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === "1")
   useEffect(() => {
     if (collapsed) localStorage.setItem(COLLAPSED_KEY, "1")
