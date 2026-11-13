@@ -399,6 +399,24 @@ export interface CoreShape {
     dev: boolean,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
   /**
+   * Removes a pending message (`Message.pending` `inbox` or `held`) its agent has not taken. A message the run holds
+   * (`inbox`) or that ended up held can go; one the CLI has (`agent`) or already took is a Conflict.
+   */
+  readonly deleteMessage: (
+    user: string,
+    taskId: string,
+    messageId: string,
+  ) => Effect.Effect<void, NotFound | Conflict | InternalError>
+  /**
+   * Sends the thread's held messages as one message, in their createdAt order, with their attachments; the held
+   * messages are removed. With no held messages it is a Conflict. A run that is going takes it like any other message.
+   */
+  readonly sendHeldMessages: (
+    user: string,
+    taskId: string,
+    choice: AgentChoice,
+  ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
+  /**
    * Turns a thread's armed usage-limit auto-resume on or off. The arm stays either way so the notice keeps the reset
    * and the user can turn it back on for this thread; a thread with no arm is a Conflict.
    */
@@ -455,8 +473,11 @@ export interface CoreShape {
     runId: string,
     input: AskInput,
   ) => Effect.Effect<string, NotFound | Conflict | BadRequest | InternalError | AskError>
-  /** Used by the MCP handler: the agent-facing text of the run's user messages it has not seen yet; those messages are marked read. */
-  readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<string>>
+  /**
+   * Used by the MCP handler: the agent-facing text of the run's user messages it has not seen yet (`pending` `inbox`);
+   * taking them clears the state and positions them after the run's current items.
+   */
+  readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<string>, InternalError>
   /** An authenticated request to the task's registered loopback dev server. */
   readonly previewRequest: (user: string, taskId: string, request: Request) => Effect.Effect<Response, NotFound | Conflict | BadRequest | InternalError>
   /** Authenticated HMR socket for the task's registered preview port. */
@@ -1164,14 +1185,6 @@ export const CoreLive = Layer.effect(
       for (const [messageId, waiter] of liveAsks) if (waiter.runId === runId) return { messageId, answer: waiter.answer }
       return null
     }
-    /** User messages each run has taken, from its inbox or as an answer. Forgotten once the run ends. */
-    const seenByRun = new Map<string, Set<string>>()
-    const seenFor = (runId: string): Set<string> => {
-      const seen = seenByRun.get(runId) ?? new Set<string>()
-      seenByRun.set(runId, seen)
-      return seen
-    }
-
     /** Writes attachment bytes under the attachments dir; the message only carries their metadata. */
     const storeAttachments = (
       inputs: ReadonlyArray<AttachmentInput> | undefined,
@@ -1607,8 +1620,9 @@ export const CoreLive = Layer.effect(
     const forkTask: CoreShape["forkTask"] = (user, taskId, messageId) =>
       Effect.gen(function* () {
         const source = yield* ownedTask(user, taskId)
-        // Store order is the order the thread's runs read their history in (see `formatHandoff`).
-        const history = (yield* store.read).messages.filter((m) => m.taskId === taskId)
+        // Store order is the order the thread's runs read their history in (see `formatHandoff`). A pending message
+        // was never conversation the agent saw, so a fork does not carry it.
+        const history = (yield* store.read).messages.filter((m) => m.taskId === taskId && m.pending === undefined)
         const end = history.findIndex((m) => m.id === messageId)
         if (end === -1 || history[end]!.role !== "agent") {
           return yield* Effect.fail(new BadRequest({ message: `message ${messageId} is not an agent reply of this thread` }))
@@ -1700,6 +1714,8 @@ export const CoreLive = Layer.effect(
       expectRunId?: string,
       /** Set on an automatic retry's run: its retry number, 1-based (see the sweep). */
       autoRetryAttempt?: number,
+      /** Set by `sendHeldMessages`: the text and attachments are the thread's held messages, which go in their place. */
+      heldSend?: boolean,
     ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
@@ -1713,19 +1729,22 @@ export const CoreLive = Layer.effect(
         )
         const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
         const harnessId = choice.model === undefined ? DEFAULT_MODEL_HARNESS[provider] : modelHarness(choice.model)
-        if (text.trim() === "" && attachmentIds.length === 0) {
+        if (!heldSend && text.trim() === "" && attachmentIds.length === 0) {
           return yield* Effect.fail(new BadRequest({ message: "message text or an attachment is required" }))
         }
         // Dev-only: `/replay` names a recorded transcript. Every other message (and every replay
         // attempt by a non-dev session) starts the agent as usual. Checked before anything is
         // reserved, so a bad fixture leaves no run or message behind.
         const replayFixture =
-          dev && REPLAY_COMMAND.test(text.trim()) ? yield* replayFixturePath(text) : null
+          !heldSend && dev && REPLAY_COMMAND.test(text.trim()) ? yield* replayFixturePath(text) : null
         // The files reach the task home before the message can, so the agent finds them when it reads the message.
-        const uploads = yield* Effect.flatMap(store.read, (state) => {
-          const picked = pendingUploads(state, taskId, attachmentIds)
-          return Either.isLeft(picked) ? Effect.fail(picked.left) : Effect.succeed(picked.right)
-        })
+        // A held message's attachments are already there (they came in with the message being replaced).
+        const uploads = heldSend
+          ? []
+          : yield* Effect.flatMap(store.read, (state) => {
+              const picked = pendingUploads(state, taskId, attachmentIds)
+              return Either.isLeft(picked) ? Effect.fail(picked.left) : Effect.succeed(picked.right)
+            })
         yield* Effect.forEach(
           uploads,
           (a) =>
@@ -1753,6 +1772,8 @@ export const CoreLive = Layer.effect(
               start: RunStart | null
               delivered: string
               duplicate: boolean
+              /** The held messages this delivery replaced (send-held only), for their removal events. */
+              removed: ReadonlyArray<Message>
               title: { readonly baseline: string; readonly source: string } | null
             },
             NotFound | Conflict | BadRequest
@@ -1763,7 +1784,7 @@ export const CoreLive = Layer.effect(
             const previous = deliveryId === undefined ? undefined : s.messages.find((m) => m.taskId === taskId && m.id === deliveryId)
             if (previous) {
               const run = s.runs.find((r) => r.id === previous.runId)
-              if (run) return Either.right({ task: { ...task }, message: { ...previous }, run: { ...run }, answer: null, delivered: "", start: null, duplicate: true, title: null })
+              if (run) return Either.right({ task: { ...task }, message: { ...previous }, run: { ...run }, answer: null, delivered: "", start: null, duplicate: true, removed: [], title: null })
             }
             if (task.archivedAt !== undefined) {
               return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
@@ -1781,19 +1802,39 @@ export const CoreLive = Layer.effect(
             if (replayFixture !== null && s.runs.some((r) => r.taskId === taskId && r.status === "running")) {
               return Either.left(new Conflict({ message: "a run is already in progress for this task" }))
             }
-            const picked = pendingUploads(s, taskId, attachmentIds)
-            if (Either.isLeft(picked)) return Either.left(picked.left)
-            const attachments = picked.right
-            s.uploads = s.uploads.filter((u) => !attachmentIds.includes(u.id))
+            // Send-held replaces the thread's held messages with one message: their texts in createdAt order, and
+            // their attachments, in the same update that removes them so a crash cannot lose or duplicate either.
+            let sending = text
+            let attachments: Attachment[]
+            let removed: Message[] = []
+            if (heldSend) {
+              const held = s.messages
+                .filter((m) => m.taskId === taskId && m.pending === "held")
+                .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+              if (held.length === 0) return Either.left(new Conflict({ message: "this thread has no held messages" }))
+              sending = held.map((m) => m.text).join("\n\n")
+              attachments = []
+              for (const m of held) {
+                for (const a of m.attachments ?? []) if (!attachments.some((kept) => kept.id === a.id)) attachments.push(a)
+              }
+              removed = held.map((m) => ({ ...m }))
+              const removedIds = new Set(removed.map((m) => m.id))
+              s.messages = s.messages.filter((m) => !removedIds.has(m.id))
+            } else {
+              const picked = pendingUploads(s, taskId, attachmentIds)
+              if (Either.isLeft(picked)) return Either.left(picked.left)
+              attachments = picked.right
+              s.uploads = s.uploads.filter((u) => !attachmentIds.includes(u.id))
+            }
             const sent = from === null ? {} : { fromThread: from }
             const messageId = deliveryId ?? newId()
-            const delivered = deliveredText(taskId, { id: messageId, text, attachments, ...sent })
+            const delivered = deliveredText(taskId, { id: messageId, text: sending, attachments, ...sent })
             const attached = attachments.length === 0 ? {} : { attachments }
             const now = nowIso()
             // An opt-in title is spent by the first accepted message. The provisional title at this moment is the
             // baseline a generated title may still replace; any later rename wins over it.
             const titleRequest = textSettings.enabled
-              ? pendingTitleRequest(task, from, !s.messages.some((m) => m.taskId === taskId), text, attachments)
+              ? pendingTitleRequest(task, from, !s.messages.some((m) => m.taskId === taskId), sending, attachments)
               : null
             if (from === null) delete task.generateTitle
             // Any message of the user settles the task's question: it is the answer, or it is ignored once the question's
@@ -1803,20 +1844,22 @@ export const CoreLive = Layer.effect(
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
               // the answer; otherwise it steers the run's live turn, or waits in the run's inbox for task_inbox. Either
-              // way it reads where the run's transcript is now.
+              // way it reads where the run's transcript is now. Until the run takes it, it is pending: Kestrel holds an
+              // `inbox` message (the user may remove it) and an `agent` message waits on the CLI.
+              const waiter = ask !== null && ask.runId === running.id ? (liveAsks.get(ask.messageId) ?? null) : null
+              const answer = waiter === null ? null : { messageId: ask!.messageId, deferred: waiter.answer }
               const message: Message = {
                 id: messageId,
                 taskId,
                 role: "user",
-                text,
+                text: sending,
                 runId: running.id,
                 createdAt: now,
                 afterItems: harness.itemCount(running.id),
+                ...(waiter === null ? { pending: "inbox" as const } : {}),
                 ...attached,
                 ...sent,
               }
-              const waiter = ask !== null && ask.runId === running.id ? (liveAsks.get(ask.messageId) ?? null) : null
-              const answer = waiter === null ? null : { messageId: ask!.messageId, deferred: waiter.answer }
               if (from === null) {
                 // The user's message answers the question or supersedes it; either way it is the thread's next turn.
                 const answered = applyTaskEvent(s, task, { _tag: ask === null ? "userMessage" : "answer" })
@@ -1826,7 +1869,7 @@ export const CoreLive = Layer.effect(
               }
               task.updatedAt = now
               s.messages.push(message)
-              return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false, title: titleRequest })
+              return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false, removed, title: titleRequest })
             }
             // No run is going. The new run continues the native session of the newest run this provider's CLI
             // recorded, so the agent keeps the thread's context without replaying it. Runs that happened since (the
@@ -1865,7 +1908,8 @@ export const CoreLive = Layer.effect(
               if (previous.status === "failed" && previous.interruptedByRestart !== true) break
             }
             const runIndex = new Map(taskRuns.map((r, index) => [r.id, index] as const))
-            const history = s.messages.filter((m) => m.taskId === taskId)
+            // A pending message was never conversation the agent saw: it must not reach the fresh or delta prompt.
+            const history = s.messages.filter((m) => m.taskId === taskId && m.pending === undefined)
             const resumeIndex = resumeFrom === undefined ? -1 : (runIndex.get(resumeFrom.id) ?? -1)
             const earlier = resumeFrom === undefined
               ? []
@@ -1873,7 +1917,7 @@ export const CoreLive = Layer.effect(
             const run: Run = {
               id: newId(),
               taskId,
-              prompt: text,
+              prompt: sending,
               status: "running",
               startedAt: now,
               endedAt: null,
@@ -1884,7 +1928,7 @@ export const CoreLive = Layer.effect(
               effort: choice.effort ?? null,
               ...(autoRetryAttempt === undefined ? {} : { autoRetryAttempt }),
             }
-            const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
+            const message: Message = { id: messageId, taskId, role: "user", text: sending, runId: run.id, createdAt: now, ...attached, ...sent }
             if (from === null) {
               // The user's message starts the thread's next turn and clears a question the previous run left.
               const sentTurn = applyTaskEvent(s, task, { _tag: "userMessage" })
@@ -1945,6 +1989,7 @@ export const CoreLive = Layer.effect(
               answer: null,
               delivered,
               duplicate: false,
+              removed,
               start,
               title: titleRequest,
             })
@@ -1953,11 +1998,12 @@ export const CoreLive = Layer.effect(
         const reserved = reservation.value
         if (reservation._tag === "unconfirmed") yield* Effect.logWarning(`task ${taskId}: ${reservation.cause}`)
         if (reserved.duplicate) return { message: reserved.message, run: reserved.run }
+        // The held messages are gone from the state regardless of how the delivery itself goes; clients remove them
+        // first, and the new message follows.
+        for (const message of reserved.removed) hub.publish({ _tag: "message.removed", taskId, messageId: message.id })
         // In-memory bookkeeping follows the reservation, never runs inside it: the update's mutations are rolled back on a
-        // failed write, and these must not outlive them. A reply closes the question; the prompt is what a new run starts
-        // with, not mail for its inbox.
+        // failed write, and these must not outlive them. A reply closes the question.
         if (reserved.answer) liveAsks.delete(reserved.answer.messageId)
-        if (reserved.answer || reserved.start !== null) seenFor(reserved.run.id).add(reserved.message.id)
         hub.publish({ _tag: "task.updated", task: reserved.task })
         // A title is generated beside the run, never in front of it: a slow or failed provider cannot hold up or
         // break the message. The write itself re-checks that the thread still has its provisional title.
@@ -1986,27 +2032,47 @@ export const CoreLive = Layer.effect(
           // Mid-run. The run kept emitting items while the message was stored, so its position is taken again in the
           // step that hands it to the agent: items emitted before that reached the agent before the message did. A run
           // that ended meanwhile counts 0 items, so the count taken when the message was stored is the floor.
-          let afterItems = reserved.message.afterItems ?? 0
+          let message = reserved.message
           if (reserved.answer) {
-            afterItems = Math.max(afterItems, harness.itemCount(reserved.run.id))
+            const afterItems = Math.max(reserved.message.afterItems ?? 0, harness.itemCount(reserved.run.id))
             yield* Deferred.succeed(reserved.answer.deferred, { _tag: "answered", text: reserved.delivered })
+            if (afterItems !== reserved.message.afterItems) {
+              message = yield* store.update((s) => {
+                const stored = s.messages.find((m) => m.id === reserved.message.id)
+                if (stored) stored.afterItems = afterItems
+                return Either.right({ ...reserved.message, afterItems })
+              })
+            }
           } else {
-            // Taken from the inbox before the steer is sent, so task_inbox cannot hand it over a second time.
-            const seen = seenFor(reserved.run.id)
-            seen.add(reserved.message.id)
-            const steered = yield* harness.steer(reserved.run.id, reserved.delivered)
-            if (!steered.accepted) seen.delete(reserved.message.id)
-            afterItems = Math.max(afterItems, steered.afterItems)
+            // The message waits as `inbox` until the steer decides: Codex takes it now, Claude Code at its next step
+            // (`agent`), and a refused steer leaves it in the inbox for task_inbox. It is claimed as `agent` before the
+            // steer is sent: task_inbox only takes `inbox` messages, so a task_inbox call while the steer is in flight
+            // cannot hand it over a second time, and a message the user removed meanwhile is not sent at all.
+            const claim = (from: "inbox" | "agent", to: "inbox" | "agent" | undefined, afterItems?: number) =>
+              store.update((s): Either.Either<Message | null, never> => {
+                const stored = s.messages.find((m) => m.id === reserved.message.id)
+                if (stored === undefined) return Either.right(null)
+                if (stored.pending !== from) return Either.right({ ...stored })
+                if (to === undefined) delete stored.pending
+                else stored.pending = to
+                if (afterItems !== undefined) stored.afterItems = Math.max(stored.afterItems ?? 0, afterItems)
+                return Either.right({ ...stored })
+              })
+            const claimed = yield* claim("inbox", "agent")
+            if (claimed === null) return { message: reserved.message, run: reserved.run }
+            if (claimed.pending === "agent") {
+              const steered = yield* harness.steer(reserved.run.id, reserved.delivered, reserved.message.id)
+              const settled = !steered.accepted
+                ? yield* claim("agent", "inbox")
+                : steered.taken
+                  ? yield* claim("agent", undefined, steered.afterItems)
+                  : claimed
+              message = settled ?? claimed
+            } else {
+              message = claimed
+            }
           }
-          const message =
-            afterItems === reserved.message.afterItems
-              ? reserved.message
-              : yield* store.update((s) => {
-                  const stored = s.messages.find((m) => m.id === reserved.message.id)
-                  if (stored) stored.afterItems = afterItems
-                  return Either.right({ ...reserved.message, afterItems })
-                })
-          // Published once its position is final, so the thread never shows it in the wrong place.
+          // Published once its state is final for this call, so the thread never shows it in the wrong place.
           publishMessage(message)
           return { message, run: reserved.run }
         }
@@ -2041,6 +2107,42 @@ export const CoreLive = Layer.effect(
 
     const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds, dev) =>
       deliverMessage(user, taskId, text, choice, attachmentIds, dev, null)
+
+    const deleteMessage: CoreShape["deleteMessage"] = (user, taskId, messageId) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        const removed = yield* store.update(
+          (s): Either.Either<{ message: Message; unreferenced: ReadonlyArray<string> }, NotFound | Conflict> => {
+            const message = s.messages.find((m) => m.taskId === taskId && m.id === messageId)
+            if (message === undefined) return Either.left(new NotFound({ message: `message ${messageId} not found` }))
+            if (message.pending !== "inbox" && message.pending !== "held") {
+              return Either.left(new Conflict({ message: "this message cannot be removed: its agent already has it" }))
+            }
+            s.messages = s.messages.filter((m) => m !== message)
+            const unreferenced = (message.attachments ?? [])
+              .map((a) => a.id)
+              .filter(
+                (id) =>
+                  !s.messages.some((m) => m.taskId === taskId && (m.attachments ?? []).some((a) => a.id === id)) &&
+                  !s.uploads.some((u) => u.taskId === taskId && u.id === id),
+              )
+            return Either.right({ message: { ...message }, unreferenced })
+          },
+        )
+        // The bytes go with the message when nothing else names them; a held message sent as one keeps its files.
+        yield* Effect.forEach(
+          removed.unreferenced,
+          (id) =>
+            Effect.tryPromise(() => rm(join(config.attachmentsDir, id), { force: true })).pipe(
+              Effect.catchAll((e) => Effect.logWarning(`attachment ${id}: ${String(e)}`)),
+            ),
+          { discard: true },
+        )
+        hub.publish({ _tag: "message.removed", taskId, messageId })
+      })
+
+    const sendHeldMessages: CoreShape["sendHeldMessages"] = (user, taskId, choice) =>
+      deliverMessage(user, taskId, "", choice, [], false, null, undefined, undefined, undefined, true)
 
     const setUsageLimitAutoResume: CoreShape["setUsageLimitAutoResume"] = (user, taskId, autoResume) =>
       Effect.gen(function* () {
@@ -2501,17 +2603,21 @@ export const CoreLive = Layer.effect(
       })
 
     const inbox: CoreShape["inbox"] = (taskId, runId) =>
-      Effect.map(store.read, (state) => {
-        // Read state of runs that have ended is no longer needed.
-        for (const id of seenByRun.keys()) {
-          if (state.runs.find((r) => r.id === id)?.status !== "running") seenByRun.delete(id)
-        }
-        const seen = seenFor(runId)
-        const unread = state.messages.filter(
-          (m) => m.taskId === taskId && m.role === "user" && m.runId === runId && !seen.has(m.id),
-        )
-        for (const m of unread) seen.add(m.id)
-        return unread.map((m) => deliveredText(taskId, m))
+      Effect.gen(function* () {
+        // One update takes every message still in the run's inbox and clears its pending state, so a concurrent or
+        // repeated call finds nothing to hand over: a message reaches the agent once.
+        const taken = yield* store.update((s): Either.Either<Message[], never> => {
+          const messages = s.messages.filter(
+            (m) => m.taskId === taskId && m.role === "user" && m.runId === runId && m.pending === "inbox",
+          )
+          for (const m of messages) {
+            delete m.pending
+            m.afterItems = harness.itemCount(runId)
+          }
+          return Either.right(messages.map((m) => ({ ...m })))
+        })
+        for (const message of taken) publishMessage(message)
+        return taken.map((m) => deliveredText(taskId, m))
       })
 
     const attachment: CoreShape["attachment"] = (user, taskId, attachmentId) =>
@@ -2778,6 +2884,8 @@ export const CoreLive = Layer.effect(
         }),
 
       sendMessage,
+      deleteMessage,
+      sendHeldMessages,
       setUsageLimitAutoResume,
       githubActivity,
       sendToThread,

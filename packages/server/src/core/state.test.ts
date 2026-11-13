@@ -571,6 +571,30 @@ describe("restart reconciliation", () => {
     expect(state.runs[0]?.endedAt).not.toBeNull()
   })
 
+  test("a run the restart interrupted holds the messages it had not taken", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{ ...task("live"), status: "running" }],
+      messages: [
+        { ...message("inbox", "live", "r1", "user", "waiting"), pending: "inbox" },
+        { ...message("agent", "live", "r1", "user", "queued"), pending: "agent" },
+        { ...message("held", "live", "r1", "user", "already held"), pending: "held" },
+        { ...message("taken", "live", "r1", "user", "taken") },
+      ],
+      pendingAsks: [], uploads: [], runSessions: [],
+      runs: [runningRun("r1", "live")],
+    }))
+
+    const state = await loadState(root)
+
+    expect(state.messages.map((m) => [m.id, m.pending])).toEqual([
+      ["inbox", "held"],
+      ["agent", "held"],
+      ["held", "held"],
+      ["taken", undefined],
+    ])
+  })
+
   test("a thread still marked running with no run behind it is failed", async () => {
     const file = join(root, "state.json")
     await writeFile(file, JSON.stringify({

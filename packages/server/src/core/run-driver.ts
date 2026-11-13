@@ -18,8 +18,11 @@ export interface RunDriver {
   readonly start: () => void
   /** Every message the CLI prints, in order. */
   readonly receive: (message: unknown) => void
-  /** Adds `text` to the running turn. Resolves false when the turn can no longer take it. */
-  readonly steer: (text: string) => Promise<boolean>
+  /**
+   * Adds `text` to the running turn. Resolves false when the turn can no longer take it. `messageId` is the Kestrel
+   * message it carries, so a CLI that takes the message later (Claude Code's replay) can report it.
+   */
+  readonly steer: (text: string, messageId: string) => Promise<boolean>
   /** Asks the CLI to stop the running turn; false when it cannot be asked (the process is signalled instead). */
   readonly interrupt: () => boolean
   /** The CLI has exited: what it never answered fails, and a turn that never finished failed. */

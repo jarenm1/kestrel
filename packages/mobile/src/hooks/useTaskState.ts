@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type Message, type Run, type Task } from "@cloudagents/protocol";
 import { openTaskEvents } from "@/api/events";
-import { createQueries, boxKeys, invalidateRunItems, storeTask, upsert } from "@/api/queries";
+import { createQueries, boxKeys, invalidateRunItems, storeTask, upsert, upsertMessage } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { threadErrors } from "@/hooks/threadErrors";
 import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol";
@@ -80,7 +80,13 @@ export function useTaskState(taskId: string) {
             }
             case "message.created":
               queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
-                upsert(list, event.message)
+                upsertMessage(list, event.message)
+              );
+              break;
+            case "message.removed":
+              // A pending message the user removed; the box has already dropped it, so the local copy goes too.
+              queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
+                list?.filter((message) => message.id !== event.messageId)
               );
               break;
             case "run.updated":

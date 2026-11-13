@@ -311,7 +311,7 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
       pending.delete(message.id)
       onResult?.(message)
     },
-    steer: (text) => {
+    steer: (text, _messageId) => {
       if (threadId === null || turnId === null || outcome !== null) return Promise.resolve(false)
       const { promise, resolve } = Promise.withResolvers<boolean>()
       request("turn/steer", { threadId, expectedTurnId: turnId, input: textInput(text) }, (message) =>

@@ -31,7 +31,7 @@ test.each([4, 0])("a message sent mid-run retains its position (initial items: %
   const configLayer = Layer.succeed(Config, config)
   const workspaceLayer = Layer.succeed(WorkspaceService, {} as never)
   const stateLayer = StateLive.pipe(Layer.provide(Layer.merge(configLayer, workspaceLayer)))
-  const steered: Array<{ readonly runId: string; readonly text: string }> = []
+  const steered: Array<{ readonly runId: string; readonly text: string; readonly messageId: string }> = []
   // What each steer reports: the run emitted two more items while the first message was stored; it had ended (no
   // items in memory) by the time the second was sent.
   const deliveredAt = [6, 0]
@@ -43,10 +43,10 @@ test.each([4, 0])("a message sent mid-run retains its position (initial items: %
     Layer.succeed(AgentHarness, {
       // Zero still identifies a message joining an existing run, not a new run's prompt.
       itemCount: (runId: string) => (runId === "run" ? initialItems : 0),
-      steer: (runId: string, text: string) =>
+      steer: (runId: string, text: string, messageId: string) =>
         Effect.sync(() => {
-          steered.push({ runId, text })
-          return { accepted: true, afterItems: deliveredAt[steered.length - 1]! }
+          steered.push({ runId, text, messageId })
+          return { accepted: true, afterItems: deliveredAt[steered.length - 1]!, taken: true }
         }),
       stopAll: () => Effect.void,
     } as never),
@@ -91,8 +91,8 @@ test.each([4, 0])("a message sent mid-run retains its position (initial items: %
 
     expect(first.run.id).toBe("run")
     expect(steered).toEqual([
-      { runId: "run", text: "use the other file" },
-      { runId: "run", text: "and keep the tests" },
+      { runId: "run", text: "use the other file", messageId: first.message.id },
+      { runId: "run", text: "and keep the tests", messageId: second.message.id },
     ])
     // The position is the one at delivery; a run that ended meanwhile keeps the one taken when the message was stored.
     expect(first.message).toMatchObject({ runId: "run", afterItems: 6 })

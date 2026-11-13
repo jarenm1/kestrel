@@ -21,6 +21,8 @@ export const taskIdOf = (event: ServerEvent): string => {
       return event.taskId
     case "message.created":
       return event.message.taskId
+    case "message.removed":
+      return event.taskId
     case "run.updated":
       return event.run.taskId
     case "agent.output":

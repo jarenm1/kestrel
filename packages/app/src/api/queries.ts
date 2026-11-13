@@ -1,7 +1,7 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import { Either, Schema } from "effect"
 import type { AgentModel, BoxList, DesktopStatus, Message, ModelProvider, Run, RunItems, Task, ThreadPullRequestAction } from "@cloudagents/protocol"
-import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol"
+import { applyDesktopStatus, laterMessage, type DesktopStatusValue } from "@cloudagents/protocol"
 import { isDesktopStreamActive } from "@/desktop/status"
 import { api, signedInUser } from "./client"
 import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
@@ -120,6 +120,12 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
   const next = [...current]
   next[index] = item
   return next
+}
+
+/** `upsert` for a thread's messages: a copy at an earlier pending stage never replaces a later one (`laterMessage`). */
+export function upsertMessage(list: readonly Message[] | undefined, message: Message): Message[] {
+  const current = list?.find((m) => m.id === message.id)
+  return upsert(list, current === undefined ? message : laterMessage(current, message))
 }
 
 /**

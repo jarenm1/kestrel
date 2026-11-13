@@ -10,7 +10,7 @@ import {
   type ThreadPullRequestAction,
 } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
-import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol";
+import { applyDesktopStatus, laterMessage, type DesktopStatusValue } from "@cloudagents/protocol";
 import { pendingSaves } from "@/lib/pendingSaves";
 
 /**
@@ -95,6 +95,12 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
   const next = [...current];
   next[index] = item;
   return next;
+}
+
+/** `upsert` for a thread's messages: a copy at an earlier pending stage never replaces a later one (`laterMessage`). */
+export function upsertMessage(list: readonly Message[] | undefined, message: Message): Message[] {
+  const current = list?.find((m) => m.id === message.id);
+  return upsert(list, current === undefined ? message : laterMessage(current, message));
 }
 
 /**

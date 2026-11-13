@@ -39,14 +39,14 @@ import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
-import { StateStore, applyTaskEvent, newId, nowIso } from "./state"
+import { StateStore, applyTaskEvent, newId, nowIso, settlePendingMessages } from "./state"
 import { applyRunEvent } from "./run-state"
 import { makeAcpDriver, type AcpRunInput } from "./acp"
 import { makeClaudeDriver } from "./claude-stream"
 import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
-import { makeTranscript, type ResponseStreamingMode, type Transcript } from "./transcript"
+import { isRecord, makeTranscript, type ResponseStreamingMode, type Transcript } from "./transcript"
 import { agentDiagnostic, agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
 import { sessionGeneration } from "./session-generation"
 
@@ -77,10 +77,12 @@ export interface AgentHarnessShape {
   /**
    * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input).
    * `accepted` is false when the run cannot take it now (no turn going yet, or its last turn is over); the message
-   * then waits in the run's inbox for task_inbox. `afterItems` is the run's item count (`itemCount`) in the same
-   * step the text was sent, so every item before it was emitted before the agent got the text.
+   * then waits in the run's inbox for task_inbox. `taken` says the CLI has it now (Codex); false means it queued it
+   * for its next step (Claude Code, which reports back through `onTaken`). `afterItems` is the run's item count
+   * (`itemCount`) in the same step the text was sent, so every item before it was emitted before the agent got the
+   * text. `messageId` is the Kestrel message the text carries, so the CLI's take can be reported.
    */
-  readonly steer: (runId: string, text: string) => Effect.Effect<{ readonly accepted: boolean; readonly afterItems: number }>
+  readonly steer: (runId: string, text: string, messageId: string) => Effect.Effect<SteerResult>
   /** Marks a run that never started as failed. */
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
   /** A run's display items: the live list while it runs, the persisted final list afterwards. */
@@ -101,6 +103,11 @@ export interface AgentHarnessShape {
 }
 
 export class AgentHarness extends Context.Tag("cloudagents/AgentHarness")<AgentHarness, AgentHarnessShape>() {}
+
+/** What a run did with a steered message: refused it (it waits in the inbox), or took it now or at its next step. */
+export type SteerResult =
+  | { readonly accepted: false }
+  | { readonly accepted: true; readonly afterItems: number; readonly taken: boolean }
 
 /** Per-message agent choice; omitted fields leave the harness default. */
 export interface AgentChoice {
@@ -381,10 +388,11 @@ export const AgentHarnessLive = Layer.effect(
 
     /**
      * The one writer of a run's settlement: its status, `endedAt` and `exitCode`, its thread's phase (through
-     * `transitionTask`) and the closing message, in one guarded update. A run that already settled, or whose thread is
-     * gone, is left alone. A shutdown keeps the thread as it was; the next start's reconciliation owns that edge.
+     * `transitionTask`), the closing message and its pending messages, in one guarded update. A run that already
+     * settled, or whose thread is gone, is left alone. A shutdown keeps the thread as it was; the next start's
+     * reconciliation owns that edge. `afterItems` is the run's final item count, which positions messages it took.
      */
-    const settleRun = (runId: string, settlement: RunSettlement) =>
+    const settleRun = (runId: string, settlement: RunSettlement, afterItems = 0) =>
       Effect.gen(function* () {
         const now = nowIso()
         const outcome = yield* store.update((s) => {
@@ -437,7 +445,15 @@ export const AgentHarnessLive = Layer.effect(
                   createdAt: now,
                 }
           if (message !== null) s.messages.push(message)
-          return Either.right({ run: { ...run }, task: { ...task }, message, illegal, runIllegal })
+          // A run that succeeded took every message its CLI queued (Claude Code empties its queue before its final
+          // result); whatever else it never took is held for the user instead of being lost.
+          const messages = settlePendingMessages(
+            s.messages,
+            runId,
+            settlement._tag === "ended" && settlement.ok,
+            afterItems,
+          )
+          return Either.right({ run: { ...run }, task: { ...task }, message, messages, illegal, runIllegal })
         })
         if (outcome === null) return null
         // The run's settlement is truth even when the thread's phase refused the event; make that visible instead of
@@ -449,6 +465,7 @@ export const AgentHarnessLive = Layer.effect(
           yield* Effect.logWarning(`run ${runId}: settlement could not move the run (${outcome.runIllegal})`)
         }
         if (outcome.message !== null) publish({ _tag: "message.created", message: outcome.message })
+        for (const message of outcome.messages) publish({ _tag: "message.created", message })
         publish({ _tag: "run.updated", run: outcome.run })
         publish({ _tag: "task.updated", task: outcome.task })
         return outcome
@@ -527,7 +544,7 @@ export const AgentHarnessLive = Layer.effect(
           entry.transcript.finalText() ??
           failure ??
           (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
-        const outcome = yield* settleRun(runId, { _tag: "ended", ok, exitCode, text })
+        const outcome = yield* settleRun(runId, { _tag: "ended", ok, exitCode, text }, entry.items.size)
         if (outcome === null) return
         if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
           toolFailures?.record(agentFailure(entry.agentKind, spawnError ?? turn.error, entry.diagnostic, exitCode, signal))
@@ -599,6 +616,24 @@ export const AgentHarnessLive = Layer.effect(
       if (failure !== null) toolFailures.record(failure)
     }
 
+    /**
+     * Marks a message the CLI took at its next step (`onTaken`): its pending state is cleared and it is positioned
+     * after the run's items at that moment. A run that is no longer running already settled its messages, so a late
+     * report cannot revive one.
+     */
+    const markTaken = (runId: string, messageId: string) =>
+      Effect.gen(function* () {
+        const message = yield* store.update((s): Either.Either<Message | null, never> => {
+          const run = s.runs.find((r) => r.id === runId)
+          const stored = s.messages.find((m) => m.id === messageId && m.taskId === run?.taskId)
+          if (run?.status !== "running" || stored?.pending !== "agent") return Either.right(null)
+          delete stored.pending
+          stored.afterItems = itemCount(runId)
+          return Either.right({ ...stored })
+        })
+        if (message !== null) publish({ _tag: "message.created", message })
+      }).pipe(Effect.catchAll((e) => Effect.logWarning(`run ${runId}: could not mark its steered message taken: ${e.message}`)))
+
     const handleLine = (runId: string, stream: "stdout" | "stderr", line: string) => {
       const entry = active.get(runId)
       if (!entry) return
@@ -613,6 +648,9 @@ export const AgentHarnessLive = Layer.effect(
         try {
           const parsed: unknown = JSON.parse(trimmed)
           entry.driver?.receive(parsed)
+          // Claude Code's replay of a user message is the CLI reporting that it took the message, not conversation:
+          // it must not become a transcript item (the user's own words already are one).
+          if (isRecord(parsed) && parsed.type === "user" && parsed.isReplay === true) return
           if (entry.agentKind === "claude" && typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "result" && "is_error" in parsed && parsed.is_error === true) {
             const result = "result" in parsed && typeof parsed.result === "string" ? parsed.result : null
             const errors = "errors" in parsed && Array.isArray(parsed.errors) ? parsed.errors.find((e: unknown) => typeof e === "string") : null
@@ -733,7 +771,11 @@ export const AgentHarnessLive = Layer.effect(
               })
             } else {
               // Claude Code names its session in its stream-json `init`, which `handleLine` records.
-              entry.driver = makeClaudeDriver(conversation.prompt, { send, onDone })
+              entry.driver = makeClaudeDriver(conversation.prompt, {
+                send,
+                onTaken: (messageId) => runFork(markTaken(run.id, messageId)),
+                onDone,
+              })
             }
             active.set(run.id, entry)
             startingItems.delete(run.id)
@@ -1104,12 +1146,17 @@ export const AgentHarnessLive = Layer.effect(
 
       cancel: (runId) => stopRun(runId, false),
 
-      steer: (runId, text) =>
+      steer: (runId, text, messageId) =>
         Effect.promise(() => {
           // Counted and sent synchronously: no stdout line can add an item between the two.
           const afterItems = itemCount(runId)
-          const sent = active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)
-          return sent.then((accepted) => ({ accepted, afterItems }))
+          const entry = active.get(runId)
+          const sent = entry?.driver?.steer(text, messageId) ?? Promise.resolve(false)
+          // Claude Code takes a steered message at its next step, not when it is written; Codex takes it now.
+          return sent.then(
+            (accepted): SteerResult =>
+              accepted ? { accepted: true, afterItems, taken: entry?.agentKind !== "claude" } : { accepted: false },
+          )
         }),
 
       abort: (runId, reason) =>

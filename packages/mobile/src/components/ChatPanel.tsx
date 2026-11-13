@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Linking, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus, type UsageLimitResume } from "@cloudagents/protocol";
+import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendHeldMessagesBody, type SendMessageBody, type Task, type TaskStatus, type UsageLimitResume } from "@cloudagents/protocol";
 import type { ActiveBox } from "@/api/client";
-import { createQueries, boxKeys, storeTask, upsert, type ThreadCall } from "@/api/queries";
+import { createQueries, boxKeys, storeTask, upsert, upsertMessage, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
@@ -14,6 +14,7 @@ import { errorText, formatElapsed } from "@/lib/format";
 import { useNavigation } from "@/nav/navigation";
 import { colors, fonts, radius, spacing } from "@/theme";
 import { Composer } from "./Composer";
+import PendingMessagesDom from "./PendingMessagesDom";
 import TranscriptDom from "./TranscriptDom";
 import type { SwipeDirection } from "@/lib/swipe";
 
@@ -145,6 +146,13 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
     .filter((m) => m.role === "agent" && m.options !== undefined)
     .at(-1);
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined;
+  // The running turn took none of these yet; they wait above the composer rather than in the transcript.
+  const pendingMessages = messages
+    .filter((m) => m.pending !== undefined)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  // The pickers' choice for the next turn, and the model a held-messages send starts it under.
+  const lastRun = threadChoiceRun(sortedRuns, messages);
+  const heldBody: SendHeldMessagesBody = { model: lastRun?.model, effort: lastRun?.effort ?? undefined };
 
   const bridge = useTranscriptBridge({ taskId, messages, runs, runItems, pendingAskId: pendingAsk?.id });
 
@@ -152,7 +160,25 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
     mutationFn: ({ api, taskId, body }: ThreadCall & { body: SendMessageBody }) => api.sendMessage(taskId, body),
     onSuccess: (res, { api, taskId }) => {
       const keys = boxKeys(api.boxScope);
-      queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsert(list, res.message));
+      queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsertMessage(list, res.message));
+      queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, res.run));
+    },
+  });
+  const removeMessage = useMutation({
+    mutationFn: ({ api, taskId, messageId }: ThreadCall & { messageId: string }) =>
+      api.removeMessage(taskId, messageId),
+    onSuccess: (_removed, { api, taskId, messageId }) => {
+      // The box publishes `message.removed` too; dropping it here makes the row go at once.
+      queryClient.setQueryData<Message[]>(boxKeys(api.boxScope).messages(taskId), (list) =>
+        list?.filter((message) => message.id !== messageId),
+      );
+    },
+  });
+  const sendHeld = useMutation({
+    mutationFn: ({ api, taskId }: ThreadCall) => api.sendHeldMessages(taskId, heldBody),
+    onSuccess: (res, { api, taskId }) => {
+      const keys = boxKeys(api.boxScope);
+      queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsertMessage(list, res.message));
       queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, res.run));
     },
   });
@@ -194,6 +220,19 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
       <UsageLimitNotice task={task.data} />
       {fork.error ? <Alert>Could not fork the thread: {errorText(fork.error)}</Alert> : null}
       {activeRun ? <WorkingIndicator run={activeRun} /> : null}
+      {pendingMessages.length > 0 && (
+        <PendingMessagesDom
+          taskId={taskId}
+          messages={pendingMessages}
+          files={files.data ? { base: files.data.base, query: files.data.query } : null}
+          onRemove={async (messageId) => removeMessage.mutateAsync({ api, taskId, messageId })}
+          onSendHeld={async () => sendHeld.mutateAsync({ api, taskId })}
+          onFileError={async () => void files.refetch()}
+          onOpenExternal={async (url) => void Linking.openURL(url)}
+          // Sized to its content; the shared component bounds and scrolls its own message list.
+          dom={{ matchContents: true, scrollEnabled: false }}
+        />
+      )}
       {archivedTask ? (
         <ArchivedNotice task={archivedTask} />
       ) : (
@@ -207,7 +246,7 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
           activeRunProvider={activeRun?.provider}
           activeRunModel={activeRun?.model}
           activeRunHarness={activeRun?.harness}
-          lastRun={threadChoiceRun(sortedRuns, messages)}
+          lastRun={lastRun}
           onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}
           error={send.error ?? cancel.error}

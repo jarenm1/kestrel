@@ -51,6 +51,7 @@ import {
   RunItems,
   SendMessageBody,
   SendMessageResponse,
+  type SendHeldMessagesBody,
   SetActiveBoxBody,
   type SetDesktopQualityBody,
   Task,
@@ -882,6 +883,13 @@ export const api = {
     await onTask(taskId, Schema.Unknown, "DELETE", Paths.task(taskId))
   },
   listMessages: (taskId: string) => onTask(taskId, Schema.Array(Message), "GET", Paths.taskMessages(taskId)),
+  /** Removes a pending message Kestrel still holds (`inbox`) or one its run left (`held`). */
+  removeMessage: async (taskId: string, messageId: string): Promise<void> => {
+    await onTask(taskId, Schema.Unknown, "DELETE", Paths.taskMessage(taskId, messageId))
+  },
+  /** Sends the thread's held messages as one message, in their order, with the model for a new turn. */
+  sendHeldMessages: (taskId: string, body: SendHeldMessagesBody) =>
+    onTask(taskId, SendMessageResponse, "POST", Paths.taskHeldMessagesSend(taskId), body),
   /** Slash commands of the harness for the composer's chosen model in this thread. */
   commands: (taskId: string, model: AgentModel) =>
     onTask(taskId, HarnessCommands, "GET", `${Paths.taskCommands(taskId)}?model=${encodeURIComponent(model)}`),

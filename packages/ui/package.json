@@ -17,6 +17,7 @@
     "./usage": "./src/usage/UsageQuotas.tsx",
     "./transcript": "./src/transcript/Transcript.tsx",
     "./transcript/host": "./src/transcript/host.tsx",
+    "./transcript/pending": "./src/transcript/PendingMessages.tsx",
     "./markdown": "./src/transcript/Markdown.tsx",
     "./message-attachments": "./src/transcript/MessageAttachments.tsx",
     "./highlight": "./src/highlight/index.ts",

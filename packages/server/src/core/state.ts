@@ -300,6 +300,31 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
   })
 
 /**
+ * What a settled run does to the messages it was still holding: a successful run took every `agent` message its CLI
+ * queued (Claude Code empties that queue before its final result), and whatever it never took is held for the user.
+ * A message the agent already took (no `pending`) is left alone. Returns the changed messages for publication.
+ */
+export const settlePendingMessages = (
+  messages: ReadonlyArray<Mutable<Message>>,
+  runId: string,
+  succeeded: boolean,
+  afterItems: number,
+): Message[] => {
+  const changed: Message[] = []
+  for (const message of messages) {
+    if (message.runId !== runId || message.pending === undefined) continue
+    if (succeeded && message.pending === "agent") {
+      delete message.pending
+      message.afterItems = afterItems
+    } else {
+      message.pending = "held"
+    }
+    changed.push({ ...message })
+  }
+  return changed
+}
+
+/**
  * A run or task still marked running belongs to a previous server process, which is gone.
  * Mark them failed so the UI does not show work that cannot finish.
  */
@@ -318,6 +343,8 @@ const reconcile = (state: StoreState): void => {
   for (const run of state.runs) {
     if (run.status !== "running") continue
     applyRunEvent(run, { _tag: "interrupted" }, now)
+    // The process is gone, so nothing it was holding reached the agent: everything it still had is held for the user.
+    settlePendingMessages(state.messages, run.id, false, 0)
   }
 }
 

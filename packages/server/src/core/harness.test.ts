@@ -324,7 +324,7 @@ createInterface({ input: process.stdin }).on("line", () => {
         // The run never starts an agent: settling it first is what the later session line must be checked against.
         yield* harness.abort(run.id, "test: never started")
         expect((yield* store.read).runs.find((r) => r.id === run.id)?.status).toBe("failed")
-        yield* harness.steer(run.id, "name the session now")
+        yield* harness.steer(run.id, "name the session now", "message")
         for (let i = 0; i < 100 && (yield* harness.activeRunCount()) > 0; i++) yield* Effect.sleep("50 millis")
         // The session line was processed while the run was already failed; the record must not exist.
         yield* store.flush
@@ -378,7 +378,7 @@ createInterface({ input: process.stdin })
       })
       try {
         yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
-        expect((yield* harness.steer(run.id, "Queued message")).accepted).toBe(true)
+        expect((yield* harness.steer(run.id, "Queued message", "message")).accepted).toBe(true)
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
         const state = yield* store.read
         expect(state.runs[0]).toMatchObject({ status: "succeeded", exitCode: 0 })
@@ -476,7 +476,7 @@ createInterface({ input: process.stdin })
         yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
         expect(harness.itemCount(second.run.id)).toBe(2) // "Started." and the agent's text
         expect((yield* harness.items(second.run.id)).length).toBe(2)
-        expect(yield* harness.steer(second.run.id, "Wrap up")).toEqual({ accepted: true, afterItems: 2 })
+        expect(yield* harness.steer(second.run.id, "Wrap up", "message")).toEqual({ accepted: true, afterItems: 2, taken: false })
         // The run's finish is stored before the state directory goes.
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
       } finally {
@@ -558,11 +558,11 @@ createInterface({ input: process.stdin })
         yield* Effect.promise(() => waitingAgain.promise).pipe(Effect.timeout("8 seconds"))
         const items = yield* harness.items(parent.run.id)
         const liveCount = harness.itemCount(parent.run.id)
-        yield* harness.steer(child.run.id, "Wrap up")
+        yield* harness.steer(child.run.id, "Wrap up", "message")
         yield* Effect.promise(() => childFinished.promise).pipe(Effect.timeout("8 seconds"))
         yield* Fiber.join(released).pipe(Effect.timeout("8 seconds"))
         const resumedItems = yield* harness.items(parent.run.id)
-        yield* harness.steer(parent.run.id, "Wrap up")
+        yield* harness.steer(parent.run.id, "Wrap up", "message")
         yield* Effect.promise(() => parentFinished.promise).pipe(Effect.timeout("8 seconds"))
         // Assert after both subprocesses have exited so a before-fix failure cannot race directory cleanup.
         expect(items.filter((item) => item._tag === "text")).toMatchObject([{ text: "Working on First message" }])
@@ -1280,3 +1280,100 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     await rm(root, { recursive: true, force: true })
   }
 }, 12_000)
+
+test("a run's pending messages settle with it: a success takes its CLI queue, a failure or Stop holds them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-pending-settle-"))
+  const cli = join(root, "cli.ts")
+  // A Claude run that shows one item and keeps its turn open. "fail" fails on its own; a steer finishes it; Stop
+  // interrupts it. All three settle through the harness's normal paths.
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+const send = (message) => console.log(JSON.stringify(message))
+let started = false
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    const message = JSON.parse(line)
+    if (message.type === "control_request") {
+      send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } })
+      send({ type: "result", subtype: "error_during_execution", is_error: true })
+      return
+    }
+    if (message.type !== "user") return
+    const text = typeof message.message?.content === "string" ? message.message.content : ""
+    if (!started) {
+      started = true
+      send({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Working." }] }, parent_tool_use_id: null })
+      // In the child process: the turn fails shortly after its item, as a real CLI would, and the test waits on the
+      // run.updated event rather than on this delay.
+      if (text === "fail") setTimeout(() => send({ type: "result", subtype: "error_during_execution", is_error: true }), 100)
+      return
+    }
+    send({ type: "result", subtype: "success", is_error: false, result: "Done." })
+  })
+  .on("close", () => process.exit(0))
+`)
+  const { config, layer } = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const succeed = runningTask("succeed")
+      const fail = runningTask("fail")
+      const stop = runningTask("stop")
+      const seeded = [succeed, fail, stop]
+      yield* store.update((state) => {
+        for (const { task, run } of seeded) {
+          state.tasks.push(task)
+          state.runs.push(run)
+          state.messages.push(
+            { id: `${run.id}-agent`, taskId: task.id, role: "user", text: "queued", runId: run.id, createdAt: new Date().toISOString(), pending: "agent" },
+            { id: `${run.id}-inbox`, taskId: task.id, role: "user", text: "held", runId: run.id, createdAt: new Date().toISOString(), pending: "inbox" },
+          )
+        }
+        return Either.right(null)
+      })
+      const waits = seeded.map(({ task }) => {
+        const started = Promise.withResolvers<void>()
+        const finished = Promise.withResolvers<void>()
+        const unsubscribe = hub.subscribe(task.id, (event) => {
+          if (event._tag === "agent.item") started.resolve()
+          if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+        })
+        return { taskId: task.id, started: started.promise, finished: finished.promise, unsubscribe }
+      })
+      const waitFor = (taskId: string, kind: "started" | "finished") =>
+        waits.find((w) => w.taskId === taskId)![kind]
+      try {
+        yield* Effect.forEach(seeded, ({ task, run }) =>
+          Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true })).pipe(
+            Effect.zipRight(harness.spawn(task, run, { fresh: task.id, resume: null }, null, task.owner, {})),
+          ),
+          { discard: true },
+        )
+        for (const { task } of seeded) yield* Effect.promise(() => waitFor(task.id, "started")).pipe(Effect.timeout("8 seconds"))
+        yield* harness.steer(succeed.run.id, "finish", "steer")
+        yield* harness.cancel(stop.run.id)
+        for (const { task } of seeded) yield* Effect.promise(() => waitFor(task.id, "finished")).pipe(Effect.timeout("8 seconds"))
+
+        const state = yield* store.read
+        const messages = (taskId: string) => state.messages.filter((m) => m.taskId === taskId)
+        // The success took the message its CLI queued; the one Kestrel still held is held for the user.
+        expect(messages(succeed.task.id).find((m) => m.id === `${succeed.run.id}-agent`)?.pending).toBeUndefined()
+        expect(messages(succeed.task.id).find((m) => m.id === `${succeed.run.id}-agent`)?.afterItems).toBe(
+          (yield* harness.items(succeed.run.id)).length,
+        )
+        expect(messages(succeed.task.id).find((m) => m.id === `${succeed.run.id}-inbox`)?.pending).toBe("held")
+        for (const { task, run } of [fail, stop]) {
+          expect(messages(task.id).find((m) => m.id === `${run.id}-agent`)?.pending).toBe("held")
+          expect(messages(task.id).find((m) => m.id === `${run.id}-inbox`)?.pending).toBe("held")
+        }
+      } finally {
+        for (const wait of waits) wait.unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)

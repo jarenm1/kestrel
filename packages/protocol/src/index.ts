@@ -365,8 +365,28 @@ export const Message = Schema.Struct({
    * run's prompt and on messages persisted before it was recorded.
    */
   afterItems: Schema.optional(Schema.Number),
+  /**
+   * Set on a user message that reached a running run but that its agent has not taken yet; it shows above the composer
+   * instead of in the transcript. `inbox`: Kestrel still holds it for the run (until `task_inbox` reads it, or after a
+   * refused steer), so it can be removed. `agent`: handed to the CLI, which takes it at its next step (Claude Code), so
+   * it can no longer be removed. `held`: the run ended without the agent taking it; the user sends or removes it.
+   * Absent once the agent took it (its `afterItems` is then where it did), and on every other message.
+   */
+  pending: Schema.optional(Schema.Literal("inbox", "agent", "held")),
 })
 export type Message = typeof Message.Type
+
+/** How far along a message is: `inbox`, then `agent`, then taken (no `pending`) or `held`, which are both final. */
+const pendingStage = (message: Message): number =>
+  message.pending === "inbox" ? 0 : message.pending === "agent" ? 1 : 2
+
+/**
+ * The copy of a message a client keeps when another arrives. A message's pending state only moves forward, but the
+ * send response and the box's events can arrive in either order (a steer's response still says `agent` when Claude
+ * Code already took the message), so an earlier stage never replaces a later one.
+ */
+export const laterMessage = (current: Message, incoming: Message): Message =>
+  pendingStage(incoming) >= pendingStage(current) ? incoming : current
 
 export const RunStatus = Schema.Literal("running", "succeeded", "failed", "cancelled")
 export type RunStatus = typeof RunStatus.Type
@@ -715,6 +735,8 @@ export const ServerEvent = Schema.Union(
   /** The thread is gone (deleted, not archived). `owner` routes it to that user's `Paths.eventsWs` stream. */
   Schema.Struct({ _tag: Schema.Literal("task.deleted"), taskId: Schema.String, owner: Schema.String }),
   Schema.Struct({ _tag: Schema.Literal("message.created"), message: Message }),
+  /** A pending message the user removed before its agent took it. */
+  Schema.Struct({ _tag: Schema.Literal("message.removed"), taskId: Schema.String, messageId: Schema.String }),
   Schema.Struct({ _tag: Schema.Literal("run.updated"), run: Run }),
   Schema.Struct({
     _tag: Schema.Literal("agent.output"),
@@ -848,6 +870,13 @@ export type SendMessageBody = typeof SendMessageBody.Type
 
 export const SendMessageResponse = Schema.Struct({ message: Message, run: Run })
 export type SendMessageResponse = typeof SendMessageResponse.Type
+
+/** Sends the thread's held messages (`Message.pending` `held`) as one message, with the model for a new turn. */
+export const SendHeldMessagesBody = Schema.Struct({
+  model: Schema.optional(AgentModel),
+  effort: Schema.optional(AgentEffort),
+})
+export type SendHeldMessagesBody = typeof SendHeldMessagesBody.Type
 
 /** Changes of one checkout: everything on its branch and in its working tree, against its fork point. */
 export const CheckoutDiff = Schema.Struct({
@@ -1126,6 +1155,10 @@ export const Paths = {
   /** POST `ForkTaskBody` -> Task: a new thread with this thread's messages up to the named agent reply. */
   taskFork: (id: string) => `/api/tasks/${id}/fork`,
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
+  /** DELETE: removes a pending message (`Message.pending` `inbox` or `held`) before its agent takes it. */
+  taskMessage: (id: string, messageId: string) => `/api/tasks/${id}/messages/${messageId}`,
+  /** POST `SendHeldMessagesBody` -> `SendMessageResponse`: the held messages, in order, as one new message. */
+  taskHeldMessagesSend: (id: string) => `/api/tasks/${id}/messages/held/send`,
   /**
    * POST `SetPullRequestWatchingBody`: the control plane dropped this watch (the pull request closed). Clears the
    * thread's watch mark; a late or repeated call is a no-op, and the registry entry stays.

@@ -134,7 +134,7 @@ describe("codex app-server driver", () => {
     expect(h.driver.interrupt()).toBe(false)
     h.driver.receive({ method: "turn/started", params: { threadId: "th1", turn: { id: "tu-inner" } } })
     // App-server refuses to steer a review turn, but the request still names the review's turn.
-    const accepted = h.driver.steer("check the tests")
+    const accepted = h.driver.steer("check the tests", "message")
     expect(h.last()).toMatchObject({ method: "turn/steer", params: { expectedTurnId: "tu-review" } })
     h.driver.receive({ id: h.last().id, error: { message: "cannot steer a review turn" } })
     expect(await accepted).toBe(false)
@@ -193,13 +193,13 @@ describe("codex app-server driver", () => {
   test("steering needs a running turn and reports whether app-server took it; Stop interrupts the turn", async () => {
     const h = harness()
     h.driver.start()
-    expect(await h.driver.steer("too early")).toBe(false)
+    expect(await h.driver.steer("too early", "message")).toBe(false)
     expect(h.driver.interrupt()).toBe(false)
     h.reply({})
     h.reply({ thread: { id: "th1" } })
     h.reply({ turn: { id: "tu1" } })
 
-    const accepted = h.driver.steer("use the other file")
+    const accepted = h.driver.steer("use the other file", "message")
     expect(h.last()).toMatchObject({
       method: "turn/steer",
       params: { threadId: "th1", expectedTurnId: "tu1", input: [{ type: "text", text: "use the other file" }] },
@@ -207,7 +207,7 @@ describe("codex app-server driver", () => {
     h.reply({ turnId: "tu1" })
     expect(await accepted).toBe(true)
 
-    const refused = h.driver.steer("again")
+    const refused = h.driver.steer("again", "message")
     h.driver.receive({ id: h.last().id, error: { message: "expected turn mismatch" } })
     expect(await refused).toBe(false)
 
@@ -215,7 +215,7 @@ describe("codex app-server driver", () => {
     expect(h.last()).toMatchObject({ method: "turn/interrupt", params: { threadId: "th1", turnId: "tu1" } })
     h.driver.receive(turnCompleted("tu1", "interrupted"))
     expect(h.outcomes).toEqual([{ status: "interrupted" }])
-    expect(await h.driver.steer("after the turn")).toBe(false)
+    expect(await h.driver.steer("after the turn", "message")).toBe(false)
   })
 
   test("approvals are accepted, other server requests refused; an exit fails the turn and pending steers", async () => {
@@ -229,7 +229,7 @@ describe("codex app-server driver", () => {
     h.driver.receive({ id: 91, method: "item/tool/requestUserInput", params: {} })
     expect(h.last()).toMatchObject({ id: 91, error: { code: -32601 } })
 
-    const pending = h.driver.steer("are you there")
+    const pending = h.driver.steer("are you there", "message")
     h.driver.close()
     expect(await pending).toBe(false)
     expect(h.outcomes).toEqual([{ status: "failed", error: "Codex exited before its turn finished." }])
