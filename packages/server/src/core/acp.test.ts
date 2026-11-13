@@ -30,7 +30,7 @@ const harness = (overrides: Partial<AcpRunInput> = {}, io: Pick<AcpDriverIo, "pe
     {
       prompt: "user context\n\nfix the test",
       cwd: "/threads/t1/kestrel",
-      resumeSession: null,
+      resume: null,
       mcpServers: [{ type: "http", name: "cloudagents", url: "http://box/mcp/t1", headers: [{ name: "Authorization", value: "Bearer tok" }] }],
       ...overrides,
     },
@@ -85,20 +85,33 @@ describe("ACP driver", () => {
     expect(h.outcomes).toEqual([{ status: "completed" }])
   })
 
-  test("a resumed run resumes its session without replay; a refused resume fails the run", () => {
-    const h = harness({ resumeSession: "s-old" })
+  test("a resumed run resumes its session without replay; a refused resume opens a fresh session with the whole conversation", () => {
+    const h = harness({ resume: { sessionId: "s-old", prompt: "since then" } })
     h.driver.start()
     h.reply({})
     expect(h.last()).toMatchObject({ method: "session/resume", params: { sessionId: "s-old", cwd: "/threads/t1/kestrel" } })
     h.reply({ configOptions: [] })
     expect(h.sessions).toEqual(["s-old"])
-    expect(h.last().method).toBe("session/prompt")
+    expect(h.last()).toMatchObject({ method: "session/prompt", params: { sessionId: "s-old", prompt: [{ type: "text", text: "since then" }] } })
 
-    const refused = harness({ resumeSession: "s-gone" })
+    // OpenCode refuses a session created before the thread's checkout moved its cwd.
+    const refused = harness({ resume: { sessionId: "s-root", prompt: "since then" } })
     refused.driver.start()
     refused.reply({})
-    refused.driver.receive({ jsonrpc: "2.0", id: refused.last().id, error: { code: -32602, message: "session not found" } })
-    expect(refused.outcomes).toEqual([{ status: "failed", error: "session/resume: session not found" }])
+    refused.driver.receive({
+      jsonrpc: "2.0",
+      id: refused.last().id,
+      error: { code: -32602, message: "Invalid params: session s-root does not belong to cwd: /threads/t1/kestrel" },
+    })
+    expect(refused.last()).toMatchObject({ method: "session/new", params: { cwd: "/threads/t1/kestrel" } })
+    refused.reply({ sessionId: "s-new", configOptions: [] })
+    expect(refused.sessions).toEqual(["s-new"])
+    expect(refused.last()).toMatchObject({
+      method: "session/prompt",
+      params: { sessionId: "s-new", prompt: [{ type: "text", text: "user context\n\nfix the test" }] },
+    })
+    refused.reply({ stopReason: "end_turn" })
+    expect(refused.outcomes).toEqual([{ status: "completed" }])
   })
 
   test("the thinking level is set through whatever option the model's thought_level category names, only when offered", () => {
@@ -129,7 +142,7 @@ describe("ACP driver", () => {
 
   test("a resumed run's message that starts with a slash still carries the context and conversation around it", () => {
     const prompt = "user context\n\nYour session last ran before the following happened in this thread:\n…\n\n/review branch"
-    const h = harness({ resumeSession: "s-old", prompt })
+    const h = harness({ resume: { sessionId: "s-old", prompt } })
     h.driver.start()
     h.reply({})
     h.reply({ configOptions: [] })

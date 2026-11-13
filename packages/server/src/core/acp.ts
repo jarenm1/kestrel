@@ -17,12 +17,15 @@ export interface AcpMcpServer {
 }
 
 export interface AcpRunInput {
-  /** What the turn sends: the message with the box's user context and any carried conversation around it. */
+  /** What a fresh session's turn sends: the message with the box's user context and the conversation so far in full. */
   readonly prompt: string
   /** Where the thread works: its first checkout, or the workspace root (`agentCwd` in `harness.ts`). */
   readonly cwd: string
-  /** The thread's previous session of this agent, or null for a fresh one. */
-  readonly resumeSession: string | null
+  /**
+   * The thread's previous session of this agent and what its turn sends there (only what happened since), or null for
+   * a fresh session. A session the agent refuses to resume falls back to a fresh one with `prompt`.
+   */
+  readonly resume: { readonly sessionId: string; readonly prompt: string } | null
   readonly provider?: string
   readonly model?: string
   readonly effort?: string
@@ -161,6 +164,8 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
   let nextId = 1
   const pending = new Map<number, (message: Record<string, unknown>) => void>()
   let sessionId: string | null = null
+  /** What the turn sends: the resume prompt in a resumed session, the full conversation in a fresh one. */
+  let text = input.prompt
   let prompting = false
   let outcome: RunOutcome | null = null
 
@@ -189,7 +194,7 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
     prompting = true
     request(
       "session/prompt",
-      { sessionId, prompt: [{ type: "text", text: input.prompt }] },
+      { sessionId, prompt: [{ type: "text", text }] },
       orFail("session/prompt", (result) => {
         prompting = false
         switch (result.stopReason) {
@@ -241,33 +246,41 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
     )
   }
 
-  const openSession = () => {
-    const session = { cwd: input.cwd, mcpServers: input.mcpServers }
-    if (input.resumeSession === null) {
-      request(
-        "session/new",
-        session,
-        orFail("session/new", (result) => {
-          if (typeof result.sessionId !== "string") {
-            finish({ status: "failed", error: "session/new: no session in the response" })
-            return
-          }
-          sessionId = result.sessionId
-          io.onSession(sessionId)
-          configure(result)
-        }),
-      )
-      return
-    }
-    sessionId = input.resumeSession
+  const newSession = (session: Record<string, unknown>) =>
     request(
-      "session/resume",
-      { sessionId, ...session },
-      orFail("session/resume", (result) => {
-        io.onSession(sessionId as string)
+      "session/new",
+      session,
+      orFail("session/new", (result) => {
+        if (typeof result.sessionId !== "string") {
+          finish({ status: "failed", error: "session/new: no session in the response" })
+          return
+        }
+        sessionId = result.sessionId
+        io.onSession(sessionId)
         configure(result)
       }),
     )
+
+  const openSession = () => {
+    const session = { cwd: input.cwd, mcpServers: input.mcpServers }
+    const resume = input.resume
+    if (resume === null) {
+      newSession(session)
+      return
+    }
+    request("session/resume", { sessionId: resume.sessionId, ...session }, (message) => {
+      // OpenCode binds a session to the directory it was created in, and a thread's cwd moves into its first checkout
+      // once it has one (`agentCwd`): a session from before the checkout is refused there. Whatever the reason, a
+      // session the agent will not resume is gone for this run; a fresh one carrying the whole conversation continues.
+      if (message.error !== undefined || !isRecord(message.result)) {
+        newSession(session)
+        return
+      }
+      sessionId = resume.sessionId
+      text = resume.prompt
+      io.onSession(resume.sessionId)
+      configure(message.result)
+    })
   }
 
   const answerAgentRequest = (message: Record<string, unknown>) => {

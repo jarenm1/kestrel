@@ -287,7 +287,7 @@ const runAcp = (
         {
           prompt,
           cwd: launch.cwd,
-          resumeSession: null,
+          resume: null,
           provider,
           model,
           ...(effort === undefined ? {} : { effort }),
