@@ -1023,9 +1023,9 @@ export const AgentHarnessLive = Layer.effect(
                     kind: "acp",
                     provider,
                     input: {
-                      prompt,
+                      prompt: start.fresh,
                       cwd,
-                      resumeSession,
+                      resume: resumed === null ? null : { sessionId: resumed.sessionId, prompt: resumed.prompt },
                       provider,
                       model:
                         choice.model === undefined
