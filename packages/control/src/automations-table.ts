@@ -18,6 +18,7 @@ const COLUMNS = `
   repo TEXT,
   prompt TEXT NOT NULL,
   model TEXT,
+  effort TEXT,
   enabled INTEGER NOT NULL,
   trigger_json TEXT NOT NULL,
   next_run_at INTEGER,
@@ -47,8 +48,12 @@ export const ensureAutomationsTable = (sql: AutomationsSql): void => {
     .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = 'model'")
     .toArray()
   if (modelColumn.length === 0) sql.exec("ALTER TABLE automations ADD COLUMN model TEXT")
+  const effortColumn = sql
+    .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = 'effort'")
+    .toArray()
+  if (effortColumn.length === 0) sql.exec("ALTER TABLE automations ADD COLUMN effort TEXT")
   // Retired harness choices use the same box default as an automation with no explicit model.
-  sql.exec(`UPDATE automations SET model = NULL WHERE model IN (
+  sql.exec(`UPDATE automations SET model = NULL, effort = NULL WHERE model IN (
     'omp-deepseek-flash', 'omp-deepseek-pro', 'pi-deepseek-flash', 'pi-deepseek-pro',
     'hermes-deepseek-flash', 'hermes-deepseek-pro'
   )`)

@@ -14,6 +14,7 @@ const payload = (automation: Automation): AutomationShare => ({
   repo: automation.repo,
   prompt: automation.prompt,
   model: automation.model ?? null,
+  effort: automation.effort ?? null,
   trigger: automation.trigger,
 })
 
