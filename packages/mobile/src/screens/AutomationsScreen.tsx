@@ -105,7 +105,10 @@ function AutomationRow({
   const [lastRun, setLastRun] = useState<AutomationRun | null>(null);
   const runs = useQuery({ ...queries.automationRuns(automation.id), enabled: showRuns });
 
-  const isGithub = automation.trigger._tag === "github";
+  const quickAction = automation.trigger._tag === "quickAction";
+  const needsPullRequest = automation.trigger._tag !== "schedule";
+  // A quick action without a repository runs on a pull request's own repository, picked in a thread's pull requests.
+  const runnableHere = !quickAction || automation.repo !== null;
   const pullRequestNumber = Number(pullRequest.trim());
   const pullRequestValid = Number.isInteger(pullRequestNumber) && pullRequestNumber > 0;
 
@@ -135,19 +138,21 @@ function AutomationRow({
             <Text style={styles.name} numberOfLines={1}>
               {automation.name}
             </Text>
-            <EnabledBadge enabled={automation.enabled} />
+            {quickAction ? null : <EnabledBadge enabled={automation.enabled} />}
           </View>
           <Text style={styles.repo} numberOfLines={1}>
-            {automation.repo ?? "No repository"}
+            {automation.repo ?? (quickAction ? "Any repository" : "No repository")}
           </Text>
           <Text style={styles.meta}>{describeTrigger(automation.trigger)}</Text>
         </View>
-        <Switch
-          value={automation.enabled}
-          disabled={toggle.isPending}
-          onValueChange={(enabled) => toggle.mutate(enabled)}
-          accessibilityLabel={`Enabled: ${automation.name}`}
-        />
+        {quickAction ? null : (
+          <Switch
+            value={automation.enabled}
+            disabled={toggle.isPending}
+            onValueChange={(enabled) => toggle.mutate(enabled)}
+            accessibilityLabel={`Enabled: ${automation.name}`}
+          />
+        )}
       </View>
 
       <Text style={styles.prompt} numberOfLines={2}>
@@ -186,24 +191,26 @@ function AutomationRow({
         </View>
       </View>
 
-      <View style={styles.runNow}>
-        {isGithub ? (
-          <Input
-            style={styles.pullRequestInput}
-            value={pullRequest}
-            onChangeText={setPullRequest}
-            placeholder="Pull request #"
-            keyboardType="number-pad"
-          />
-        ) : null}
-        <Button
-          variant="soft"
-          disabled={unavailable || run.isPending || (isGithub && !pullRequestValid)}
-          onPress={() => run.mutate(isGithub ? { pullRequest: pullRequestNumber } : {})}
-        >
-          {run.isPending ? "Starting…" : "Run now"}
-        </Button>
-      </View>
+      {runnableHere ? (
+        <View style={styles.runNow}>
+          {needsPullRequest ? (
+            <Input
+              style={styles.pullRequestInput}
+              value={pullRequest}
+              onChangeText={setPullRequest}
+              placeholder="Pull request #"
+              keyboardType="number-pad"
+            />
+          ) : null}
+          <Button
+            variant="soft"
+            disabled={unavailable || run.isPending || (needsPullRequest && !pullRequestValid)}
+            onPress={() => run.mutate(needsPullRequest ? { pullRequest: pullRequestNumber } : {})}
+          >
+            {run.isPending ? "Starting…" : "Run now"}
+          </Button>
+        </View>
+      ) : null}
 
       {error ? <Alert>{errorText(error)}</Alert> : null}
       {lastRun ? <RunLine run={lastRun} /> : null}

@@ -45,6 +45,12 @@ export interface PullRequestInfo {
   readonly baseRef: string
 }
 
+/** The pull request an automation run works on, with the repository it belongs to. */
+export interface PullRequestTarget {
+  readonly repo: string
+  readonly pr: PullRequestInfo
+}
+
 /** A pull request event, reduced to what trigger matching and the task prompt need. */
 export interface PullRequestEvent {
   /** Webhook action, e.g. "opened" or "review_requested". */

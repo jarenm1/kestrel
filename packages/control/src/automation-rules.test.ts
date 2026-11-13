@@ -20,4 +20,9 @@ describe("triggerProblem", () => {
     expect(triggerProblem(github, null, NOW)).toBe("GitHub triggers need a GitHub repository")
     expect(triggerProblem(github, "acme/app", NOW)).toBeNull()
   })
+
+  test("a quick action needs no repository", () => {
+    expect(triggerProblem({ _tag: "quickAction" }, null, NOW)).toBeNull()
+    expect(triggerProblem({ _tag: "quickAction" }, "acme/app", NOW)).toBeNull()
+  })
 })
