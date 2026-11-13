@@ -4,8 +4,9 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { ChevronRight, CornerUpLeft, X } from "lucide-react"
 import { describeTool, threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol"
 import { Transcript } from "@cloudagents/ui/transcript"
+import { PendingMessages } from "@cloudagents/ui/transcript/pending"
 import { api } from "@/api/client"
-import { keys, queries, upsert } from "@/api/queries"
+import { keys, queries, upsert, upsertMessage } from "@/api/queries"
 import { isTaskAwaitingUser, isTaskWorking } from "@cloudagents/protocol"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
@@ -275,12 +276,35 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
   // on it, moves into the composer: its screenshot, question and options sit above the box until it is answered.
   const lastAsk = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).reverse().find((m) => m.options !== undefined)
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined
+  // The running turn took none of these yet; they wait above the composer rather than in the transcript.
+  const pendingMessages = messages
+    .filter((m) => m.pending !== undefined)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  // The pickers' choice for the next turn, and the model a held-messages send starts it under.
+  const lastRun = threadChoiceRun(sortedRuns, messages)
 
   const send = useMutation({
     mutationFn: ({ body, files = [] }: { body: SendMessageBody; files?: readonly File[] }) =>
       api.sendMessage(taskId, body, files),
     onSuccess: (res) => {
-      queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) => upsert(list, res.message))
+      queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) => upsertMessage(list, res.message))
+      queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, res.run))
+    },
+  })
+  const removeMessage = useMutation({
+    mutationFn: (messageId: string) => api.removeMessage(taskId, messageId),
+    onSuccess: (_removed, messageId) => {
+      // The box publishes `message.removed` too; dropping it here makes the row go at once.
+      queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
+        list?.filter((message) => message.id !== messageId),
+      )
+    },
+  })
+  const sendHeld = useMutation({
+    mutationFn: () =>
+      api.sendHeldMessages(taskId, { model: lastRun?.model, effort: lastRun?.effort ?? undefined }),
+    onSuccess: (res) => {
+      queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) => upsertMessage(list, res.message))
       queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, res.run))
     },
   })
@@ -338,6 +362,16 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
           stale copies of the strip behind each time the working indicator comes and goes.
         */}
         <DelegatedTasks taskId={taskId} />
+        {/* Above the composer, below the delegated threads; its message list scrolls, so a long queue never hides the composer. */}
+        {pendingMessages.length > 0 && (
+          <PendingMessages
+            taskId={taskId}
+            messages={pendingMessages}
+            className="mb-2 w-full max-w-3xl"
+            onRemove={removeMessage.mutateAsync}
+            onSendHeld={sendHeld.mutateAsync}
+          />
+        )}
         {archivedTask ? (
           <ArchivedNotice task={archivedTask} />
         ) : (
@@ -350,7 +384,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
             activeRunProvider={activeRun?.provider}
             activeRunModel={activeRun?.model}
             activeRunHarness={activeRun?.harness}
-            lastRun={threadChoiceRun(sortedRuns, messages)}
+            lastRun={lastRun}
             onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}
             ask={pendingAsk}

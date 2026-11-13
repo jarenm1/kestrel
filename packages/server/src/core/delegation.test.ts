@@ -51,7 +51,7 @@ const withCore = async (body: (h: Harnessed) => Effect.Effect<void, unknown>): P
     Layer.succeed(CredentialBroker, {} as never),
     Layer.succeed(AgentHarness, {
       spawn: (_task: unknown, _run: unknown, _start: unknown, _display: unknown, _user: unknown, choice: AgentChoice) => Effect.sync(() => { choices.push(choice) }),
-      steer: () => Effect.succeed(false), cancel: (id: string) => testStore!.update((s) => {
+      steer: () => Effect.succeed({ accepted: false }), cancel: (id: string) => testStore!.update((s) => {
         const run = s.runs.find((r) => r.id === id)
         if (run?.status === "running") { run.status = "cancelled"; run.endedAt = new Date().toISOString() }
         return Either.right(undefined)

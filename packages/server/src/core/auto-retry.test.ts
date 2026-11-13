@@ -38,7 +38,7 @@ const coreDeps = (config: ServerConfig, spawned: { readonly prompt: string; read
     Layer.succeed(AgentHarness, {
       spawn: (_task: unknown, _run: unknown, start: RunStart, _display: unknown, _user: unknown, choice: AgentChoice) =>
         Effect.sync(() => void spawned.push({ prompt: start.resume?.prompt ?? start.fresh, choice })),
-      steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
+      steer: () => Effect.succeed({ accepted: true, afterItems: 0, taken: true }),
       cancel: () => Effect.void,
       stopAll: () => Effect.void, items: () => Effect.succeed([]), itemCount: () => 0,
     } as never),

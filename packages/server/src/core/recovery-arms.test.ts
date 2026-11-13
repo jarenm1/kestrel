@@ -68,7 +68,7 @@ const withCore = async (body: (core: CoreShape, store: StoreShape) => Effect.Eff
     Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never), Layer.succeed(CredentialBroker, {} as never),
     Layer.succeed(AgentHarness, {
       spawn: (_task: unknown, _run: unknown, _start: RunStart, _display: unknown, _user: unknown, _choice: AgentChoice) => Effect.void,
-      steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
+      steer: () => Effect.succeed({ accepted: true, afterItems: 0, taken: true }),
       cancel: () => Effect.void,
       stopAll: () => Effect.void, items: () => Effect.succeed([]), itemCount: () => 0,
     } as never),

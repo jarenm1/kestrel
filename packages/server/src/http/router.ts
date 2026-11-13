@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_API, BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, CliSelectAccountBody, Conflict, CreateTaskBody, ForkTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
+import { BOX_API, BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, CliSelectAccountBody, Conflict, CreateTaskBody, ForkTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendHeldMessagesBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
 import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
@@ -498,6 +498,24 @@ export const makeRouter = (
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),
     ),
   ).pipe(
+    HttpRouter.del(
+      "/api/tasks/:id/messages/:messageId",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        noContent(signedIn((user) => core.deleteMessage(user, p.id ?? "", p.messageId ?? ""))),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/tasks/:id/messages/held/send",
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(SendHeldMessagesBody), (body) =>
+              core.sendHeldMessages(user, id, { model: body.model, effort: body.effort }),
+            ),
+          ),
+        ),
+      ),
+    ),
     HttpRouter.get(
       "/api/runs/:id/items",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.runItems(user, id)))),

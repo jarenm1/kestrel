@@ -23,9 +23,10 @@ const CLAUDE_INSTRUCTIONS =
 /**
  * The prompt goes in on stdin (`--input-format stream-json`), so the harness can add messages to a running turn and
  * interrupt it (`core/claude-stream.ts`). `--include-partial-messages` streams text and thinking as `stream_event`
- * deltas next to the finished blocks.
+ * deltas next to the finished blocks. `--replay-user-messages` re-emits each stdin user message once Claude Code takes
+ * it, which is how the run learns that a steered message reached the agent; the first prompt is replayed too.
  */
-export const DEFAULT_ANTHROPIC_COMMAND = `claude -p --input-format stream-json \${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --append-system-prompt ${shellQuote(CLAUDE_INSTRUCTIONS)} --output-format stream-json --verbose --include-partial-messages \${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} \${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}`
+export const DEFAULT_ANTHROPIC_COMMAND = `claude -p --input-format stream-json --replay-user-messages \${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --append-system-prompt ${shellQuote(CLAUDE_INSTRUCTIONS)} --output-format stream-json --verbose --include-partial-messages \${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} \${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}`
 
 /**
  * Codex runs as app-server on stdio; the harness opens the thread and its turn over JSON-RPC

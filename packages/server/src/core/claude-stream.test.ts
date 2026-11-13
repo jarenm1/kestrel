@@ -6,11 +6,23 @@ import type { RunOutcome } from "./run-driver"
 const harness = () => {
   const sent: unknown[] = []
   const done: RunOutcome[] = []
-  const driver = makeClaudeDriver("user context\n\nfix the test", { send: (m) => sent.push(m), onDone: (o) => done.push(o) })
-  return { driver, sent, done }
+  const taken: string[] = []
+  const driver = makeClaudeDriver("user context\n\nfix the test", {
+    send: (m) => sent.push(m),
+    onTaken: (messageId) => taken.push(messageId),
+    onDone: (o) => done.push(o),
+  })
+  return { driver, sent, done, taken }
 }
 
 const user = (text: string) => ({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null })
+/** The uuid a recorded stdin message carries; a steer always sends one. */
+const uuidOf = (message: unknown): string => {
+  if (typeof message !== "object" || message === null || !("uuid" in message) || typeof message.uuid !== "string") {
+    throw new Error("expected a message with a uuid")
+  }
+  return message.uuid
+}
 const result = (isError = false) => ({ type: "result", subtype: isError ? "error_during_execution" : "success", is_error: isError })
 
 describe("claude stream-json driver", () => {
@@ -18,14 +30,27 @@ describe("claude stream-json driver", () => {
     const h = harness()
     h.driver.start()
     expect(h.sent).toEqual([user("user context\n\nfix the test")])
-    expect(await h.driver.steer("use the other file")).toBe(true)
-    expect(h.sent.at(-1)).toEqual(user("use the other file"))
+    expect(await h.driver.steer("use the other file", "message-1")).toBe(true)
+    expect(h.sent.at(-1)).toEqual({ ...user("use the other file"), uuid: expect.any(String) })
+    // Writing a steer is not taking it: Claude Code replays it only at its next step.
+    expect(h.taken).toEqual([])
+    h.driver.receive({ ...user("use the other file"), uuid: uuidOf(h.sent.at(-1)), isReplay: true })
+    expect(h.taken).toEqual(["message-1"])
 
     h.driver.receive(result())
     expect(h.done).toEqual([{ status: "completed" }])
     // Once stdin is closed a message cannot reach the run; it waits in the inbox instead.
-    expect(await h.driver.steer("too late")).toBe(false)
+    expect(await h.driver.steer("too late", "message-2")).toBe(false)
     expect(h.sent).toHaveLength(2)
+  })
+
+  test("only a steered message's replay is reported; the prompt's own replay and unknown uuids are ignored", () => {
+    const h = harness()
+    h.driver.start()
+    // The first prompt is replayed too (with a uuid the box never assigned): it is not a steer.
+    h.driver.receive({ ...user("user context\n\nfix the test"), uuid: "prompt-uuid", isReplay: true })
+    h.driver.receive({ ...user("what?"), uuid: "unknown", isReplay: true })
+    expect(h.taken).toEqual([])
   })
 
   test("a message Claude Code queued behind the first turn decides the outcome, without reopening stdin", () => {

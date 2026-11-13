@@ -180,7 +180,12 @@ The harness starts the CLI selected by the model's catalog route. API access and
 compatible API-key models can run in Claude Code, Codex or OpenCode without changing the credential provider.
 Subscription logins remain native-only. The broker forwards the harness's supported upstream protocol and keeps
 real API keys on the host; it does not translate unsupported APIs. See [harness compatibility](harnesses.md#harness-compatibility).
-The box supports steering and interruption while a run is active. Native sessions are isolated by provider and
+The box supports steering and interruption while a run is active. A message sent during a run stays pending above the
+composer until its agent takes it: `Message.pending` is `inbox` while Kestrel holds it for `task_inbox`, `agent` once
+Claude Code has it queued (Codex takes a steer at once), and a message a settled run never took becomes `held` for the
+user to send as one new message or remove (`DELETE /api/tasks/:id/messages/:messageId`, `POST
+/api/tasks/:id/messages/held/send`). Pending messages are not conversation the agent saw, so they never enter a later
+run's prompt or a fork. Native sessions are isolated by provider and
 harness; returning to one carries only messages from runs since that session last participated. Without a usable
 session, the run starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics
 never become portable conversation history. Catalog routes and validated provider-qualified runtime identities

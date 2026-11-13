@@ -318,7 +318,7 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
       onResult?.(message)
     },
     // ACP has no way into a running turn: the message waits in the run's inbox for task_inbox.
-    steer: () => Promise.resolve(false),
+    steer: (_text, _messageId) => Promise.resolve(false),
     interrupt: () => {
       if (sessionId === null || !prompting || outcome !== null) return false
       io.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } })

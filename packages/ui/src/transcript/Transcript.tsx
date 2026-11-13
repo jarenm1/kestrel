@@ -184,7 +184,11 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
   const contentRef = useRef<HTMLDivElement>(null)
   const atEnd = useRef(true)
 
-  const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  // A message the running turn has not taken waits above the composer (PendingMessages), not here; once the agent takes
+  // it its `pending` clears and `message.created` re-publishes it with its final `afterItems`.
+  const sortedMessages = messages
+    .filter((m) => m.pending === undefined)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   const messagesById = new Map(sortedMessages.map((m) => [m.id, m] as const))
   const runsById = new Map(runs.map((run) => [run.id, run] as const))
   // After each user message a run took comes what the run showed until its next one, so a message that steered the run

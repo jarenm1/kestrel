@@ -34,6 +34,7 @@ import {
   PutApiKeyBody,
   Run,
   RunItems,
+  SendHeldMessagesBody,
   SendMessageBody,
   SendMessageResponse,
   Task,
@@ -156,7 +157,11 @@ export interface ApiClient {
   /** A new thread with this thread's conversation up to and including agent reply `messageId`. */
   forkTask(taskId: string, messageId: string): Promise<Task>;
   listMessages(taskId: string): Promise<readonly Message[]>;
+  /** Removes a pending message Kestrel still holds (`inbox`) or one its run left (`held`). */
+  removeMessage(taskId: string, messageId: string): Promise<void>;
   sendMessage(taskId: string, body: SendMessageBody): Promise<SendMessageResponse>;
+  /** Sends the thread's held messages as one message, in their order, with the model for a new turn. */
+  sendHeldMessages(taskId: string, body: SendHeldMessagesBody): Promise<SendMessageResponse>;
   listRuns(taskId: string): Promise<readonly Run[]>;
   runItems(runId: string): Promise<RunItems>;
   cancelRun(runId: string): Promise<Run>;
@@ -447,7 +452,11 @@ export function createApiClient(
     unarchiveTask: (taskId) => boxRequest(Task, "DELETE", Paths.taskArchive(taskId)),
     forkTask: (taskId, messageId) => boxRequest(Task, "POST", Paths.taskFork(taskId), { messageId } satisfies ForkTaskBody),
     listMessages: (taskId) => boxRequest(Schema.Array(Message), "GET", Paths.taskMessages(taskId)),
+    removeMessage: (taskId, messageId) =>
+      boxRequest(Schema.Unknown, "DELETE", Paths.taskMessage(taskId, messageId)).then(() => undefined),
     sendMessage: (taskId, body) => boxRequest(SendMessageResponse, "POST", Paths.taskMessages(taskId), body),
+    sendHeldMessages: (taskId, body) =>
+      boxRequest(SendMessageResponse, "POST", Paths.taskHeldMessagesSend(taskId), body),
     listRuns: (taskId) => boxRequest(Schema.Array(Run), "GET", Paths.taskRuns(taskId)),
     runItems: (runId) => boxRequest(RunItems, "GET", Paths.runItems(runId)),
     cancelRun: (runId) => boxRequest(Run, "POST", Paths.runCancel(runId)),

@@ -54,7 +54,7 @@ const withCore = async (
         Effect.sync(() => {
           spawned.push({ prompt: start.resume?.prompt ?? start.fresh, resumeSession: start.resume?.sessionId ?? null, fresh: start.fresh, choice })
         }),
-      steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
+      steer: () => Effect.succeed({ accepted: true, afterItems: 0, taken: true }),
       cancel: (id: string) => testStore!.update((s) => {
         const run = s.runs.find((r) => r.id === id)
         if (run?.status === "running") { run.status = "cancelled"; run.endedAt = new Date().toISOString() }

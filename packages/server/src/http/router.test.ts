@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { BOX_USER_HEADER, type BoxCapabilities, NotFound, Paths, type ThreadPullRequestAction } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, type BoxCapabilities, Conflict, NotFound, Paths, type ThreadPullRequestAction } from "@cloudagents/protocol"
 import type { CoreShape } from "../core/service"
 import { makeWebHandler, type RouterHooks } from "./router"
 
@@ -210,5 +210,44 @@ describe("pull request routes", () => {
     const response = await handler(postAction({ action: "watch", repo: "acme/widget", number: 7, watching: false }))
     expect(response.status).toBe(400)
     expect(events).toEqual(["hook false", "hook false"])
+  })
+})
+
+describe("pending message routes", () => {
+  test("removing a pending message names the signed-in user, thread and message, and answers 204", async () => {
+    const calls: string[] = []
+    const handler = await handlerFor({
+      deleteMessage: (user: string, taskId: string, messageId: string) => {
+        calls.push(`${user} ${taskId} ${messageId}`)
+        return Effect.void
+      },
+    } as unknown as Partial<CoreShape>)
+    const response = await handler(request(Paths.taskMessage("t1", "m1"), { method: "DELETE" }))
+    expect(response.status).toBe(204)
+    expect(calls).toEqual(["alice t1 m1"])
+  })
+
+  test("a message the agent has cannot be removed: the Conflict becomes 409", async () => {
+    const handler = await handlerFor({
+      deleteMessage: () => Effect.fail(new Conflict({ message: "this message cannot be removed: its agent already has it" })),
+    } as unknown as Partial<CoreShape>)
+    const response = await handler(request(Paths.taskMessage("t1", "m1"), { method: "DELETE" }))
+    expect(response.status).toBe(409)
+    expect((await response.json())._tag).toBe("Conflict")
+  })
+
+  test("sending the held messages reaches the core with the chosen model", async () => {
+    const choices: unknown[] = []
+    const handler = await handlerFor({
+      sendHeldMessages: (_user: string, _taskId: string, choice: unknown) => {
+        choices.push(choice)
+        return Effect.succeed({} as never)
+      },
+    } as unknown as Partial<CoreShape>)
+    const response = await handler(
+      request(Paths.taskHeldMessagesSend("t1"), { method: "POST", body: JSON.stringify({ model: "gpt-6-sol", effort: "high" }) }),
+    )
+    expect(response.status).toBe(200)
+    expect(choices).toEqual([{ model: "gpt-6-sol", effort: "high" }])
   })
 })

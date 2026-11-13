@@ -163,7 +163,7 @@ describe("ACP driver", () => {
     expect(h.last()).toEqual({ jsonrpc: "2.0", id: 7, result: { outcome: { outcome: "selected", optionId: "always" } } })
     h.driver.receive({ jsonrpc: "2.0", id: 8, method: "fs/read_text_file", params: { path: "/etc/passwd" } })
     expect(h.last()).toMatchObject({ id: 8, error: { code: -32601 } })
-    expect(await h.driver.steer("more")).toBe(false)
+    expect(await h.driver.steer("more", "message")).toBe(false)
     const prompt = h.sent.find((m) => m.method === "session/prompt") as Sent
     expect(h.driver.interrupt()).toBe(true)
     expect(h.last()).toEqual({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "s1" } })

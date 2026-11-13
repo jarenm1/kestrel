@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { Message, Run, RunItems, Task } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
-import { invalidateRunItems, keys, queries, storeTask, upsert } from "@/api/queries"
+import { invalidateRunItems, keys, queries, storeTask, upsert, upsertMessage } from "@/api/queries"
 import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol"
 import { isDesktopStreamActive } from "@/desktop/status"
 import { threadErrors } from "./threadErrors"
@@ -90,7 +90,13 @@ export function useTaskState(taskId: string) {
             break
           case "message.created":
             queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
-              upsert(list, event.message),
+              upsertMessage(list, event.message),
+            )
+            break
+          case "message.removed":
+            // A pending message the user removed; the box has already dropped it, so the local copy goes too.
+            queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
+              list?.filter((message) => message.id !== event.messageId),
             )
             break
           case "run.updated":

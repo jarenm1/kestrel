@@ -61,7 +61,7 @@ describe("deliverMessage under state write faults", () => {
       Layer.succeed(CredentialBroker, {} as never),
       Layer.succeed(AgentHarness, {
         itemCount: () => 0,
-        steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
+        steer: () => Effect.succeed({ accepted: true, afterItems: 0, taken: true }),
         spawn: (_task: unknown, run: { id: string }) => Effect.sync(() => { spawned.push(run.id) }),
         stopAll: () => Effect.void,
       } as never),

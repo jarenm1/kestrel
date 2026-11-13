@@ -340,6 +340,13 @@ const main = async (): Promise<number> => {
   if (probe === "thread-probe") return runThreadProbe(arg)
   if (probe === "gh-probe") return runGhProbe(request.trim().split(/\s+/).slice(1).join(" ") || "--version")
   if (probe === "ask-probe") return runAskProbe()
+  // Works for a while without reading its inbox, so messages sent meanwhile stay pending above the composer (on an
+  // ACP or refused-steer run) and are held once the run ends or is stopped.
+  if (probe === "wait-probe") {
+    await sleepMs(Number(arg ?? "30") * 1000)
+    await call("task_report", { status: "done", message: "wait probe finished" })
+    return 0
+  }
   // Another agent's "ping" (sent by a thread probe) is answered with "pong" to the thread it came from.
   const ping = /^Message from the agent of .*\(thread id (\S+)\):\n\nping\n/.exec(request)
   if (ping !== null) {
@@ -515,7 +522,12 @@ const serveClaude = () => {
   }
   createInterface({ input: process.stdin })
     .on("line", (line) => {
-      const message = JSON.parse(line) as { type?: string; request_id?: string; message?: { content?: unknown } }
+      const message = JSON.parse(line) as {
+        type?: string
+        request_id?: string
+        uuid?: string
+        message?: { content?: unknown }
+      }
       if (message.type === "control_request") {
         send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } })
         endTurn(1, true)
@@ -524,6 +536,10 @@ const serveClaude = () => {
       if (message.type !== "user") return
       const text = typeof message.message?.content === "string" ? message.message.content : ""
       if (started) {
+        // A steer is taken at once, as Claude Code's next step would: replay its uuid so the box sees it was taken.
+        if (typeof message.uuid === "string") {
+          send({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, uuid: message.uuid, isReplay: true })
+        }
         console.log(`fake-agent: steered with: ${text}`)
         return
       }
