@@ -121,6 +121,6 @@ test("missing tokens never turn partial totals into a misleading rate", () => {
 
 test("running runs have no completion footer; stops and failures retain duration", () => {
   expect(summary([], { status: "running", endedAt: null })).toBe("")
-  expect(summary([], { status: "cancelled" })).toContain("Stopped for 1m")
-  expect(summary([], { status: "failed" })).toContain("Failed for 1m")
+  expect(summary([], { status: "cancelled" })).toContain("Stopped after 1m")
+  expect(summary([], { status: "failed" })).toContain("Failed after 1m")
 })

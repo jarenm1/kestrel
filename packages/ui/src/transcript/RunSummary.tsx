@@ -95,11 +95,13 @@ export function RunSummary({ run, items }: { run: Run; items: readonly AgentItem
   if (run.status === "running") return null
   const elapsed = workedMs(run)
   const label = run.interruptedByRestart ? "Interrupted by restart" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Worked"
+  // "Worked for 1m" describes a span of work; a stop or failure is a point in time, so it ends "after 1m".
+  const preposition = label === "Worked" ? "for" : "after"
   return (
     <div className="tabular-nums">
       <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className={cn(ROW_CLASS, "w-fit")}>
         <span>
-          {label}{Number.isNaN(elapsed) ? "" : ` for ${duration(elapsed)}`}
+          {label}{Number.isNaN(elapsed) ? "" : ` ${preposition} ${duration(elapsed)}`}
           {run.endedAt !== null && <><span aria-hidden="true"> · </span><time dateTime={run.endedAt}>{formatMessageTime(run.endedAt)}</time></>}
         </span>
         <Chevron open={open} />
