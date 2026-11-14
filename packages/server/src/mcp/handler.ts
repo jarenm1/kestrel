@@ -15,6 +15,7 @@ import { type ThreadToolDeps, registerThreadTools } from "./tools/threads"
 import { type ToolkitToolDeps, registerToolkitTools } from "./tools/toolkits"
 import { type WorkspaceToolDeps, registerWorkspaceTools } from "./tools/workspace"
 import { type GpuToolDeps, registerGpuTools } from "./tools/gpu"
+import type { SandboxLevel } from "../sandbox"
 
 export interface McpAuthDeps {
   readonly auth: {
@@ -35,7 +36,10 @@ export type McpDeps = McpAuthDeps &
   GitHubToolDeps &
   AutomationToolDeps &
   ToolkitToolDeps &
-  GpuToolDeps
+  GpuToolDeps & {
+    /** The box's sandbox level: under `strict` each task has its own network namespace. */
+    readonly sandbox: SandboxLevel
+  }
 
 const MCP_PATH = /^\/mcp\/([^/?#]+)/
 
@@ -48,6 +52,10 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
         "Desktop coordinates are pixels with the origin at the top-left. The desktop is not started with the run: call " +
         "desktop_open before any other desktop tool, then desktop_screenshot to see the desktop and its size. " +
         (deps.toolkits === null ? "" : "Optional desktop apps (Blender, Firefox, Roblox Studio) come in through toolkit_install, and nixpkgs command-line packages through nix_install (there is no `nix` command in the sandbox). ") +
+        "Each checkout from repo_checkout is already on its own branch for this thread: work and commit there. The sandbox has no GitHub credentials, so `git push` fails: " +
+        "push with git_push and open pull requests with github_pr_create (`gh pr` and `gh api` also work; the box runs them for you). git_push never force-pushes, " +
+        "so to catch up with the base branch, merge it instead of rebasing a branch you already pushed. Builds, tests and dev servers run inside the sandbox: run them to verify your work. " +
+        (deps.sandbox === "strict" ? "This task has its own network namespace, so the project's default ports are free. " : "") +
         "After starting a web dev server, call " +
         "preview_open with its port so the user can inspect it in the thread's Preview tab. Use task_report to tell the user when you are done, task_ask to ask them a question " +
         "and wait for the answer, and task_inbox between steps to read messages the user, or another of the user's agents, sent during the run. " +

@@ -179,6 +179,7 @@ const program = Effect.gen(function* () {
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),
     },
     toolkits: config.toolkitsFlake === null ? null : { install: core.toolkitInstall, installPackage: core.nixPackageInstall },
+    sandbox: config.sandbox,
     report: core.report,
     github: {
       push: core.gitPush,
