@@ -72,7 +72,8 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 - Either starts the Worker, a dev box and Vite, and prints its ports. `nix run` installs dependencies on first run;
   run `bun install --frozen-lockfile` yourself before `bun run dev`.
 - Ports are unique per Linux user and per `KESTREL_DEV_SLOT` (0-9). **Give every worktree that runs at the same
-  time its own slot**, or the second stack fails on a busy port.
+  time its own slot**, or the second stack fails on a busy port. Inside a Kestrel task sandbox the network namespace
+  is the task's own, so leave the slot unset (0) unless you run two stacks in that task.
 - **At most one stack per worktree.** The local Worker state (`.wrangler/`) is per directory; a second stack
   in the same worktree dies with `SQLITE_BUSY`. Need two stacks? Use two worktrees.
 - `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent (no model key, exercises MCP and the desktop). Use a real key only
