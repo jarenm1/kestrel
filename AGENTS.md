@@ -92,6 +92,10 @@ bun run typecheck      # all packages, must pass
 bun run build:app      # if packages/app or packages/mobile changed (it also builds the mobile web export)
 ```
 
+All of this works inside a Kestrel task sandbox too: `bun run typecheck` (about 25 s), `bun run build:app` (about
+50 s) and the full stack with `bun run dev`, wrangler and workerd included (ready in about 15 s). Verify locally there
+instead of assuming you can't.
+
 Then exercise the change for real: run the stack, click through the affected flow (or call the endpoint), and
 say in the PR what you ran and what you saw. There is no CI; the PR description is the evidence. **Visual changes
 need screenshots in the PR:** push them to an orphan branch `<github-login>/<topic>-screenshots` and embed
