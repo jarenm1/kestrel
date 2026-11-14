@@ -3,6 +3,13 @@
 Instructions for humans and coding agents working on Kestrel. Several people and several agents work in
 parallel on one shared machine, so the workflow below is mandatory.
 
+**Inside a Kestrel task sandbox** (`CLOUDAGENTS_TASK_ID` is set): the worktree flow below is for the shared machine and
+does not apply. The task's checkout is your worktree: it is already on its own branch (`cloudagents/<slug>`) and
+there is no main clone. The sandbox has no GitHub token, so `git push` fails. Commit in the checkout, push with the
+`git_push` tool and open the PR with `github_pr_create` (or `gh pr create`). To catch up with `main`, `git fetch origin
+main && git merge origin/main`: `git_push` never force-pushes, so don't rebase a pushed branch. The rules below still
+apply: never merge the PR unless the human you work for says so.
+
 ## The rules
 
 1. **One change = one git worktree = one branch = one PR.** Never edit the main checkout, never work on `main`.
