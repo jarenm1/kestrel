@@ -59,7 +59,7 @@ export const registerToolkitTools = (server: McpServer, ctx: RunContext, deps: T
     "nix_install",
     {
       description:
-        "Install a command-line package from nixpkgs into this task, by attribute path (e.g. 'ffmpeg', 'jq', " +
+        "Install a command-line package from nixpkgs into this task, by attribute path (e.g. 'ffmpeg', " +
         "'imagemagick'). There is no `nix` command in your sandbox; this is how to get Nix packages. Its executables land " +
         "on PATH like a toolkit's (see toolkit_install). A library (e.g. 'python3Packages.requests') has no executables; " +
         "its files are under ~/.kestrel/toolkits/nixpkgs.<attr>/, e.g. for PYTHONPATH. " +

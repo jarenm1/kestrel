@@ -161,6 +161,15 @@
             git
             curl
             ripgrep
+            jq
+            python3
+            sqlite # `sqlite3`
+            gnutar
+            unzip
+            gnumake
+            gcc # `cc`
+            iproute2 # `ip`, `ss`
+            lsof
             nodejs_22
             bun
             claude-code
