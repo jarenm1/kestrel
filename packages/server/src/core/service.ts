@@ -50,6 +50,8 @@ import {
   DEFAULT_TEXT_GENERATION_SETTINGS,
   type TextGenerationSettings,
   type ThreadSettings,
+  type RunItemsScope,
+  scopeRunItems,
 } from "@cloudagents/protocol"
 import { MODEL_HARNESS, harnessForRoute } from "../agent-clis"
 import { CliAuth } from "../cliauth"
@@ -448,8 +450,11 @@ export interface CoreShape {
   /** Daily agent activity of `user` over the last year, days counted in `timeZone` (a valid IANA zone). */
   readonly usageActivity: (user: string, now: Date, timeZone: string) => Effect.Effect<UsageActivity>
   readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
-  /** A run's display items; another user's run is NotFound, like every other owned route. */
-  readonly runItems: (user: string, runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, NotFound | InternalError>
+  /**
+   * A run's display items, all of them or the part `scope` names (`Paths.runItems`); another user's run is NotFound,
+   * like every other owned route.
+   */
+  readonly runItems: (user: string, runId: string, scope?: RunItemsScope) => Effect.Effect<ReadonlyArray<AgentItem>, NotFound | InternalError>
 
   readonly desktopStatus: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound>
   readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
@@ -2956,14 +2961,15 @@ export const CoreLive = Layer.effect(
           return yield* requireRun(runId)
         }),
 
-      runItems: (user, runId) =>
+      runItems: (user, runId, scope) =>
         Effect.gen(function* () {
           const run = yield* requireRun(runId)
           const state = yield* store.read
           if (!ownsTask(state, user, run.taskId)) {
             return yield* Effect.fail(new NotFound({ message: `run ${runId} not found` }))
           }
-          return yield* harness.items(runId)
+          const items = yield* harness.items(runId)
+          return scope === undefined ? items : scopeRunItems(items, scope, run.taskId, run.status === "running")
         }),
 
       desktopStatus: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.status(taskId)),

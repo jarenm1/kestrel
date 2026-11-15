@@ -13,6 +13,7 @@ import {
   modelHarness,
   modelInfo,
   modelUpstreamId,
+  mainItemCount,
   type AgentEffort,
   type AgentItem,
   type AgentModel,
@@ -87,7 +88,11 @@ export interface AgentHarnessShape {
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
   /** A run's display items: the live list while it runs, the persisted final list afterwards. */
   readonly items: (runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, InternalError>
-  /** How many display items a live run has shown so far (a run waiting for a slot shows its queue item); 0 once it is over. */
+  /**
+   * How many of the main agent's display items a live run has shown so far (a run waiting for a slot shows its queue
+   * item); 0 once it is over. A subagent's items are not counted: a message's position is among the main agent's,
+   * which every client has, whether or not it loaded the subagents' (`Paths.runItems` scopes).
+   */
   readonly itemCount: (runId: string) => number
   /**
    * Plays a recorded fixture through the normal run pipeline (stdout -> items -> finish) instead
@@ -544,7 +549,7 @@ export const AgentHarnessLive = Layer.effect(
           entry.transcript.finalText() ??
           failure ??
           (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
-        const outcome = yield* settleRun(runId, { _tag: "ended", ok, exitCode, text }, entry.items.size)
+        const outcome = yield* settleRun(runId, { _tag: "ended", ok, exitCode, text }, mainItemCount(entry.items.values()))
         if (outcome === null) return
         if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
           toolFailures?.record(agentFailure(entry.agentKind, spawnError ?? turn.error, entry.diagnostic, exitCode, signal))
@@ -718,7 +723,7 @@ export const AgentHarnessLive = Layer.effect(
               published: new Map(),
               held: new Map(),
               heldTimer: null,
-              transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType), session.streaming),
+              transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType), session.streaming, task.id),
               context: session.seed,
               sessionId: null,
               continuation: session.continuation,
@@ -794,8 +799,11 @@ export const AgentHarnessLive = Layer.effect(
       })
 
     // An active run counts its own items first: one waiting for its slot back (withSlotReleased) also has a queue item.
-    const itemCount = (runId: string): number =>
-      active.get(runId)?.items.size ?? (queuedItems.has(runId) || startingItems.has(runId) ? 1 : 0)
+    const itemCount = (runId: string): number => {
+      const entry = active.get(runId)
+      if (entry !== undefined) return mainItemCount(entry.items.values())
+      return queuedItems.has(runId) || startingItems.has(runId) ? 1 : 0
+    }
 
     const readItems = (runId: string): Effect.Effect<ReadonlyArray<AgentItem>, InternalError> =>
       Effect.gen(function* () {

@@ -1,10 +1,24 @@
-import type { Message } from "./index"
+import type { AgentItem, Message } from "./index"
 
-/** The display items of a run at positions `from` up to `to` (null: through the last one). */
+/**
+ * The main agent's display items of a run at positions `from` up to `to` (null: through the last one). Positions count
+ * only the main agent's items (`isMainItem`): a subagent's items hang under its `subagent` item wherever they arrived,
+ * and a client that shows only the main agent's (`Paths.runItems` scope `main`) counts the same positions.
+ */
 export interface TranscriptSegment {
   readonly runId: string
   readonly from: number
   readonly to: number | null
+}
+
+/** An item the main agent showed, not one a subagent made. */
+export const isMainItem = (item: AgentItem): boolean => item._tag === "turn" || item._tag === "error" || item.parentToolId === null
+
+/** How many of `items` are the main agent's: the position the next one, or a message the run takes now, has. */
+export function mainItemCount(items: Iterable<AgentItem>): number {
+  let count = 0
+  for (const item of items) if (isMainItem(item)) count++
+  return count
 }
 
 /**

@@ -251,3 +251,23 @@ describe("pending message routes", () => {
     expect(choices).toEqual([{ model: "gpt-6-sol", effort: "high" }])
   })
 })
+
+describe("run items route", () => {
+  test("the scope a client asks for reaches the core, and an unknown one is BadRequest", async () => {
+    const received: Array<string | undefined> = []
+    const handler = await handlerFor({
+      runItems: (_user: string, _runId: string, scope?: string) => {
+        received.push(scope)
+        return Effect.succeed([])
+      },
+    } as unknown as Partial<CoreShape>)
+    for (const scope of [undefined, "main", "subagents"] as const) {
+      const response = await handler(request(Paths.runItems("r1", scope)))
+      expect(response.status).toBe(200)
+    }
+    expect(received).toEqual([undefined, "main", "subagents"])
+    const bogus = await handler(request("/api/runs/r1/items?scope=everything"))
+    expect(bogus.status).toBe(400)
+    expect(received).toHaveLength(3)
+  })
+})

@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { BOX_API, BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, CliSelectAccountBody, Conflict, CreateTaskBody, ForkTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendHeldMessagesBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
-import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings } from "@cloudagents/protocol"
+import { Paths, RunItemsScope, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
@@ -518,7 +518,18 @@ export const makeRouter = (
     ),
     HttpRouter.get(
       "/api/runs/:id/items",
-      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.runItems(user, id)))),
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          Effect.gen(function* () {
+            const req = yield* HttpServerRequest.HttpServerRequest
+            const raw = new URL(req.url, "http://localhost").searchParams.get("scope")
+            const scope = raw === null
+              ? undefined
+              : yield* Schema.decodeUnknown(RunItemsScope)(raw).pipe(Effect.mapError(() => new BadRequest({ message: `unknown scope ${raw}` })))
+            return yield* signedIn((user) => core.runItems(user, id, scope))
+          }),
+        ),
+      ),
     ),
     HttpRouter.get(
       "/api/tasks/:id/diff",

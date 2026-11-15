@@ -217,6 +217,18 @@ present partial token totals as complete; unreported values say â€œNot reportedâ
 Counts are compact with exact values on hover. Per-response metadata remains stored but no longer creates rows
 or splits consecutive tool groups. The context meter remains a separate current-context measurement.
 
+A subagent the harness runs inside a run is a `subagent` run item: Claude Code's `Agent`/`Task` call (the item takes
+the call's id) and Codex's `subAgentActivity` (its items arrive on a thread of its own, which the transcript maps to
+the subagent). Its own items carry its id as `parentToolId`; the transcript keeps its tally (tool calls, failures,
+newest step) on the item and re-sends it as they arrive. Claude Code starts subagents in the background: the call
+returns a launch notice at once, so the item stays running until `task_notification`, whose summary is its report.
+A Codex subagent ends with its `completed` activity and reports its last answer; its turn's end is not the run's,
+and its token use stays out of the thread's context. `GET /api/runs/:id/items?scope=main` returns the main agent's
+items with each subagent as its item (runs recorded before subagent items get one built from the call),
+`scope=subagents` what the subagents did; the desktop app loads the latter only when a subagent is opened in the
+Agents tab. Message positions (`afterItems`) count the main agent's items only, so a steer splits the transcript in
+the same place whether a client loaded subagent items or not. The phone app loads every item.
+
 OMP, Pi and Hermes remain outside the current product scope. Existing harnesses share compatible API-key
 providers through the model picker rather than introducing a separate per-thread harness control.
 

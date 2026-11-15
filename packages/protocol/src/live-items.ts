@@ -2,20 +2,27 @@ import type { AgentItem } from "./index"
 
 /**
  * Items that may still be streaming. The main agent and each subagent (items under one `parentToolId`) stream
- * concurrently, so each stream's newest item is live while the run is; a subagent's stream ends with its tool call.
+ * concurrently, so each stream's newest item is live while the run is; a subagent's stream ends with it (its
+ * `subagent` item, or the tool call that started it on runs recorded before those).
  * An item updated in place keeps its position, so "newest" is the last position per stream, not the last update.
  * A `usage` item ends the response it followed, so it becomes that stream's newest and settles the thinking before it.
  */
 export function liveItemIds(items: readonly AgentItem[], running: boolean): ReadonlySet<string> {
   const live = new Set<string>()
   if (!running) return live
-  const toolStatus = new Map(items.flatMap((item) => (item._tag === "tool" ? [[item.id, item.status] as const] : [])))
+  const ended = new Map(
+    items.flatMap((item) =>
+      item._tag === "tool" ? [[item.id, item.status !== "running"] as const]
+      : item._tag === "subagent" ? [[item.id, item.status !== "running"] as const]
+      : [],
+    ),
+  )
   const newestByStream = new Map<string | null, string>()
   for (const item of items) {
     newestByStream.set(item._tag === "turn" || item._tag === "error" ? null : item.parentToolId, item.id)
   }
   for (const [parentToolId, id] of newestByStream) {
-    if (parentToolId === null || (toolStatus.get(parentToolId) ?? "running") === "running") live.add(id)
+    if (parentToolId === null || ended.get(parentToolId) !== true) live.add(id)
   }
   return live
 }

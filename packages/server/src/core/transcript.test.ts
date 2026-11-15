@@ -162,7 +162,8 @@ describe("claude stream-json", () => {
         ),
       ),
     )
-    expect(child.map((item) => item._tag)).toEqual(["text"])
+    // The subagent's text is its newest step, so its subagent item follows it with that activity.
+    expect(child.map((item) => item._tag)).toEqual(["text", "subagent"])
     const next = valid(
       transcript.push(
         assistantUsage("msg_main", [{ type: "text", text: "main" }], {
