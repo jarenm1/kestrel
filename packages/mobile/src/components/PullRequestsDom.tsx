@@ -76,6 +76,7 @@ export default function PullRequestsDom({
       openExternal: (url) => void onOpenExternal(url),
       openThread: () => {},
       forkThread: undefined,
+      openSubagent: undefined,
     }),
     [onOpenExternal],
   )

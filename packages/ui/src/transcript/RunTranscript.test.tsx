@@ -124,3 +124,19 @@ test("running runs have no completion footer; stops and failures retain duration
   expect(summary([], { status: "cancelled" })).toContain("Stopped after 1m")
   expect(summary([], { status: "failed" })).toContain("Failed after 1m")
 })
+
+test("a running subagent shows as one row with its progress, not its calls", () => {
+  const task: AgentItem = { _tag: "tool", id: "task", parentToolId: null, name: "Task", input: { description: "Audit the toolchain", prompt: "Check versions" }, status: "running", output: null }
+  const call = (id: string, command: string, status: "ok" | "error" | "running"): AgentItem => ({
+    _tag: "tool", id, parentToolId: "task", name: "Bash", input: { command }, status, output: "secret output",
+  })
+  const items = [task, call("a", "bun --version", "ok"), call("b", "node --version", "error"), call("c", "tsc --version", "running")]
+  const html = renderToStaticMarkup(<RunTranscript taskId="task" runId="run" items={items} running from={0} to={null} />)
+  expect(html).toContain("Subagent: Audit the toolchain")
+  expect(html).toContain("3 calls")
+  expect(html).toContain("1 failed")
+  // Its newest step as the row's activity line; the earlier calls and their output stay out of the thread.
+  expect(html).toContain("tsc --version")
+  expect(html).not.toContain("bun --version")
+  expect(html).not.toContain("secret output")
+})

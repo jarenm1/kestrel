@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -8,6 +9,8 @@ import {
 } from "react"
 import { PanelRightClose, PanelRightOpen } from "lucide-react"
 import { threadPullRequestsOf } from "@cloudagents/protocol"
+import { TranscriptHostProvider, useTranscriptHost } from "@cloudagents/ui/transcript/host"
+import { AgentsPanel, type SubagentRef } from "@/components/AgentsPanel"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
 import { PreviewViewer } from "@/components/PreviewViewer"
@@ -41,7 +44,7 @@ function storedSidebarShare(): number {
   return Number.isFinite(stored) ? clampShare(stored) : DEFAULT_SIDEBAR_SHARE
 }
 
-/** One thread (task): chat, plus a collapsible Desktop/Preview/Diff/Files sidebar. Key it by taskId. */
+/** One thread (task): chat, plus a collapsible Desktop/Preview/Diff/Files/Agents sidebar. Key it by taskId. */
 export function ThreadView({ taskId }: { taskId: string }) {
   const state = useTaskState(taskId)
   // Sidebar starts collapsed: chat is full width, and tab content only mounts while expanded,
@@ -62,6 +65,21 @@ export function ThreadView({ taskId }: { taskId: string }) {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_SHARE_KEY, String(sidebarShare))
   }, [sidebarShare])
+  // The subagent the Agents tab shows; a click on a subagent's row in the thread opens it there.
+  const [subagent, setSubagent] = useState<SubagentRef | undefined>(undefined)
+  const openTabRef = useRef(openTab)
+  openTabRef.current = openTab
+  const outerHost = useTranscriptHost()
+  const chatHost = useMemo(
+    () => ({
+      ...outerHost,
+      openSubagent: (runId: string, toolId: string) => {
+        setSubagent({ runId, toolId })
+        openTabRef.current("agents")
+      },
+    }),
+    [outerHost],
+  )
   // The agent opened the desktop: show it. Only a new count reopens, so a reconnect with a running desktop does not.
   useEffect(() => {
     if (state.desktopOpens === 0) return
@@ -129,17 +147,19 @@ export function ThreadView({ taskId }: { taskId: string }) {
             <FloatingNotice>{state.error}</FloatingNotice>
           </FloatingNotices>
         )}
-        <ChatPanel
-          taskId={taskId}
-          taskStatus={state.task?.status}
-          messages={state.messages}
-          runs={state.runs}
-          loadError={state.loadError}
-          archivedTask={archivedTask}
-          elements={elements}
-          onElementsChange={setElements}
-          context={state.task?.context}
-        />
+        <TranscriptHostProvider value={chatHost}>
+          <ChatPanel
+            taskId={taskId}
+            taskStatus={state.task?.status}
+            messages={state.messages}
+            runs={state.runs}
+            loadError={state.loadError}
+            archivedTask={archivedTask}
+            elements={elements}
+            onElementsChange={setElements}
+            context={state.task?.context}
+          />
+        </TranscriptHostProvider>
       </section>
       <div
         className={cn(
@@ -214,6 +234,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
                 archived={archivedTask !== undefined}
                 previewPort={state.task?.previewPort}
                 onSelectElement={(element) => setElements((current) => [...current, element])}
+                subagent={subagent}
+                onSelectSubagent={setSubagent}
               />
             </aside>
           )}
@@ -280,12 +302,16 @@ function SidebarBody({
   archived,
   previewPort,
   onSelectElement,
+  subagent,
+  onSelectSubagent,
 }: {
   tab: SidebarTabId | undefined
   taskId: string
   archived: boolean
   previewPort: number | undefined
   onSelectElement: (element: ElementContext) => void
+  subagent: SubagentRef | undefined
+  onSelectSubagent: (ref: SubagentRef | undefined) => void
 }) {
   switch (tab) {
     case undefined:
@@ -306,5 +332,7 @@ function SidebarBody({
       return <FilesPanel taskId={taskId} />
     case "pull-requests":
       return <PullRequestsPanel taskId={taskId} />
+    case "agents":
+      return <AgentsPanel taskId={taskId} selected={subagent} onSelect={onSelectSubagent} />
   }
 }

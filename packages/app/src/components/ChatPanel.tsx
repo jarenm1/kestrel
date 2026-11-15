@@ -2,9 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ChevronRight, CornerUpLeft, X } from "lucide-react"
-import { describeTool, threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol"
+import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol"
 import { Transcript } from "@cloudagents/ui/transcript"
 import { PendingMessages } from "@cloudagents/ui/transcript/pending"
+import { activityLine } from "@cloudagents/ui/transcript/subagents"
 import { api } from "@/api/client"
 import { keys, queries, upsert, upsertMessage } from "@/api/queries"
 import { isTaskAwaitingUser, isTaskWorking } from "@cloudagents/protocol"
@@ -89,17 +90,12 @@ function DockBackdrop({ tall }: { tall: boolean }) {
   )
 }
 
-/** One line of what a delegated run is doing: its latest report, tool call, or the last line of its prose. */
+/** One line of what a delegated run is doing: its latest report, tool call, or the last line of its own prose. */
 function latestActivity(items: readonly AgentItem[] | undefined, taskId: string): string | undefined {
   for (const item of [...(items ?? [])].reverse()) {
-    if (item._tag === "tool") {
-      const view = describeTool(item, taskId)
-      return view.icon === "message" ? view.note ?? view.label : view.label
-    }
-    if (item._tag === "text" && item.parentToolId === null) {
-      const line = item.text.split("\n").map((l) => l.replace(/^[\s#>*-]+/, "").replaceAll("**", "").replaceAll("`", "").trim()).filter((l) => l !== "").at(-1)
-      if (line !== undefined) return line
-    }
+    if (item._tag === "text" && item.parentToolId !== null) continue
+    const line = activityLine(item, taskId)
+    if (line !== undefined) return line
   }
   return undefined
 }

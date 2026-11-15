@@ -51,6 +51,7 @@ export function DesktopTranscriptHost({ children }: { children: ReactNode }) {
         storeTask(queryClient, fork)
         navigate(threadPath(fork.id))
       },
+      openSubagent: undefined,
     }),
     [navigate, queryClient],
   )

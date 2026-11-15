@@ -2,7 +2,8 @@ import { useMemo } from "react"
 import { describeTool, liveItemIds, summarizeTools, type AgentItem, type ToolItem } from "@cloudagents/protocol"
 import { Alert } from "../alert"
 import { Markdown } from "./Markdown"
-import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
+import { subagentWork } from "./subagents"
+import { SubagentRow, ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
 
 interface Props {
   taskId: string
@@ -23,6 +24,7 @@ interface Tree {
 
 interface Ctx {
   readonly source: RunSource
+  readonly items: readonly AgentItem[]
   readonly tree: Tree
   readonly liveIds: ReadonlySet<string>
   readonly running: boolean
@@ -51,14 +53,17 @@ function buildTree(items: readonly AgentItem[]): Tree {
 function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
   const views = items.map((item) => describeTool(item, ctx.source.taskId))
   const rows = items.map((item, index) => {
+    const view = views[index]!
+    if (view.kind !== "agent") return <ToolRow key={item.id} item={item} view={view} source={ctx.source} running={ctx.running} />
     const nested = ctx.tree.children.get(item.id)
     return (
-      <ToolRow
+      <SubagentRow
         key={item.id}
         item={item}
-        view={views[index]!}
+        view={view}
         source={ctx.source}
         running={ctx.running}
+        work={subagentWork(ctx.items, item.id, ctx.source.taskId)}
         nested={nested !== undefined && <Items items={nested} ctx={ctx} />}
       />
     )
@@ -119,18 +124,37 @@ function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
 
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
 export function RunTranscript({ taskId, runId, items, running, from, to }: Props) {
-  const tree = useMemo(() => buildTree(items), [items])
-  const liveIds = useMemo(() => liveItemIds(items, running), [items, running])
-  const source = useMemo(() => ({ taskId, runId }), [taskId, runId])
+  const ctx = useCtx(taskId, runId, items, running)
   const roots = useMemo(() => {
     const position = new Map(items.map((item, index) => [item.id, index]))
-    return tree.roots.filter((item) => {
+    return ctx.tree.roots.filter((item) => {
       const at = position.get(item.id)!
       return at >= from && (to === null || at < to)
     })
-  }, [items, tree, from, to])
+  }, [items, ctx.tree, from, to])
 
   if (roots.length === 0) return null
 
-  return <Items items={roots} ctx={{ source, tree, liveIds, running }} />
+  return <Items items={roots} ctx={ctx} />
+}
+
+function useCtx(taskId: string, runId: string, items: readonly AgentItem[], running: boolean): Ctx {
+  const tree = useMemo(() => buildTree(items), [items])
+  const liveIds = useMemo(() => liveItemIds(items, running), [items, running])
+  return useMemo(() => ({ source: { taskId, runId }, items, tree, liveIds, running }), [taskId, runId, items, tree, liveIds, running])
+}
+
+/** A subagent's own work: the items under its call `toolId`, laid out as the thread lays out the main agent's. */
+export function SubagentTranscript({ taskId, runId, items, running, toolId }: {
+  taskId: string
+  runId: string
+  /** The whole run's items in arrival order, as far as they have loaded. */
+  items: readonly AgentItem[]
+  running: boolean
+  toolId: string
+}) {
+  const ctx = useCtx(taskId, runId, items, running)
+  const own = ctx.tree.children.get(toolId)
+  if (own === undefined) return null
+  return <Items items={own} ctx={ctx} />
 }
