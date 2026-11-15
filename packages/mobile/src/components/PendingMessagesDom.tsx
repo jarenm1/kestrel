@@ -62,6 +62,7 @@ export default function PendingMessagesDom({
       openExternal: IS_DOM ? (url) => void onOpenExternal(url) : undefined,
       openThread: () => {},
       forkThread: undefined,
+      openSubagent: undefined,
     }),
     [files, onFileError, onOpenExternal],
   )

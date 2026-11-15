@@ -26,6 +26,11 @@ export interface TranscriptHost {
    * Undefined: the transcript offers no fork.
    */
   readonly forkThread: ((taskId: string, messageId: string) => Promise<void>) | undefined
+  /**
+   * Shows a subagent's own work (the items under tool call `toolId` of run `runId`) in a panel beside the thread.
+   * Undefined: the subagent's row holds that work in its folded details instead.
+   */
+  readonly openSubagent: ((runId: string, toolId: string) => void) | undefined
 }
 
 const UNRESOLVED: FileLink = { url: undefined, onError: () => {}, onOpen: () => {} }
@@ -35,6 +40,7 @@ const TranscriptHostContext = createContext<TranscriptHost>({
   openExternal: undefined,
   openThread: () => {},
   forkThread: undefined,
+  openSubagent: undefined,
 })
 
 export const TranscriptHostProvider = TranscriptHostContext.Provider

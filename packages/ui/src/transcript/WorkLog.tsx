@@ -24,6 +24,7 @@ import ListTodo from "lucide-react/icons/list-todo"
 import Loader from "lucide-react/icons/loader"
 import MessageSquare from "lucide-react/icons/message-square"
 import Monitor from "lucide-react/icons/monitor"
+import PanelRightOpen from "lucide-react/icons/panel-right-open"
 import MousePointerClick from "lucide-react/icons/mouse-pointer-click"
 import Search from "lucide-react/icons/search"
 import Square from "lucide-react/icons/square"
@@ -35,6 +36,7 @@ import { cn } from "../cn"
 import { tokenizeDiff, TokenizedText, TokenLine, useHighlighter } from "../highlight"
 import { Collapse } from "./Collapse"
 import { useTranscriptHost } from "./host"
+import type { SubagentWork } from "./subagents"
 import { useAutoOpen } from "./useAutoOpen"
 
 const SHIMMER_CLASS =
@@ -178,7 +180,7 @@ function RunImage({ source, image }: { source: RunSource; image: Attachment }) {
   )
 }
 
-function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: ToolView; source: RunSource; nested: ReactNode }) {
+export function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: ToolView; source: RunSource; nested?: ReactNode }) {
   const output = outputText(item.output, view.kind)
   const hasInput = typeof item.input === "object" && item.input !== null && Object.keys(item.input).length > 0
   const inputJson = hasInput ? JSON.stringify(item.input, null, 2) : ""
@@ -258,19 +260,15 @@ function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: Too
   )
 }
 
-/**
- * One tool call as a single line (what it did, to what), with its input, diff and output behind a click. A subagent
- * stays open while it runs, so its own calls show as they happen.
- */
-export function ToolRow({ item, view, source, running, nested }: {
+/** One tool call as a single line (what it did, to what), with its input, diff and output behind a click. */
+export function ToolRow({ item, view, source, running }: {
   item: ToolItem
   view: ToolView
   source: RunSource
   running: boolean
-  nested?: ReactNode
 }) {
   const live = running && item.status === "running"
-  const [open, toggle] = useAutoOpen(view.kind === "agent" && live)
+  const [open, toggle] = useAutoOpen(false)
   const Icon = view.icon !== undefined ? EXTRA_ICONS[view.icon] : KIND_ICONS[view.kind]
   const failed = item.status === "error"
   return (
@@ -296,8 +294,66 @@ export function ToolRow({ item, view, source, running, nested }: {
         <Chevron open={open} />
       </button>
       <Collapse open={open} className={DETAILS_CLASS}>
-        <ToolDetails item={item} view={view} source={source} nested={nested} />
+        <ToolDetails item={item} view={view} source={source} />
       </Collapse>
+    </div>
+  )
+}
+
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
+
+/**
+ * A subagent's call as one line: its task, how many calls it made and how many failed, and while it runs, its newest
+ * step. Its own work stays out of the thread: a host with a panel opens it there on a click; otherwise the row's folded
+ * details hold it (its prompt, its calls, its report), open only when asked for.
+ */
+export function SubagentRow({ item, view, source, running, work, nested }: {
+  item: ToolItem
+  view: ToolView
+  source: RunSource
+  running: boolean
+  work: SubagentWork
+  nested: ReactNode
+}) {
+  const { openSubagent } = useTranscriptHost()
+  const live = running && item.status === "running"
+  const [open, toggle] = useAutoOpen(false)
+  const failed = item.status === "error"
+  return (
+    <div className="min-w-0">
+      <button
+        type="button"
+        aria-expanded={openSubagent === undefined ? open : undefined}
+        onClick={openSubagent === undefined ? toggle : () => openSubagent(source.runId, item.id)}
+        className={ROW_CLASS}
+      >
+        <Bot className={cn("size-4 shrink-0", failed && "text-destructive")} />
+        <span className={cn("min-w-0 truncate", failed && "text-destructive", live && SHIMMER_CLASS)}>{view.label}</span>
+        <span className="shrink-0 text-xs text-muted-foreground/70 tabular-nums">{plural(work.calls, "call")}</span>
+        {work.failed > 0 && (
+          <span className="flex shrink-0 items-center gap-1 text-xs text-destructive">
+            <X className="size-3" aria-hidden="true" />
+            {work.failed} failed
+          </span>
+        )}
+        {failed && <X className="size-3.5 shrink-0 text-destructive" aria-label="failed" />}
+        {openSubagent === undefined ? (
+          <Chevron open={open} />
+        ) : (
+          <PanelRightOpen
+            aria-hidden="true"
+            className="size-3.5 shrink-0 opacity-0 transition group-hover/row:opacity-100 group-focus-visible/row:opacity-100"
+          />
+        )}
+      </button>
+      {live && work.activity !== undefined && (
+        <div className="truncate pl-6 text-xs text-muted-foreground/70">{work.activity}</div>
+      )}
+      {openSubagent === undefined && (
+        <Collapse open={open} className={DETAILS_CLASS}>
+          <ToolDetails item={item} view={view} source={source} nested={nested} />
+        </Collapse>
+      )}
     </div>
   )
 }

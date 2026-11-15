@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
-import { AppWindow, FolderTree, GitCompare, GitPullRequest, Monitor, Plus, X, type LucideIcon } from "lucide-react"
+import { AppWindow, Bot, FolderTree, GitCompare, GitPullRequest, Monitor, Plus, X, type LucideIcon } from "lucide-react"
 import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
@@ -9,7 +9,7 @@ import {
 } from "@cloudagents/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 
-export type SidebarTabId = "desktop" | "preview" | "diff" | "files" | "pull-requests"
+export type SidebarTabId = "desktop" | "preview" | "diff" | "files" | "pull-requests" | "agents"
 
 // Add a sidebar tab by adding an entry here and a case in ThreadView's SidebarBody.
 export const SIDEBAR_TABS: readonly { id: SidebarTabId; label: string; icon: LucideIcon; shortcut: string }[] = [
@@ -18,6 +18,7 @@ export const SIDEBAR_TABS: readonly { id: SidebarTabId; label: string; icon: Luc
   { id: "diff", label: "Diff", icon: GitCompare, shortcut: "D" },
   { id: "files", label: "Files", icon: FolderTree, shortcut: "F" },
   { id: "pull-requests", label: "Pull requests", icon: GitPullRequest, shortcut: "P" },
+  { id: "agents", label: "Agents", icon: Bot, shortcut: "A" },
 ]
 
 const tabOf = (id: SidebarTabId) => SIDEBAR_TABS.find((t) => t.id === id) ?? SIDEBAR_TABS[0]!

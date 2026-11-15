@@ -121,6 +121,7 @@ export default function TranscriptDom({
       openExternal: IS_DOM ? (url) => void actions.current.openExternal(url) : undefined,
       openThread: (taskId) => void actions.current.openThread(taskId),
       forkThread: (taskId, messageId) => actions.current.forkThread(taskId, messageId),
+      openSubagent: undefined,
     }),
     [files],
   )
