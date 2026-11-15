@@ -140,3 +140,23 @@ test("a running subagent shows as one row with its progress, not its calls", () 
   expect(html).not.toContain("bun --version")
   expect(html).not.toContain("secret output")
 })
+
+test("a steer splits the main agent's items at the same place whether a subagent's items were loaded or not", () => {
+  const text = (id: string, body: string, parent: string | null = null): AgentItem => ({ _tag: "text", id, parentToolId: parent, text: body })
+  const subagent: AgentItem = {
+    _tag: "subagent", id: "sub", parentToolId: null, title: "Survey", agentType: null, prompt: null, model: null,
+    status: "completed", calls: 1, failedCalls: 0, activity: null, result: "done",
+  }
+  const call: AgentItem = { _tag: "tool", id: "call", parentToolId: "sub", name: "Bash", input: { command: "ls" }, status: "ok", output: "" }
+  // The subagent's own items arrived between the main agent's; positions count only the main agent's.
+  const all = [text("a", "Before the steer"), subagent, call, text("inner", "Subagent prose", "sub"), text("b", "After the steer")]
+  const main = [all[0]!, subagent, all[4]!]
+  for (const items of [all, main]) {
+    const render = (from: number, to: number | null) =>
+      renderToStaticMarkup(<RunTranscript taskId="task" runId="run" items={items} running={false} from={from} to={to} />)
+    expect(render(0, 2)).toContain("Subagent: Survey")
+    expect(render(0, 2)).not.toContain("After the steer")
+    expect(render(2, null)).toContain("After the steer")
+    expect(render(2, null)).not.toContain("Before the steer")
+  }
+})

@@ -19,7 +19,6 @@
     "./transcript/host": "./src/transcript/host.tsx",
     "./transcript/pending": "./src/transcript/PendingMessages.tsx",
     "./transcript/run": "./src/transcript/RunTranscript.tsx",
-    "./transcript/subagents": "./src/transcript/subagents.ts",
     "./markdown": "./src/transcript/Markdown.tsx",
     "./message-attachments": "./src/transcript/MessageAttachments.tsx",
     "./highlight": "./src/highlight/index.ts",

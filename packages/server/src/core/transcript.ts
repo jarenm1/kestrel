@@ -1,4 +1,4 @@
-import type { AgentItem, Attachment, ContextUsage } from "@cloudagents/protocol"
+import { ASYNC_LAUNCH, makeSubagentTally, type AgentItem, type Attachment, type ContextUsage, type SubagentItem } from "@cloudagents/protocol"
 
 /**
  * Turns one harness's stdout lines into the normalized `AgentItem`s the app renders.
@@ -215,6 +215,8 @@ export const makeTranscript = (
   seed: ContextUsage | null = null,
   saveImage: SaveImage | null = null,
   streaming: ResponseStreamingMode | null = null,
+  /** The thread's id, which tool labels show paths relative to. */
+  taskId = "",
 ): Transcript => {
   /**
    * Ids for items the harness does not name. Unique per run: the same id later means
@@ -227,6 +229,17 @@ export const makeTranscript = (
   /** Last completed main-agent message, for Claude results that omit their optional `result` text. */
   let claudeLastText: { readonly messageId: string | null; readonly text: string } | null = null
   const tools = new Map<string, ToolCall>()
+  /** The run's subagents as the harness last reported them, by id (their tally is `tally`'s). */
+  const subagents = new Map<string, SubagentItem>()
+  /** Codex subagents by the thread each one runs on. */
+  const codexSubagentThreads = new Map<string, string>()
+  const tally = makeSubagentTally(taskId)
+  const endSubagent = (id: string, status: SubagentItem["status"], result: string | null): SubagentItem => {
+    const known = subagents.get(id)!
+    const ended: SubagentItem = { ...known, status, result: result ?? known.result }
+    subagents.set(id, ended)
+    return ended
+  }
   /** Codex text built up from deltas, by item id: agent messages, reasoning parts, command output. */
   const codexText = new Map<string, string>()
   const codexParts = new Map<string, { summary: string[]; content: string[] }>()
@@ -366,18 +379,27 @@ export const makeTranscript = (
     return items
   }
 
-  const claudeSystem = (line: Record<string, unknown>) => {
+  const claudeSystem = (line: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     switch (asString(line.subtype)) {
       case "init":
         model = asString(line.model)
         windowTokens = seed !== null && seed.model === model ? seed.windowTokens : null
-        return
+        return []
       case "compact_boundary":
         // The pre-compaction size no longer holds; the next model call reports the compacted one.
         usedTokens = null
         contextValue = null
         contextChanged = true
-        return
+        return []
+      case "task_notification": {
+        // A background subagent ended: its call returned when it started, this says how it went and what it reported.
+        const id = asString(line.tool_use_id)
+        if (id === null || subagents.get(id)?.status !== "running") return []
+        const status = line.status === "completed" ? "completed" : line.status === "failed" ? "failed" : "stopped"
+        return [endSubagent(id, status, asString(line.summary))]
+      }
+      default:
+        return []
     }
   }
 
@@ -437,7 +459,27 @@ export const makeTranscript = (
         if (id === null || name === null) continue
         const input = block.input ?? null
         tools.set(id, { name, parentToolId, input })
-        items.push({ _tag: "tool", id, parentToolId, name, input, status: "running", output: null })
+        if (name !== "Agent" && name !== "Task") {
+          items.push({ _tag: "tool", id, parentToolId, name, input, status: "running", output: null })
+          continue
+        }
+        const field = (key: string): string | null => (isRecord(input) ? asString(input[key]) : null)
+        const subagent: SubagentItem = {
+          _tag: "subagent",
+          id,
+          parentToolId,
+          title: field("description") ?? field("subagent_type") ?? "task",
+          agentType: field("subagent_type"),
+          prompt: field("prompt"),
+          model: field("model"),
+          status: "running",
+          calls: 0,
+          failedCalls: 0,
+          activity: null,
+          result: null,
+        }
+        subagents.set(id, subagent)
+        items.push(subagent)
       }
     }
     if (messageUsage !== null) {
@@ -469,6 +511,12 @@ export const makeTranscript = (
       if (id === null) continue
       const call = tools.get(id)
       const { output, images } = toolResult(block.content, saveImage)
+      if (subagents.has(id)) {
+        // A background subagent's call returns as it starts; `task_notification` ends it. A foreground one ends here.
+        if (output.startsWith(ASYNC_LAUNCH) || subagents.get(id)?.status !== "running") continue
+        items.push(endSubagent(id, block.is_error === true ? "failed" : "completed", output))
+        continue
+      }
       items.push({
         _tag: "tool",
         id,
@@ -609,8 +657,7 @@ export const makeTranscript = (
       case "result":
         return claudeResult(line)
       case "system":
-        claudeSystem(line)
-        return []
+        return claudeSystem(line)
       case "stream_event":
         return claudeStream(line)
       default:
@@ -618,17 +665,72 @@ export const makeTranscript = (
     }
   }
 
-  const codexThinking = (id: string): AgentItem | null => {
+  const codexThinking = (id: string, parent: string | null): AgentItem | null => {
     const parts = codexParts.get(id)
     if (parts === undefined) return null
     const text = (parts.summary.some((p) => p.trim() !== "") ? parts.summary : parts.content)
       .filter((p) => p.trim() !== "")
       .join("\n\n")
-    return text === "" ? null : { _tag: "thinking", id, parentToolId: null, text }
+    return text === "" ? null : { _tag: "thinking", id, parentToolId: parent, text }
+  }
+
+  /**
+   * The subagent a Codex notification belongs to: the one whose thread it names, or null for the main agent's
+   * thread (and threads no subagent started, which only the main agent's are).
+   */
+  const codexOwner = (params: Record<string, unknown>): string | null => {
+    const threadId = asString(params.threadId)
+    return threadId === null ? null : (codexSubagentThreads.get(threadId) ?? null)
+  }
+
+  /** A subagent's last answer, by subagent id: its report once Codex says it completed. */
+  const codexSubagentText = new Map<string, string>()
+
+  /**
+   * A `subAgentActivity` item: `started` when the agent in `parent`'s thread starts a subagent on a thread of its own
+   * (`agentThreadId`), `completed` when that thread's work is done.
+   */
+  const codexSubagent = (raw: Record<string, unknown>, parent: string | null): AgentItem | null => {
+    const threadId = asString(raw.agentThreadId)
+    if (threadId === null) return null
+    const known = subagentOfThread(threadId)
+    const kind = asString(raw.kind)
+    if (kind === "started") {
+      if (known !== undefined) return null
+      const id = asString(raw.id)
+      if (id === null) return null
+      const path = asString(raw.agentPath)
+      const item: SubagentItem = {
+        _tag: "subagent",
+        id,
+        parentToolId: parent,
+        // "/root/list_dir" names the agent by the task it got.
+        title: path === null ? "subagent" : (path.split("/").at(-1) ?? path).replaceAll("_", " "),
+        agentType: null,
+        prompt: null,
+        model: asString(raw.model),
+        status: "running",
+        calls: 0,
+        failedCalls: 0,
+        activity: null,
+        result: null,
+      }
+      codexSubagentThreads.set(threadId, id)
+      subagents.set(id, item)
+      return item
+    }
+    if (known === undefined || known.status !== "running") return null
+    const status = kind === "completed" ? "completed" : kind === "failed" || kind === "errored" ? "failed" : kind === "interrupted" || kind === "closed" ? "stopped" : null
+    return status === null ? null : endSubagent(known.id, status, codexSubagentText.get(known.id) ?? null)
+  }
+
+  const subagentOfThread = (threadId: string): SubagentItem | undefined => {
+    const id = codexSubagentThreads.get(threadId)
+    return id === undefined ? undefined : subagents.get(id)
   }
 
   /** One app-server `ThreadItem` (from `item/started` or `item/completed`) as a display item, or null. */
-  const codexItem = (raw: unknown, completed: boolean): AgentItem | null => {
+  const codexItem = (raw: unknown, completed: boolean, parent: string | null): AgentItem | null => {
     if (!isRecord(raw)) return null
     const id = asString(raw.id)
     if (id === null) return null
@@ -642,14 +744,15 @@ export const makeTranscript = (
         const full = text === "" ? (codexText.get(id) ?? "") : text
         codexText.set(id, full)
         if (full.trim() === "") return null
-        if (completed) finalTextValue = full
-        return { _tag: "text", id, parentToolId: null, text: full }
+        if (completed && parent === null) finalTextValue = full
+        if (completed && parent !== null) codexSubagentText.set(parent, full)
+        return { _tag: "text", id, parentToolId: parent, text: full }
       }
       case "reasoning": {
         const summary = asArray(raw.summary).filter((p): p is string => typeof p === "string")
         const content = asArray(raw.content).filter((p): p is string => typeof p === "string")
         if (summary.length > 0 || content.length > 0 || !codexParts.has(id)) codexParts.set(id, { summary, content })
-        return codexThinking(id)
+        return codexThinking(id, parent)
       }
       case "commandExecution": {
         const exitCode = asNumber(raw.exitCode)
@@ -657,7 +760,7 @@ export const makeTranscript = (
         return {
           _tag: "tool",
           id,
-          parentToolId: null,
+          parentToolId: parent,
           name: "command_execution",
           input: { command: asString(raw.command) ?? "" },
           status: running ? "running" : failed ? "error" : "ok",
@@ -668,7 +771,7 @@ export const makeTranscript = (
         return {
           _tag: "tool",
           id,
-          parentToolId: null,
+          parentToolId: parent,
           name: "file_change",
           input: {
             changes: asArray(raw.changes).map((change) =>
@@ -688,7 +791,7 @@ export const makeTranscript = (
         return {
           _tag: "tool",
           id,
-          parentToolId: null,
+          parentToolId: parent,
           name: `${server}.${tool}`,
           input: raw.arguments ?? null,
           status: running ? "running" : failed ? "error" : "ok",
@@ -700,7 +803,7 @@ export const makeTranscript = (
         return {
           _tag: "tool",
           id,
-          parentToolId: null,
+          parentToolId: parent,
           name: "web_search",
           input: { query: asString(raw.query) ?? "" },
           status: running ? "running" : "ok",
@@ -711,14 +814,17 @@ export const makeTranscript = (
         return {
           _tag: "tool",
           id,
-          parentToolId: null,
+          parentToolId: parent,
           name: "context_compaction",
           input: null,
           status: running ? "running" : "ok",
           output: null,
         }
+      case "subAgentActivity":
+        return codexSubagent(raw, parent)
       default:
-        // User messages, review markers (the review arrives as an agent message), hooks and the rest add nothing.
+        // User messages, review markers (the review arrives as an agent message), waits on subagents, hooks and the
+        // rest add nothing.
         return null
     }
   }
@@ -726,6 +832,21 @@ export const makeTranscript = (
   const codexTurnEnd = (line: Record<string, unknown>, params: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     const turn = isRecord(params.turn) ? params.turn : null
     if (turn === null) return []
+    const owner = codexOwner(params)
+    if (owner !== null) {
+      // A subagent's turn: what it left running did not complete, and a failed turn fails the subagent. The run's own
+      // turn is the main agent's.
+      const items: AgentItem[] = []
+      for (const tool of codexRunning.values()) {
+        if (tool.parentToolId !== owner) continue
+        items.push({ ...tool, status: "error" })
+        codexRunning.delete(tool.id)
+      }
+      if (turn.status === "failed" && subagents.get(owner)?.status === "running") {
+        items.push(endSubagent(owner, "failed", isRecord(turn.error) ? asString(turn.error.message) : null))
+      }
+      return items
+    }
     const turnId = asString(turn.id)
     const tokens = turnId === null ? undefined : codexTurnTokens.get(turnId)
     const items: AgentItem[] = []
@@ -763,6 +884,7 @@ export const makeTranscript = (
     count: number,
     last: Record<string, unknown>,
     line: Record<string, unknown>,
+    parent: string | null,
   ): AgentItem | null => {
     const lastInput = asNumber(last.inputTokens)
     const cachedTokens = asNumber(last.cachedInputTokens)
@@ -773,7 +895,7 @@ export const makeTranscript = (
     return {
       _tag: "usage",
       id: `usage-codex-${threadId ?? "thread"}-${turnId ?? "turn"}-${count}`,
-      parentToolId: null,
+      parentToolId: parent,
       timestamp: eventTime(line) ?? new Date().toISOString(),
       // Codex reports token totals, not where a model call began or ended, so its elapsed time stays unknown.
       durationMs: null,
@@ -789,9 +911,10 @@ export const makeTranscript = (
     const last = usage !== null && isRecord(usage.last) ? usage.last : null
     const turnId = asString(params.turnId)
     if (total === null || last === null) return []
+    const owner = codexOwner(params)
     const input = asNumber(total.inputTokens)
     const output = asNumber(total.outputTokens)
-    if (turnId !== null && input !== null && output !== null) {
+    if (owner === null && turnId !== null && input !== null && output !== null) {
       const known = codexTurnTokens.get(turnId)
       if (known === undefined) {
         codexTurnTokens.set(turnId, {
@@ -805,10 +928,13 @@ export const makeTranscript = (
         known.output = output
       }
     }
-    // The last model call's size against the model's window, as the composer's context bar shows it.
-    usedTokens = asNumber(last.totalTokens)
-    windowTokens = asNumber(usage?.modelContextWindow)
-    refreshContext()
+    // The last model call's size against the model's window, as the composer's context bar shows it. A subagent's
+    // calls run in a context of their own.
+    if (owner === null) {
+      usedTokens = asNumber(last.totalTokens)
+      windowTokens = asNumber(usage?.modelContextWindow)
+      refreshContext()
+    }
 
     const threadId = asString(params.threadId)
     const totalKey = [asNumber(total.inputTokens), asNumber(total.cachedInputTokens), asNumber(total.outputTokens)]
@@ -821,7 +947,7 @@ export const makeTranscript = (
     if (known.seen.has(totalKey)) return []
     known.seen.add(totalKey)
     known.count += 1
-    const item = codexUsageItem(threadId, turnId, known.count, last, line)
+    const item = codexUsageItem(threadId, turnId, known.count, last, line, owner)
     return item === null ? [] : [item]
   }
 
@@ -842,7 +968,7 @@ export const makeTranscript = (
         return codexTokenUsage(line, params)
       case "item/started":
       case "item/completed": {
-        const item = codexItem(params.item, method === "item/completed")
+        const item = codexItem(params.item, method === "item/completed", codexOwner(params))
         if (item?._tag === "tool") {
           if (item.status === "running") codexRunning.set(item.id, item)
           else codexRunning.delete(item.id)
@@ -855,7 +981,7 @@ export const makeTranscript = (
         if (id === null || delta === null) return []
         const text = (codexText.get(id) ?? "") + delta
         codexText.set(id, text)
-        return text.trim() === "" ? [] : [{ _tag: "text", id, parentToolId: null, text }]
+        return text.trim() === "" ? [] : [{ _tag: "text", id, parentToolId: codexOwner(params), text }]
       }
       case "item/reasoning/summaryTextDelta":
       case "item/reasoning/textDelta": {
@@ -867,7 +993,7 @@ export const makeTranscript = (
         const list = method === "item/reasoning/textDelta" ? parts.content : parts.summary
         const index = asNumber(method === "item/reasoning/textDelta" ? params.contentIndex : params.summaryIndex) ?? 0
         list[index] = (list[index] ?? "") + delta
-        const item = codexThinking(id)
+        const item = codexThinking(id, codexOwner(params))
         return item === null ? [] : [item]
       }
       case "item/commandExecution/outputDelta": {
@@ -889,7 +1015,7 @@ export const makeTranscript = (
         const item: AgentItem & { _tag: "tool" } = {
           _tag: "tool",
           id: `plan-${turnId}`,
-          parentToolId: null,
+          parentToolId: codexOwner(params),
           name: "todo_list",
           input: { items: steps.map((s) => ({ text: asString(s.step) ?? "", completed: s.status === "completed" })) },
           status: steps.length > 0 && steps.every((s) => s.status === "completed") ? "ok" : "running",
@@ -1091,7 +1217,11 @@ export const makeTranscript = (
     return items
   }
 
-  const parse = (line: unknown): ReadonlyArray<AgentItem> => {
+  /** One line's items, each followed by the subagents whose tally it changed. */
+  const parse = (line: unknown): ReadonlyArray<AgentItem> =>
+    parseLine(line).flatMap((item) => [item, ...tally.observe(item)])
+
+  const parseLine = (line: unknown): ReadonlyArray<AgentItem> => {
     if (!isRecord(line)) return []
     const type = asString(line.type)
     if (type !== null && CLAUDE_LINE_TYPES[type] === true) return claude(line)

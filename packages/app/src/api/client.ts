@@ -49,6 +49,7 @@ import {
   PutApiKeyBody,
   Run,
   RunItems,
+  type RunItemsScope,
   SendMessageBody,
   SendMessageResponse,
   type SendHeldMessagesBody,
@@ -912,7 +913,7 @@ export const api = {
     return sent
   },
   listRuns: (taskId: string) => onTask(taskId, Schema.Array(Run), "GET", Paths.taskRuns(taskId)),
-  runItems: (taskId: string, runId: string) => onTask(taskId, RunItems, "GET", Paths.runItems(runId)),
+  runItems: (taskId: string, runId: string, scope?: RunItemsScope) => onTask(taskId, RunItems, "GET", Paths.runItems(runId, scope)),
   cancelRun: (taskId: string, runId: string) => onTask(taskId, Run, "POST", Paths.runCancel(runId)),
   cancelDelegation: (taskId: string, childId: string) => onTask(taskId, Task, "POST", Paths.taskDelegationCancel(taskId, childId)),
   /** Turns a thread's armed usage-limit auto-resume on or off; the box answers with the thread as stored. */

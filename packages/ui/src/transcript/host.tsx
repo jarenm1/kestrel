@@ -27,10 +27,10 @@ export interface TranscriptHost {
    */
   readonly forkThread: ((taskId: string, messageId: string) => Promise<void>) | undefined
   /**
-   * Shows a subagent's own work (the items under tool call `toolId` of run `runId`) in a panel beside the thread.
-   * Undefined: the subagent's row holds that work in its folded details instead.
+   * Shows a subagent's own work (the items under `subagent` item `subagentId` of run `runId`) in a panel beside the
+   * thread. Undefined: the subagent's row holds that work in its folded details instead.
    */
-  readonly openSubagent: ((runId: string, toolId: string) => void) | undefined
+  readonly openSubagent: ((runId: string, subagentId: string) => void) | undefined
 }
 
 const UNRESOLVED: FileLink = { url: undefined, onError: () => {}, onOpen: () => {} }

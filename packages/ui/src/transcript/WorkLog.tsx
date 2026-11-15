@@ -4,6 +4,7 @@ import {
   Paths,
   type Attachment,
   type EditLine,
+  type SubagentItem,
   type ToolIcon,
   type ToolItem,
   type ToolKind,
@@ -36,7 +37,7 @@ import { cn } from "../cn"
 import { tokenizeDiff, TokenizedText, TokenLine, useHighlighter } from "../highlight"
 import { Collapse } from "./Collapse"
 import { useTranscriptHost } from "./host"
-import type { SubagentWork } from "./subagents"
+import { Markdown } from "./Markdown"
 import { useAutoOpen } from "./useAutoOpen"
 
 const SHIMMER_CLASS =
@@ -180,7 +181,7 @@ function RunImage({ source, image }: { source: RunSource; image: Attachment }) {
   )
 }
 
-export function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: ToolView; source: RunSource; nested?: ReactNode }) {
+function ToolDetails({ item, view, source }: { item: ToolItem; view: ToolView; source: RunSource }) {
   const output = outputText(item.output, view.kind)
   const hasInput = typeof item.input === "object" && item.input !== null && Object.keys(item.input).length > 0
   const inputJson = hasInput ? JSON.stringify(item.input, null, 2) : ""
@@ -242,7 +243,6 @@ export function ToolDetails({ item, view, source, nested }: { item: ToolItem; vi
           {output.images === 1 ? "Returned a screenshot" : `Returned ${output.images} screenshots`} (not kept)
         </div>
       )}
-      {nested}
       {hasInput && !inlineInput ? (
         <details className="group/input min-w-0">
           <summary className="w-fit cursor-pointer font-mono text-[10px] break-all text-muted-foreground/60 select-none hover:text-muted-foreground">
@@ -303,22 +303,20 @@ export function ToolRow({ item, view, source, running }: {
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
 
 /**
- * A subagent's call as one line: its task, how many calls it made and how many failed, and while it runs, its newest
- * step. Its own work stays out of the thread: a host with a panel opens it there on a click; otherwise the row's folded
+ * A subagent as one line: its task, how many calls it made and how many failed, and while it runs, its newest step.
+ * Its own work stays out of the thread: a host with a panel opens it there on a click; otherwise the row's folded
  * details hold it (its prompt, its calls, its report), open only when asked for.
  */
-export function SubagentRow({ item, view, source, running, work, nested }: {
-  item: ToolItem
-  view: ToolView
+export function SubagentRow({ item, source, running, nested }: {
+  item: SubagentItem
   source: RunSource
   running: boolean
-  work: SubagentWork
   nested: ReactNode
 }) {
   const { openSubagent } = useTranscriptHost()
   const live = running && item.status === "running"
   const [open, toggle] = useAutoOpen(false)
-  const failed = item.status === "error"
+  const failed = item.status === "failed"
   return (
     <div className="min-w-0">
       <button
@@ -328,15 +326,16 @@ export function SubagentRow({ item, view, source, running, work, nested }: {
         className={ROW_CLASS}
       >
         <Bot className={cn("size-4 shrink-0", failed && "text-destructive")} />
-        <span className={cn("min-w-0 truncate", failed && "text-destructive", live && SHIMMER_CLASS)}>{view.label}</span>
-        <span className="shrink-0 text-xs text-muted-foreground/70 tabular-nums">{plural(work.calls, "call")}</span>
-        {work.failed > 0 && (
+        <span className={cn("min-w-0 truncate", failed && "text-destructive", live && SHIMMER_CLASS)}>Subagent: {item.title}</span>
+        <span className="shrink-0 text-xs text-muted-foreground/70 tabular-nums">{plural(item.calls, "call")}</span>
+        {item.failedCalls > 0 && (
           <span className="flex shrink-0 items-center gap-1 text-xs text-destructive">
             <X className="size-3" aria-hidden="true" />
-            {work.failed} failed
+            {item.failedCalls} failed
           </span>
         )}
         {failed && <X className="size-3.5 shrink-0 text-destructive" aria-label="failed" />}
+        {item.status === "stopped" && <span className="shrink-0 text-xs text-muted-foreground/70">stopped</span>}
         {openSubagent === undefined ? (
           <Chevron open={open} />
         ) : (
@@ -346,12 +345,16 @@ export function SubagentRow({ item, view, source, running, work, nested }: {
           />
         )}
       </button>
-      {live && work.activity !== undefined && (
-        <div className="truncate pl-6 text-xs text-muted-foreground/70">{work.activity}</div>
+      {live && item.activity !== null && (
+        <div className="truncate pl-6 text-xs text-muted-foreground/70">{item.activity}</div>
       )}
       {openSubagent === undefined && (
         <Collapse open={open} className={DETAILS_CLASS}>
-          <ToolDetails item={item} view={view} source={source} nested={nested} />
+          {item.prompt !== null && (
+            <div className="max-h-60 overflow-auto text-sm break-words whitespace-pre-wrap text-muted-foreground">{item.prompt}</div>
+          )}
+          {nested}
+          {item.result !== null && <Markdown text={item.result} />}
         </Collapse>
       )}
     </div>

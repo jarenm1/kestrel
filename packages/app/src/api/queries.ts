@@ -70,7 +70,10 @@ export const keys = {
   taskBox: (taskId: string) => ["tasks", taskId, "box"] as const,
   messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
   runs: (taskId: string) => ["tasks", taskId, "runs"] as const,
+  /** The main agent's items of a run, each subagent as one `subagent` item. */
   runItems: (runId: string) => ["runs", runId, "items"] as const,
+  /** What a run's subagents did; loaded only once someone opens a subagent. */
+  subagentItems: (runId: string) => ["runs", runId, "subagent-items"] as const,
   /** Per thread, model, active run and its provider: another thread's or harness's commands never leak in. */
   commands: (
     taskId: string | undefined,
@@ -146,10 +149,13 @@ export function storeTask(client: QueryClient, task: Task): void {
 /**
  * Invalidates the cached run item lists on (re)connect. `keys.runItems(runId)` is `["runs", runId, "items"]`,
  * outside the `keys.task(taskId)` prefix, so a reconnect that only invalidates the task prefix never refetches the
- * items an `agent.item` event missed while disconnected.
+ * items an `agent.item` event missed while disconnected. The same goes for subagent items that were loaded.
  */
 export function invalidateRunItems(client: QueryClient, runIds: readonly string[]): void {
-  for (const runId of runIds) void client.invalidateQueries({ queryKey: keys.runItems(runId), exact: true })
+  for (const runId of runIds) {
+    void client.invalidateQueries({ queryKey: keys.runItems(runId), exact: true })
+    void client.invalidateQueries({ queryKey: keys.subagentItems(runId), exact: true })
+  }
 }
 
 /**
@@ -359,7 +365,12 @@ export const queries = {
   runItems: (taskId: string, runId: string) =>
     queryOptions({
       queryKey: keys.runItems(runId),
-      queryFn: () => fetchSnapshot(queryClient, keys.runItems(runId), () => api.runItems(taskId, runId)),
+      queryFn: () => fetchSnapshot(queryClient, keys.runItems(runId), () => api.runItems(taskId, runId, "main")),
+    }),
+  subagentItems: (taskId: string, runId: string) =>
+    queryOptions({
+      queryKey: keys.subagentItems(runId),
+      queryFn: () => fetchSnapshot(queryClient, keys.subagentItems(runId), () => api.runItems(taskId, runId, "subagents")),
     }),
   /**
    * Disabled until there is both a focused thread and a model whose harness can answer. `activeRunId` and

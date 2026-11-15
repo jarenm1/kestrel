@@ -1,39 +1,46 @@
 import { useLayoutEffect, useRef } from "react"
 import { useQueries, useQuery } from "@tanstack/react-query"
 import { ChevronLeft } from "lucide-react"
-import { describeTool, type AgentItem, type Run, type ToolItem } from "@cloudagents/protocol"
+import type { Run, SubagentItem } from "@cloudagents/protocol"
 import { Markdown } from "@cloudagents/ui/markdown"
 import { SubagentTranscript } from "@cloudagents/ui/transcript/run"
-import { isSubagentCall, subagentWork } from "@cloudagents/ui/transcript/subagents"
 import { queries } from "@/api/queries"
 import { StatusIcon } from "./StatusIcon"
 
-/** A harness subagent: its call `toolId` in run `runId`. */
+/** A harness subagent: its `subagent` item `subagentId` in run `runId`. */
 export interface SubagentRef {
   readonly runId: string
-  readonly toolId: string
+  readonly subagentId: string
 }
 
 interface Agent {
   readonly run: Run
-  readonly call: ToolItem
-  /** The whole run's items, which hold the subagent's own under its call. */
-  readonly items: readonly AgentItem[]
+  readonly subagent: SubagentItem
 }
 
-/** StatusIcon status: a call still running in a run that ended was stopped with it. */
-function agentStatus({ run, call }: Agent): string {
-  if (call.status === "error") return "failed"
-  if (call.status === "ok") return "succeeded"
-  return run.status === "running" ? "running" : "cancelled"
+/** StatusIcon status: a subagent still running in a run that ended was stopped with it. */
+function agentStatus({ run, subagent }: Agent): string {
+  switch (subagent.status) {
+    case "completed":
+      return "succeeded"
+    case "failed":
+      return "failed"
+    case "stopped":
+      return "cancelled"
+    case "running":
+      return run.status === "running" ? "running" : "cancelled"
+  }
 }
+
+const calls = (subagent: SubagentItem) => `${subagent.calls} ${subagent.calls === 1 ? "call" : "calls"}`
 
 /** Within this distance of the bottom, keep following the subagent's new work. */
 const STICK_PX = 80
 
 /**
- * The thread's harness subagents (Claude's Task/Agent calls), newest first; one opens to its own work, which the
- * thread itself only sums up in a row. Live events keep the run items current, so a running subagent streams here.
+ * The thread's harness subagents (Claude Code's Agent calls, Codex's subagents), newest first; one opens to its own
+ * work, which the thread itself only sums up in a row. The thread's run items hold each subagent's item; what it did
+ * loads only when it is opened, and live events keep both current.
  */
 export function AgentsPanel({ taskId, selected, onSelect }: {
   taskId: string
@@ -42,11 +49,10 @@ export function AgentsPanel({ taskId, selected, onSelect }: {
 }) {
   const runs = [...(useQuery(queries.runs(taskId)).data ?? [])].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   const itemQueries = useQueries({ queries: runs.map((run) => queries.runItems(taskId, run.id)) })
-  const agents: Agent[] = runs.flatMap((run, index) => {
-    const items = itemQueries[index]?.data ?? []
-    return items.filter((item) => isSubagentCall(item, taskId)).map((call) => ({ run, call, items }))
-  }).reverse()
-  const current = selected && agents.find((agent) => agent.run.id === selected.runId && agent.call.id === selected.toolId)
+  const agents: Agent[] = runs.flatMap((run, index) =>
+    (itemQueries[index]?.data ?? []).flatMap((item) => (item._tag === "subagent" ? [{ run, subagent: item }] : [])),
+  ).reverse()
+  const current = selected && agents.find((agent) => agent.run.id === selected.runId && agent.subagent.id === selected.subagentId)
 
   if (current !== undefined) return <AgentDetail taskId={taskId} agent={current} onBack={() => onSelect(undefined)} />
   if (agents.length === 0) {
@@ -54,39 +60,35 @@ export function AgentsPanel({ taskId, selected, onSelect }: {
   }
   return (
     <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto p-2">
-      {agents.map((agent) => {
-        const work = subagentWork(agent.items, agent.call.id, taskId)
-        const status = agentStatus(agent)
-        return (
-          <li key={`${agent.run.id}:${agent.call.id}`}>
-            <button
-              type="button"
-              onClick={() => onSelect({ runId: agent.run.id, toolId: agent.call.id })}
-              className="flex w-full min-w-0 flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-white/[0.04]"
-            >
-              <span className="flex min-w-0 items-center gap-1.5 [&_svg]:size-3.5">
-                <StatusIcon status={status} />
-                <span className="min-w-0 flex-1 truncate">{describeTool(agent.call, taskId).label}</span>
-                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                  {work.calls} {work.calls === 1 ? "call" : "calls"}
-                  {work.failed > 0 && <span className="text-destructive"> · {work.failed} failed</span>}
-                </span>
+      {agents.map((agent) => (
+        <li key={`${agent.run.id}:${agent.subagent.id}`}>
+          <button
+            type="button"
+            onClick={() => onSelect({ runId: agent.run.id, subagentId: agent.subagent.id })}
+            className="flex w-full min-w-0 flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-white/[0.04]"
+          >
+            <span className="flex min-w-0 items-center gap-1.5 [&_svg]:size-3.5">
+              <StatusIcon status={agentStatus(agent)} />
+              <span className="min-w-0 flex-1 truncate">Subagent: {agent.subagent.title}</span>
+              <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                {calls(agent.subagent)}
+                {agent.subagent.failedCalls > 0 && <span className="text-destructive"> · {agent.subagent.failedCalls} failed</span>}
               </span>
-              {work.activity !== undefined && (
-                <span className="truncate pl-5 text-xs text-muted-foreground">{work.activity}</span>
-              )}
-            </button>
-          </li>
-        )
-      })}
+            </span>
+            {agent.subagent.activity !== null && (
+              <span className="truncate pl-5 text-xs text-muted-foreground">{agent.subagent.activity}</span>
+            )}
+          </button>
+        </li>
+      ))}
     </ul>
   )
 }
 
 function AgentDetail({ taskId, agent, onBack }: { taskId: string; agent: Agent; onBack: () => void }) {
-  const view = describeTool(agent.call, taskId)
+  const { run, subagent } = agent
   const status = agentStatus(agent)
-  const running = status === "running"
+  const items = useQuery(queries.subagentItems(taskId, run.id))
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const atEnd = useRef(true)
@@ -104,7 +106,7 @@ function AgentDetail({ taskId, agent, onBack }: { taskId: string; agent: Agent; 
     const observer = new ResizeObserver(follow)
     observer.observe(content)
     return () => observer.disconnect()
-  }, [agent.call.id])
+  }, [subagent.id])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -119,7 +121,10 @@ function AgentDetail({ taskId, agent, onBack }: { taskId: string; agent: Agent; 
           <ChevronLeft />
         </button>
         <StatusIcon status={status} />
-        <span className="min-w-0 flex-1 truncate font-medium">{view.label}</span>
+        <span className="min-w-0 flex-1 truncate font-medium">Subagent: {subagent.title}</span>
+        {(subagent.agentType !== null || subagent.model !== null) && (
+          <span className="shrink-0 text-xs text-muted-foreground">{[subagent.agentType, subagent.model].filter((part) => part !== null).join(" · ")}</span>
+        )}
       </div>
       <div
         ref={scrollRef}
@@ -130,25 +135,31 @@ function AgentDetail({ taskId, agent, onBack }: { taskId: string; agent: Agent; 
         className="min-h-0 flex-1 overflow-auto px-4 py-3"
       >
         <div ref={contentRef} className="flex min-w-0 flex-col gap-4">
-          {view.note !== undefined && (
+          {subagent.prompt !== null && (
             <details className="group/prompt rounded-lg bg-white/[0.04] px-3 py-2 text-sm">
               <summary className="cursor-pointer text-muted-foreground select-none">Prompt</summary>
-              <div className="mt-2 break-words whitespace-pre-wrap text-muted-foreground">{view.note}</div>
+              <div className="mt-2 break-words whitespace-pre-wrap text-muted-foreground">{subagent.prompt}</div>
             </details>
           )}
-          <SubagentTranscript
-            taskId={taskId}
-            runId={agent.run.id}
-            items={agent.items}
-            running={agent.run.status === "running"}
-            toolId={agent.call.id}
-          />
-          {!running && agent.call.output !== null && agent.call.output !== "" && (
+          {items.isPending ? (
+            <p className="text-sm text-muted-foreground">Loading its work…</p>
+          ) : items.isError ? (
+            <p role="alert" className="text-sm text-destructive">Could not load its work.</p>
+          ) : (
+            <SubagentTranscript
+              taskId={taskId}
+              runId={run.id}
+              items={items.data}
+              running={run.status === "running"}
+              subagentId={subagent.id}
+            />
+          )}
+          {subagent.result !== null && status !== "running" && (
             <section className="flex flex-col gap-1.5 border-t border-border pt-3">
               <h3 className="text-xs font-medium text-muted-foreground">
                 {status === "failed" ? "Failed" : "Report to the main agent"}
               </h3>
-              <Markdown text={agent.call.output} />
+              <Markdown text={subagent.result} />
             </section>
           )}
         </div>

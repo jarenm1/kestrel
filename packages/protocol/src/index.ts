@@ -478,9 +478,40 @@ export const AgentItem = Schema.Union(
     costUsd: Schema.NullOr(Schema.Number),
     isError: Schema.Boolean,
   }),
+  /**
+   * A subagent the harness ran inside this run: Claude Code's `Agent`/`Task` call, a Codex `subAgentActivity`. Its own
+   * items carry its id as their `parentToolId`; this item sums them up and is re-sent (same id) as they arrive, so a
+   * client can show it without them. For Claude it replaces the call's `tool` item (same id).
+   */
+  Schema.Struct({
+    _tag: Schema.Literal("subagent"),
+    id: Schema.String,
+    /** The subagent that started this one, if any. */
+    parentToolId: Schema.NullOr(Schema.String),
+    /** What it was asked to do, in a few words (Claude's description, Codex's agent path). */
+    title: Schema.String,
+    /** Its kind when the harness names one (Claude's `subagent_type`, e.g. "Explore"). */
+    agentType: Schema.NullOr(Schema.String),
+    prompt: Schema.NullOr(Schema.String),
+    model: Schema.NullOr(Schema.String),
+    /** `running` until the harness reports its end; a run that ended first stopped it. */
+    status: Schema.Literal("running", "completed", "failed", "stopped"),
+    /** Its tool calls so far, at any depth, and how many of them failed. */
+    calls: Schema.Number,
+    failedCalls: Schema.Number,
+    /** One line of its newest step. */
+    activity: Schema.NullOr(Schema.String),
+    /** Its report to the agent that started it, once it ended. */
+    result: Schema.NullOr(Schema.String),
+  }),
   Schema.Struct({ _tag: Schema.Literal("error"), id: Schema.String, text: Schema.String }),
 )
 export type AgentItem = typeof AgentItem.Type
+export type SubagentItem = Extract<AgentItem, { _tag: "subagent" }>
+
+/** Which part of a run's items a client asks for: see `Paths.runItems`. */
+export const RunItemsScope = Schema.Literal("main", "subagents")
+export type RunItemsScope = typeof RunItemsScope.Type
 
 export const RunItems = Schema.Array(AgentItem)
 export type RunItems = typeof RunItems.Type
@@ -1219,8 +1250,11 @@ export const Paths = {
    */
   taskUploads: (id: string) => `/api/tasks/${id}/uploads`,
   runCancel: (id: string) => `/api/runs/${id}/cancel`,
-  /** GET -> RunItems: the run's display items so far (live runs) or final (finished runs). */
-  runItems: (id: string) => `/api/runs/${id}/items`,
+  /**
+   * GET -> RunItems: the run's display items so far (live runs) or final (finished runs). `main`: the main agent's
+   * items only, each subagent as its `subagent` item; `subagents`: only what the subagents did. All of them without.
+   */
+  runItems: (id: string, scope?: RunItemsScope) => `/api/runs/${id}/items${scope === undefined ? "" : `?scope=${scope}`}`,
   /** WebSocket: JSON `ServerEvent` text frames for one thread. */
   taskEventsWs: (id: string) => `/api/tasks/${id}/events`,
   /**
@@ -1249,6 +1283,7 @@ export * from "./boxtoken"
 export * from "./tool-names"
 export * from "./tool-display"
 export * from "./live-items"
+export * from "./subagents"
 export * from "./transcript-segments"
 export * from "./thread-identity"
 export * from "./task-state"

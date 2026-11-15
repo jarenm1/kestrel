@@ -73,8 +73,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
   const chatHost = useMemo(
     () => ({
       ...outerHost,
-      openSubagent: (runId: string, toolId: string) => {
-        setSubagent({ runId, toolId })
+      openSubagent: (runId: string, subagentId: string) => {
+        setSubagent({ runId, subagentId })
         openTabRef.current("agents")
       },
     }),

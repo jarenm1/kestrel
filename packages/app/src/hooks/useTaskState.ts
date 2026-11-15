@@ -110,14 +110,19 @@ export function useTaskState(taskId: string) {
               [event.runId]: [...(prev[event.runId] ?? []), ...event.text.split("\n")].slice(-MAX_LOG_LINES),
             }))
             break
-          case "agent.item":
-            // Same id means the item was replaced (a tool finishing), so upsert keeps its place.
-            queryClient.setQueryData(keys.runItems(event.runId), (list: RunItems | undefined) =>
-              upsert(list, event.item),
-            )
+          case "agent.item": {
+            // Same id means the item was replaced (a tool finishing), so upsert keeps its place. A subagent's own
+            // items go to its run's subagent items, and only once someone loaded them: the thread shows it as its
+            // `subagent` item, which comes as an event of its own.
+            const ownItem = event.item._tag !== "turn" && event.item._tag !== "error" && event.item.parentToolId !== null
+            const key = ownItem ? keys.subagentItems(event.runId) : keys.runItems(event.runId)
+            if (!ownItem || queryClient.getQueryState(key) !== undefined) {
+              queryClient.setQueryData(key, (list: RunItems | undefined) => upsert(list, event.item))
+            }
             // Items are what change the worktree, so the diff and files follow them; a run.updated covers the ends.
             invalidateWorktreeThrottled()
             break
+          }
           case "desktop.updated": {
             // Only a move into "running" counts as the agent opening it. While a viewer streams, its frames win.
             const previous = queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId))
