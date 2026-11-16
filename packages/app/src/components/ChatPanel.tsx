@@ -2,9 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ChevronRight, CornerUpLeft, X } from "lucide-react"
-import { activityLine, threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol"
+import { activityLine, threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type SubagentItem, type Task, type TaskStatus } from "@cloudagents/protocol"
 import { Transcript } from "@cloudagents/ui/transcript"
 import { PendingMessages } from "@cloudagents/ui/transcript/pending"
+import { useTranscriptHost } from "@cloudagents/ui/transcript/host"
 import { api } from "@/api/client"
 import { keys, queries, upsert, upsertMessage } from "@/api/queries"
 import { isTaskAwaitingUser, isTaskWorking } from "@cloudagents/protocol"
@@ -135,16 +136,81 @@ function DelegatedCard({ child, onCancel, cancelling }: { child: ChildView; onCa
   )
 }
 
+/** A harness subagent of one of this thread's runs, as the dock shows it. */
+interface SubagentView {
+  run: Run
+  item: SubagentItem
+  /** StatusIcon status. */
+  icon: string
+  /** Counted in the header's summary, where it matches a delegated task's label for the same outcome. */
+  label: string
+  active: boolean
+}
+
+/** Labels a subagent the way the dock labels a delegated task; one still running in a run that ended was stopped. */
+function subagentView(run: Run, item: SubagentItem): SubagentView {
+  const status = item.status === "running" && run.status !== "running" ? "stopped" : item.status
+  switch (status) {
+    case "running":
+      return { run, item, icon: "running", label: "Running", active: true }
+    case "completed":
+      return { run, item, icon: "succeeded", label: "succeeded", active: false }
+    case "failed":
+      return { run, item, icon: "failed", label: "failed", active: false }
+    case "stopped":
+      return { run, item, icon: "cancelled", label: "cancelled", active: false }
+  }
+}
+
+const callCount = (item: SubagentItem) => `${item.calls} ${item.calls === 1 ? "call" : "calls"}`
+
+/** A subagent's title; a click opens its work beside the thread, where the host has a panel for it. */
+function SubagentTitle({ view, className }: { view: SubagentView; className: string }) {
+  const { openSubagent } = useTranscriptHost()
+  if (openSubagent === undefined) return <span className={className}>{view.item.title}</span>
+  return (
+    <button type="button" className={cn("text-left", className)} onClick={() => openSubagent(view.run.id, view.item.id)}>
+      {view.item.title}
+    </button>
+  )
+}
+
+/** A running subagent's card: like a delegated task's, with its call count where a task shows its elapsed time. */
+function SubagentCard({ view }: { view: SubagentView }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1 rounded-lg bg-white/[0.04] px-2.5 py-2">
+      <div className="flex items-center gap-1.5 [&_svg]:size-3.5">
+        <StatusIcon status={view.icon} />
+        <SubagentTitle view={view} className="min-w-0 flex-1 truncate font-medium hover:underline" />
+        <span className="font-mono text-[11px] text-muted-foreground">{callCount(view.item)}</span>
+      </div>
+      <div className="line-clamp-2 text-muted-foreground">{view.item.activity ?? view.label}</div>
+    </div>
+  )
+}
+
+/** "2 subagents and 1 delegated task": the parts that are not zero. */
+function agentsPhrase(delegated: number, subagents: number): string {
+  const parts = [
+    ...(subagents > 0 ? [`${subagents} ${subagents === 1 ? "subagent" : "subagents"}`] : []),
+    ...(delegated > 0 ? [`${delegated} delegated ${delegated === 1 ? "task" : "tasks"}`] : []),
+  ]
+  return parts.join(" and ")
+}
+
 /**
- * Delegated threads are independent conversations; their original run stays linked even after follow-ups. One header
- * line sums them up; open, active ones show as cards with their latest activity and finished ones as compact rows. It
- * opens by itself while any is active and closes when all finish, until the user toggles it.
+ * The thread's other agents: the threads it delegated and the subagents its harness ran. Delegated threads are
+ * independent conversations; their original run stays linked even after follow-ups. One header line sums everything
+ * up; open, active ones show as cards with their latest activity and finished ones as compact rows. It opens by itself
+ * while any is active and closes when all finish, until the user toggles it. A subagent's title opens its work in the
+ * sidebar; its row in the transcript stays where it ran.
  *
  * Whether a child is active comes from `isTaskWorking` and `isTaskAwaitingUser`, the same selectors the sidebar uses,
  * so a running child is working while a `needs_input` child is awaiting the user. Its runs are only polled (its events stream to its own view
- * alone), so they decide labels, times and activity, never whether it is done.
+ * alone), so they decide labels, times and activity, never whether it is done. Subagents come from this thread's own
+ * run items, which live events keep current.
  */
-function DelegatedTasks({ taskId }: { taskId: string }) {
+function AgentsDock({ taskId, subagents }: { taskId: string; subagents: readonly SubagentView[] }) {
   const tasks = useQuery(queries.tasks()).data ?? []
   const children = tasks.filter((task) => task.delegation?.parentTaskId === taskId)
   const runs = useQueries({
@@ -173,7 +239,7 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.tasks }),
   })
   const [toggled, setToggled] = useState<boolean>()
-  if (children.length === 0) return null
+  if (children.length === 0 && subagents.length === 0) return null
 
   const views: ChildView[] = children.map((child, index) => {
     const runId = child.delegation?.runId
@@ -212,33 +278,50 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
   })
   const active = views.filter((v) => v.active)
   const finished = views.filter((v) => !v.active)
-  const open = toggled ?? active.length > 0
+  const activeSubagents = subagents.filter((v) => v.active)
+  const finishedSubagents = subagents.filter((v) => !v.active)
+  const working = active.length + activeSubagents.length
+  const open = toggled ?? working > 0
   const counts = new Map<string, number>()
-  for (const v of finished) counts.set(v.label, (counts.get(v.label) ?? 0) + 1)
-  const summary = [...counts].map(([label, n]) => `${n} ${label.toLowerCase()}`).join(" · ")
+  for (const v of [...finished, ...finishedSubagents]) {
+    const label = v.label.toLowerCase()
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  const summary = [...counts].map(([label, n]) => `${n} ${label}`).join(" · ")
+  const title = working > 0
+    ? `Waiting on ${agentsPhrase(active.length, activeSubagents.length)}`
+    : children.length === 0 ? "Subagents" : subagents.length === 0 ? "Delegated tasks" : "Subagents and delegated tasks"
 
   return (
-    <section aria-label="Delegated tasks" className="mb-5 w-full max-w-3xl rounded-xl border border-white/10 text-xs">
+    <section aria-label={title} className="mb-5 w-full max-w-3xl rounded-xl border border-white/10 text-xs">
       <button type="button" aria-expanded={open} className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-muted-foreground hover:text-foreground [&_svg]:size-3.5" onClick={() => setToggled(!open)}>
         <ChevronRight className={cn("shrink-0 transition-transform", open && "rotate-90")} />
-        {active.length > 0 && <StatusIcon status="running" />}
-        <span className="font-medium text-foreground">{active.length > 0 ? `Waiting on ${active.length} delegated ${active.length === 1 ? "task" : "tasks"}` : "Delegated tasks"}</span>
+        {working > 0 && <StatusIcon status="running" />}
+        <span className="font-medium text-foreground">{title}</span>
         <span className="min-w-0 flex-1 truncate text-right">{summary}</span>
       </button>
       {open && (
         <div className="space-y-2 px-2 pb-2">
-          {active.length > 0 && (
+          {working > 0 && (
             <div className="grid max-h-40 grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-1.5 overflow-y-auto">
               {active.map((v) => <DelegatedCard key={v.task.id} child={v} cancelling={cancel.isPending} onCancel={() => cancel.mutate(v.task.id)} />)}
+              {activeSubagents.map((v) => <SubagentCard key={`${v.run.id}:${v.item.id}`} view={v} />)}
             </div>
           )}
-          {finished.length > 0 && (
+          {finished.length + finishedSubagents.length > 0 && (
             <div className="max-h-32 space-y-0.5 overflow-y-auto px-1">
               {finished.map((v) => (
                 <div key={v.task.id} className="flex items-center gap-1.5 [&_svg]:size-3">
                   <StatusIcon status={v.icon} />
                   <Link to={threadPath(v.task.id)} className="min-w-0 flex-1 truncate text-muted-foreground hover:text-foreground hover:underline">{v.task.title}</Link>
                   {v.run && <span className="font-mono text-[11px] text-muted-foreground"><Elapsed startedAt={v.run.startedAt} endedAt={v.run.endedAt} /></span>}
+                </div>
+              ))}
+              {finishedSubagents.map((v) => (
+                <div key={`${v.run.id}:${v.item.id}`} className="flex items-center gap-1.5 [&_svg]:size-3">
+                  <StatusIcon status={v.icon} />
+                  <SubagentTitle view={v} className="min-w-0 flex-1 truncate text-muted-foreground hover:text-foreground hover:underline" />
+                  <span className="font-mono text-[11px] text-muted-foreground">{callCount(v.item)}</span>
                 </div>
               ))}
             </div>
@@ -267,6 +350,10 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
     const items = runItemQueries[index]?.data
     if (items !== undefined) runItems[run.id] = items
   })
+  // The harness's subagents in every run of the thread, oldest first: the dock lists them beside delegated threads.
+  const subagents = sortedRuns.flatMap((run) =>
+    (runItems[run.id] ?? []).flatMap((item) => (item._tag === "subagent" ? [subagentView(run, item)] : [])),
+  )
   // `task_ask` questions are the messages with `options` (possibly none). The latest one, while the agent is blocked
   // on it, moves into the composer: its screenshot, question and options sit above the box until it is answered.
   const lastAsk = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).reverse().find((m) => m.options !== undefined)
@@ -356,7 +443,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
           per thread, and the Composer sibling already uses `taskId` as its key; a duplicate key makes React leave
           stale copies of the strip behind each time the working indicator comes and goes.
         */}
-        <DelegatedTasks taskId={taskId} />
+        <AgentsDock taskId={taskId} subagents={subagents} />
         {/* Above the composer, below the delegated threads; its message list scrolls, so a long queue never hides the composer. */}
         {pendingMessages.length > 0 && (
           <PendingMessages

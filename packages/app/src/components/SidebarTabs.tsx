@@ -18,7 +18,7 @@ export const SIDEBAR_TABS: readonly { id: SidebarTabId; label: string; icon: Luc
   { id: "diff", label: "Diff", icon: GitCompare, shortcut: "D" },
   { id: "files", label: "Files", icon: FolderTree, shortcut: "F" },
   { id: "pull-requests", label: "Pull requests", icon: GitPullRequest, shortcut: "P" },
-  { id: "agents", label: "Agents", icon: Bot, shortcut: "A" },
+  { id: "agents", label: "Subagent", icon: Bot, shortcut: "A" },
 ]
 
 const tabOf = (id: SidebarTabId) => SIDEBAR_TABS.find((t) => t.id === id) ?? SIDEBAR_TABS[0]!
