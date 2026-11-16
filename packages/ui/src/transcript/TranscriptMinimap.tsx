@@ -81,13 +81,16 @@ export function TranscriptMinimap({
 
     const refresh = () => {
       const view = scroll.getBoundingClientRect()
+      // A jump leaves its message `JUMP_OFFSET_PX` below the top, so the turn being read is measured from that inset:
+      // otherwise the message just above still counts as in view (turns can sit 20px apart) and Next never advances.
+      const anchor = view.top + JUMP_OFFSET_PX
       const visible: boolean[] = []
       const above: boolean[] = []
       for (const item of itemsRef.current) {
         const rect = messageElement(content, item.id)?.getBoundingClientRect()
         const inView = rect !== undefined && rect.top < view.bottom && rect.bottom > view.top
-        visible.push(inView)
-        above.push(rect !== undefined && rect.bottom <= view.top)
+        visible.push(rect !== undefined && rect.top < view.bottom && rect.bottom > anchor)
+        above.push(rect !== undefined && rect.bottom <= anchor)
         const strip = stripsRef.current.get(item.id)
         const next = inView ? "true" : "false"
         // Avoid dirtying style state on every scroll tick for unchanged strips.
