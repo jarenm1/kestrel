@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef } from "react"
-import { useQueries, useQuery } from "@tanstack/react-query"
-import { ChevronLeft } from "lucide-react"
+import { useQuery } from "@tanstack/react-query"
 import type { Run, SubagentItem } from "@cloudagents/protocol"
 import { Markdown } from "@cloudagents/ui/markdown"
 import { SubagentTranscript } from "@cloudagents/ui/transcript/run"
@@ -32,60 +31,25 @@ function agentStatus({ run, subagent }: Agent): string {
   }
 }
 
-const calls = (subagent: SubagentItem) => `${subagent.calls} ${subagent.calls === 1 ? "call" : "calls"}`
-
 /** Within this distance of the bottom, keep following the subagent's new work. */
 const STICK_PX = 80
 
 /**
- * The thread's harness subagents (Claude Code's Agent calls, Codex's subagents), newest first; one opens to its own
- * work, which the thread itself only sums up in a row. The thread's run items hold each subagent's item; what it did
- * loads only when it is opened, and live events keep both current.
+ * One harness subagent's work (Claude Code's Agent call, a Codex subagent), opened from its row in the thread or its
+ * card in the dock above the composer, which list them. Its item comes with the run's items; what it did loads only
+ * when it is opened, and live events keep both current.
  */
-export function AgentsPanel({ taskId, selected, onSelect }: {
-  taskId: string
-  selected: SubagentRef | undefined
-  onSelect: (ref: SubagentRef | undefined) => void
-}) {
-  const runs = [...(useQuery(queries.runs(taskId)).data ?? [])].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
-  const itemQueries = useQueries({ queries: runs.map((run) => queries.runItems(taskId, run.id)) })
-  const agents: Agent[] = runs.flatMap((run, index) =>
-    (itemQueries[index]?.data ?? []).flatMap((item) => (item._tag === "subagent" ? [{ run, subagent: item }] : [])),
-  ).reverse()
-  const current = selected && agents.find((agent) => agent.run.id === selected.runId && agent.subagent.id === selected.subagentId)
-
-  if (current !== undefined) return <AgentDetail taskId={taskId} agent={current} onBack={() => onSelect(undefined)} />
-  if (agents.length === 0) {
-    return <p className="p-4 text-sm text-muted-foreground">No subagents in this thread yet. When the agent starts one, its work shows here.</p>
+export function AgentsPanel({ taskId, selected }: { taskId: string; selected: SubagentRef | undefined }) {
+  const run = useQuery(queries.runs(taskId)).data?.find((candidate) => candidate.id === selected?.runId)
+  const items = useQuery({ ...queries.runItems(taskId, selected?.runId ?? ""), enabled: selected !== undefined }).data
+  const subagent = items?.find((item): item is SubagentItem => item._tag === "subagent" && item.id === selected?.subagentId)
+  if (run === undefined || subagent === undefined) {
+    return <p className="p-4 text-sm text-muted-foreground">Open a subagent from its row in the thread, or from the list above the composer, to see its work here.</p>
   }
-  return (
-    <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto p-2">
-      {agents.map((agent) => (
-        <li key={`${agent.run.id}:${agent.subagent.id}`}>
-          <button
-            type="button"
-            onClick={() => onSelect({ runId: agent.run.id, subagentId: agent.subagent.id })}
-            className="flex w-full min-w-0 flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-white/[0.04]"
-          >
-            <span className="flex min-w-0 items-center gap-1.5 [&_svg]:size-3.5">
-              <StatusIcon status={agentStatus(agent)} />
-              <span className="min-w-0 flex-1 truncate">Subagent: {agent.subagent.title}</span>
-              <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                {calls(agent.subagent)}
-                {agent.subagent.failedCalls > 0 && <span className="text-destructive"> · {agent.subagent.failedCalls} failed</span>}
-              </span>
-            </span>
-            {agent.subagent.activity !== null && (
-              <span className="truncate pl-5 text-xs text-muted-foreground">{agent.subagent.activity}</span>
-            )}
-          </button>
-        </li>
-      ))}
-    </ul>
-  )
+  return <AgentDetail taskId={taskId} agent={{ run, subagent }} />
 }
 
-function AgentDetail({ taskId, agent, onBack }: { taskId: string; agent: Agent; onBack: () => void }) {
+function AgentDetail({ taskId, agent }: { taskId: string; agent: Agent }) {
   const { run, subagent } = agent
   const status = agentStatus(agent)
   const items = useQuery(queries.subagentItems(taskId, run.id))
@@ -110,16 +74,7 @@ function AgentDetail({ taskId, agent, onBack }: { taskId: string; agent: Agent; 
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-w-0 items-center gap-1.5 border-b border-border px-2 pb-2 text-sm [&_svg]:size-3.5">
-        <button
-          type="button"
-          onClick={onBack}
-          aria-label="All subagents"
-          title="All subagents"
-          className="rounded p-1 text-muted-foreground hover:text-foreground"
-        >
-          <ChevronLeft />
-        </button>
+      <div className="flex min-w-0 items-center gap-1.5 border-b border-border px-3 pb-2 text-sm [&_svg]:size-3.5">
         <StatusIcon status={status} />
         <span className="min-w-0 flex-1 truncate font-medium">Subagent: {subagent.title}</span>
         {(subagent.agentType !== null || subagent.model !== null) && (

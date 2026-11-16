@@ -65,7 +65,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_SHARE_KEY, String(sidebarShare))
   }, [sidebarShare])
-  // The subagent the Agents tab shows; a click on a subagent's row in the thread opens it there.
+  // The subagent the Subagent tab shows; a click on its row in the thread or its entry in the dock opens it there.
   const [subagent, setSubagent] = useState<SubagentRef | undefined>(undefined)
   const openTabRef = useRef(openTab)
   openTabRef.current = openTab
@@ -235,7 +235,6 @@ export function ThreadView({ taskId }: { taskId: string }) {
                 previewPort={state.task?.previewPort}
                 onSelectElement={(element) => setElements((current) => [...current, element])}
                 subagent={subagent}
-                onSelectSubagent={setSubagent}
               />
             </aside>
           )}
@@ -303,7 +302,6 @@ function SidebarBody({
   previewPort,
   onSelectElement,
   subagent,
-  onSelectSubagent,
 }: {
   tab: SidebarTabId | undefined
   taskId: string
@@ -311,7 +309,6 @@ function SidebarBody({
   previewPort: number | undefined
   onSelectElement: (element: ElementContext) => void
   subagent: SubagentRef | undefined
-  onSelectSubagent: (ref: SubagentRef | undefined) => void
 }) {
   switch (tab) {
     case undefined:
@@ -333,6 +330,6 @@ function SidebarBody({
     case "pull-requests":
       return <PullRequestsPanel taskId={taskId} />
     case "agents":
-      return <AgentsPanel taskId={taskId} selected={subagent} onSelect={onSelectSubagent} />
+      return <AgentsPanel taskId={taskId} selected={subagent} />
   }
 }
