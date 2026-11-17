@@ -76,7 +76,7 @@ import { agentText, attachmentPath, sanitizeUploadName, uploadOperationId } from
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
-import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
+import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, dropThreadCaches, formatBytes } from "./storage"
 import { readTextGenerationSettings, writeTextGenerationSettings } from "./text-generation-settings"
 import { readThreadSettings, writeThreadSettings } from "./thread-settings"
 import { AUTO_RETRY_MESSAGE, makeRunRecovery, RUN_RECOVERY_SWEEP } from "./run-recovery"
@@ -1356,8 +1356,15 @@ export const CoreLive = Layer.effect(
         hub.publish({ _tag: "task.deleted", taskId, owner: task.owner })
       })
 
+    /** Drops an archived thread's home caches; a failure is logged and leaves the thread archived. */
+    const dropCachesOf = (taskId: string) =>
+      Effect.tryPromise(() => dropThreadCaches(join(config.homesDir, taskId))).pipe(
+        Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: dropping home caches failed: ${String(e.error)}`)),
+      )
+
     // Archiving sets the flag before teardown, so no run can start while the runtime is being torn down. A thread's
-    // sub-threads — delegated to it or spawned by it — archive with it, transitively, in the same update.
+    // sub-threads — delegated to it or spawned by it — archive with it, transitively, in the same update. Once nothing
+    // of a thread runs, its home's package caches go (`THREAD_HOME_CACHES`).
     const archiveTask: CoreShape["archiveTask"] = (user, id) =>
       Effect.gen(function* () {
         yield* ownedTask(user, id)
@@ -1393,6 +1400,7 @@ export const CoreLive = Layer.effect(
         for (const t of archived.tree) {
           hub.publish({ _tag: "task.updated", task: t })
           yield* teardownRuntime(t.id)
+          yield* dropCachesOf(t.id)
         }
         return archived.task
       })
@@ -2741,6 +2749,21 @@ export const CoreLive = Layer.effect(
           )
         return { id, mimeType: input.mimeType, name }
       }))
+
+    // Threads archived before archiving dropped caches, or by a box that stopped mid-way, still hold theirs. Each is
+    // read again just before its turn, so a thread unarchived meanwhile keeps its caches.
+    yield* Effect.forkDaemon(
+      Effect.flatMap(store.read, (state) =>
+        Effect.forEach(
+          state.tasks.filter((t) => t.archivedAt !== undefined).map((t) => t.id),
+          (taskId) =>
+            Effect.flatMap(store.read, (now) =>
+              now.tasks.find((t) => t.id === taskId)?.archivedAt === undefined ? Effect.void : dropCachesOf(taskId),
+            ),
+          { discard: true },
+        ),
+      ),
+    )
 
     // First check at startup, then every STORAGE_CHECK_MS; a failed check is logged and the next one runs anyway.
     yield* Effect.forkDaemon(
