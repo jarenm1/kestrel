@@ -1195,7 +1195,7 @@ export class VmManager {
     this.closeLink(vm.boxId)
     await stopVmmProcess(cur.process, p.apiSocket, VMM_STOP_GRACE_MS)
     cur = { ...cur, process: null }
-    const ref = await backupVolume(this.volume, { path: cur.volumeProcess?.device ?? p.volume, boxId: vm.boxId })
+    const ref = await backupVolume(this.volume, { path: cur.volumeProcess?.device ?? p.volume, boxId: vm.boxId, stateDir: p.dir })
     cur = await this.releaseVm(cur)
     this.finish(cur, "parked", {
       volumeRef: ref.volumeRef,
@@ -1633,7 +1633,7 @@ export class VmManager {
     // A lazy device is read while frozen, so the backup is a consistent image of the frozen volume.
     let volumeRef: string | null = null
     try {
-      if (device !== null) volumeRef = (await backupVolume(this.volume, { path: device, boxId })).volumeRef
+      if (device !== null) volumeRef = (await backupVolume(this.volume, { path: device, boxId, stateDir: p.dir })).volumeRef
       else await runChecked("cp", ["--reflink=auto", p.volume, copy])
     } catch (error) {
       await this.thawOrStop(boxId, `backup aborted: ${errorMessage(error)}`)
@@ -1644,7 +1644,7 @@ export class VmManager {
     if (volumeRef === null) {
       try {
         if (!thawed) throw new HostError("the guest did not thaw its volume, so the VM was stopped")
-        volumeRef = (await backupVolume(this.volume, { path: copy, boxId })).volumeRef
+        volumeRef = (await backupVolume(this.volume, { path: copy, boxId, stateDir: p.dir })).volumeRef
       } finally {
         rmSync(copy, { force: true })
       }

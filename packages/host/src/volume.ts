@@ -29,14 +29,20 @@ export const createVolume = async (volume: VolumeTool, path: string, sizeBytes: 
   await runChecked(volume.tool, ["create", "--path", path, "--size-bytes", String(sizeBytes)])
 }
 
+/**
+ * Backs up the volume file at `path`. `stateDir` keeps the tool's snapshot, its baseline for the next incremental
+ * backup and the box's backup lock; it must be on the same reflink filesystem as `path`.
+ */
 export const backupVolume = async (
   volume: VolumeTool,
-  opts: { readonly path: string; readonly boxId: string },
+  opts: { readonly path: string; readonly boxId: string; readonly stateDir: string },
 ): Promise<VolumeBackupResult> => {
   const stdout = await runChecked(volume.tool, [
     "backup",
     "--path",
     opts.path,
+    "--state-dir",
+    opts.stateDir,
     "--box",
     opts.boxId,
     "--store",
