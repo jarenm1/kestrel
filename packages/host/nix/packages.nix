@@ -3,13 +3,14 @@
 { pkgs, lib, root, boxRuntime ? [ ] }:
 
 let
-  # Workspace manifests only: `bun install` resolves from these, so the dependency closure does not change
-  # when source files do.
+  # Workspace manifests and the `patchedDependencies` patches only: `bun install` resolves from these, so the
+  # dependency closure does not change when source files do.
   workspaceManifests = lib.fileset.toSource {
     inherit root;
     fileset = lib.fileset.unions ([
       (root + "/package.json")
       (root + "/bun.lock")
+      (root + "/patches")
     ] ++ map (name: root + "/packages/${name}/package.json")
       (builtins.attrNames (lib.filterAttrs (_: t: t == "directory") (builtins.readDir (root + "/packages")))));
   };
@@ -99,7 +100,7 @@ let
     name = "kestrel-host";
     package = "host";
     filter = "@cloudagents/host";
-    hash = "sha256-aEBZV6qseG+rCOOWrR8l+6lRlUR+/xEbLUM89k6Hop0=";
+    hash = "sha256-JGWb57UZPbvJzq5tk2peT1rBj9WzR4IL4/oKyYRevtk=";
     sources = [ "packages/protocol" "packages/host/package.json" "packages/host/src" ];
     entry = "src/cli.ts";
   };

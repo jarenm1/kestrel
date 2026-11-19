@@ -54,6 +54,14 @@ pkgs.testers.runNixOSTest {
         memorySize = 6144;
         cores = 4;
         diskSize = 16384;
+        # Volume backups reflink, so the state dir must be on a reflink filesystem (docs/nest.md, Storage), as on a
+        # real host; the test root is ext4.
+        emptyDiskImages = [ 12288 ];
+        fileSystems."/var/lib/kestrel-host" = {
+          device = "/dev/vdb";
+          fsType = "xfs";
+          autoFormat = true;
+        };
       };
 
       networking.interfaces.eth1.ipv4.routes = [
@@ -155,11 +163,14 @@ pkgs.testers.runNixOSTest {
     def show(box):
         return json.loads(host.succeed("kestrel-host vm show " + box))
 
-    def health(box):
+    def request(box, path):
         return host.succeed(
             "curl -s -o /dev/null -w '%{http_code}' --max-time 150 -H 'Host: " + box + "." + SLUG + "." + DOMAIN
-            + "' http://127.0.0.1:8081/api/health || true"
+            + "' http://127.0.0.1:8081" + path + " || true"
         ).strip()
+
+    def health(box):
+        return request(box, "/api/health")
 
     def wait_for(what, predicate, timeout=600):
         deadline = time.monotonic() + timeout
@@ -224,11 +235,16 @@ pkgs.testers.runNixOSTest {
     assert json.loads(control.succeed("cat /tmp/create-b2.out")).get("ok") is True
     wait_for("b2 health", lambda: health("b2") == "200", 600)
 
-    # 4. Idle suspend, then wake-on-request: a request to a suspended box resumes it and gets a 200.
+    # 4. Idle suspend, then wake-on-request. `/api/health` is the apps' background poll: it never wakes a box and
+    #    answers 503 while it is suspended. Any other request resumes it and is proxied once it runs; the box answers
+    #    an unauthenticated `/api/capabilities` with 401.
     expect_ok({"_tag": "suspend", "boxId": "b1", "ownerEpoch": 1})
     assert show("b1")["state"] == "suspended", show("b1")
-    wait_for("b1 wake-on-request health", lambda: health("b1") == "200", 300)
+    assert health("b1") == "503", "health of a suspended box: " + health("b1")
+    assert show("b1")["state"] == "suspended", "a health poll woke b1: " + repr(show("b1"))
+    wait_for("b1 wake-on-request", lambda: request("b1", "/api/capabilities") == "401", 300)
     assert show("b1")["state"] == "running", show("b1")
+    assert health("b1") == "200", "b1 unhealthy after wake"
 
     # 5. Live resize down then up; the VMM's reported memory follows the limit.
     expect_ok({"_tag": "setLimits", "boxId": "b1", "ownerEpoch": 1, "limits": box_limits(GIB, 1)})
