@@ -37,7 +37,9 @@ illegal edges explicit.
    during a rollout. Do not change an existing field's meaning or make a new field required for decoding.
 6. **A failed durable write is a rollback, not a partial success.** `StateStore.update` now restores memory when the
    write fails (PR #342). A caller that must proceed on an applied-but-unconfirmed write uses `updateOutcome`, and
-   treats `unconfirmed` as applied.
+   treats `unconfirmed` as applied. When a send fails after its transition, the caller restores the phase it captured
+   before the writer ran through that machine's restore writer (for example `restoreNestBox`), instead of assigning the
+   fields itself.
 7. **No behaviour change in Wave 0.** This PR adds types, tests and this document only.
 
 ## Decisions
@@ -493,6 +495,16 @@ Wave 1, per PR:
 bun run typecheck
 bun test <affected package>
 bun run build:app     # if packages/app or packages/mobile changed
+```
+
+The transition-writer guard enforces rule 1: it scans `packages/server/src` and `packages/control/src` for direct
+writes to lifecycle fields and fails unless the file is one of the six writers (`applyTaskEvent`, `applyRunEvent`,
+`applyDelegationEvent`, `applyNestBoxEvent`, `applyDesktopEvent`, `applyDeliveryEvent`). It flags every assignment
+operator and `++`/`--`, and an `Object.assign` that copies a non-literal source onto a stored record. It runs with the
+other protocol tests, or alone:
+
+```sh
+bun test ./packages/protocol/transition-guard.test.ts
 ```
 
 Then run the stack with a unique `KESTREL_DEV_SLOT` and exercise the flow the PR changes. The PR body records the

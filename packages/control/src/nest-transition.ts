@@ -232,3 +232,23 @@ export const applyNestBoxEvent = (row: NestBoxRow, event: NestBoxEvent): NestBox
   row.pendingDeadline = phase.pendingDeadline
   return transition
 }
+
+/**
+ * Puts a row back to a phase captured before a send it could not complete, so a failed external effect rolls the
+ * writer's change back (rule 6: a failed write is a rollback, not a partial success). The snapshot comes from
+ * `nestBoxPhaseOf`, which covers exactly the lifecycle fields `applyNestBoxEvent` owns; fields outside the phase
+ * (enrollment, retry) stay the caller's to restore.
+ */
+export const restoreNestBox = (row: NestBoxRow, phase: NestBoxPhase): void => {
+  row.state = phase.state
+  row.createFailed = phase.createFailed
+  row.hostId = phase.hostId
+  row.ownerEpoch = phase.ownerEpoch
+  row.vmId = phase.vmId
+  row.vmSince = phase.vmSince
+  row.wakeWanted = phase.wakeWanted
+  row.pendingId = phase.pendingId
+  row.pendingKind = phase.pendingKind
+  row.pendingCommand = phase.pendingCommand
+  row.pendingDeadline = phase.pendingDeadline
+}
