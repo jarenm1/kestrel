@@ -28,7 +28,19 @@ export interface GitHubToolDeps {
     ) => Effect.Effect<PostedComment | null, unknown>
     readonly changeReviewers: (taskId: string, input: PullRequestTarget & ReviewerChange) => Effect.Effect<void, unknown>
     readonly changeLabels: (taskId: string, input: PullRequestTarget & LabelChange) => Effect.Effect<void, unknown>
+    readonly attachEvidence: (
+      taskId: string,
+      input: {
+        readonly caption: string
+        readonly bytes: Uint8Array
+        readonly mimeType: "image/png"
+        readonly checkoutId?: string
+        readonly number?: number
+      },
+    ) => Effect.Effect<{ readonly commentUrl: string; readonly imageUrl: string }, unknown>
   }
+  /** The task desktop as a PNG; fails when it is not running. */
+  readonly screenshot: (taskId: string) => Effect.Effect<Uint8Array, unknown>
 }
 
 const formatStatus = (pr: PullRequestStatus): string => {
@@ -459,6 +471,42 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
           Effect.gen(function* () {
             yield* deps.github.changeLabels(ctx.taskId, { checkoutId: checkout, number, action, labels })
             return text(`${action === "add" ? "added" : "removed"} labels: ${labels.join(", ")}`)
+          }),
+        ),
+      ),
+  )
+
+  server.registerTool(
+    "evidence_attach_to_pr",
+    {
+      description:
+        "Capture the task desktop as a PNG and attach it to the thread's linked GitHub pull request as evidence: the " +
+        "image is committed to a dedicated kestrel-evidence branch and a comment shows it inline with the caption. The " +
+        "pull request's own branches and diff are never modified. The desktop must be running: call desktop_open " +
+        "first. Defaults to this checkout's pull request; name number for a pull request in this checkout's repository. " +
+        "The capture is committed to the repository, so on a public repository anything visible on screen becomes public. " +
+        "The shared kestrel-evidence branch is kept after the pull request closes. Deleting it removes the image from " +
+        "the branch and the comment's link; the commit and blob remain in the repository's object store until garbage " +
+        "collection and may remain reachable by commit SHA or from forks.",
+      inputSchema: {
+        caption: z.string().min(1).describe("What the screenshot shows; shown as the image's caption"),
+        checkout: checkoutArg,
+        number: numberArg,
+      },
+    },
+    ({ caption, checkout, number }: { caption: string; checkout?: string; number?: number }) =>
+      guard(() =>
+        runTool(
+          Effect.gen(function* () {
+            const bytes = yield* deps.screenshot(ctx.taskId)
+            const { commentUrl } = yield* deps.github.attachEvidence(ctx.taskId, {
+              caption,
+              bytes,
+              mimeType: "image/png",
+              checkoutId: checkout,
+              number,
+            })
+            return text(`attached desktop screenshot to the pull request: ${commentUrl}`)
           }),
         ),
       ),

@@ -191,6 +191,7 @@ const program = Effect.gen(function* () {
       commentOnPullRequest: core.commentOnPullRequest,
       changeReviewers: core.changeReviewers,
       changeLabels: core.changeLabels,
+      attachEvidence: (taskId, input) => core.attachEvidenceToPullRequest(taskId, input),
     },
     ask: core.ask,
     automations: {

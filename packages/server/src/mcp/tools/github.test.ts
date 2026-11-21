@@ -7,9 +7,12 @@ import type { PullRequest } from "../../github/api"
 import { type GitHubToolDeps, registerGitHubTools } from "./github"
 
 /** Connects the GitHub tools to an in-memory client; `calls` records what each core operation received. */
-const connect = async (github: Partial<GitHubToolDeps["github"]>) => {
+const connect = async (
+  github: Partial<GitHubToolDeps["github"]>,
+  screenshot: GitHubToolDeps["screenshot"] = () => Effect.fail(new Error("the desktop is not running; call desktop_open first")),
+) => {
   const server = new McpServer({ name: "test", version: "1" })
-  registerGitHubTools(server, { taskId: "task", runId: "run" }, { github } as unknown as GitHubToolDeps)
+  registerGitHubTools(server, { taskId: "task", runId: "run" }, { github, screenshot } as unknown as GitHubToolDeps)
   const client = new Client({ name: "test", version: "1" })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
@@ -125,6 +128,65 @@ test("github_pr_reviewers and github_pr_labels forward their names and reject em
       ["reviewers", "task", { checkoutId: undefined, number: undefined, action: "add", reviewers: ["octocat"], teamReviewers: ["core"] }],
       ["labels", "task", { checkoutId: undefined, number: undefined, action: "remove", labels: ["ui", "bug"] }],
     ])
+  } finally {
+    await close()
+  }
+})
+
+test("evidence_attach_to_pr captures the desktop and posts it to the linked pull request", async () => {
+  const calls: unknown[] = []
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+  const { client, close } = await connect(
+    {
+      attachEvidence: (taskId, input) =>
+        Effect.sync(() => {
+          calls.push([taskId, input])
+          return {
+            commentUrl: "https://github.com/jarenm1/kestrel/pull/7#issuecomment-90",
+            imageUrl: "https://github.com/jarenm1/kestrel/blob/kestrel-evidence/x.png",
+          }
+        }),
+    },
+    (taskId) =>
+      Effect.sync(() => {
+        calls.push(["screenshot", taskId])
+        return png
+      }),
+  )
+  try {
+    const result = await client.callTool({
+      name: "evidence_attach_to_pr",
+      arguments: { caption: "Settings dialog", checkout: "co-1", number: 7 },
+    })
+    expect(result.isError).not.toBe(true)
+    expect(JSON.stringify(result)).toContain("https://github.com/jarenm1/kestrel/pull/7#issuecomment-90")
+    expect(calls).toEqual([
+      ["screenshot", "task"],
+      ["task", { caption: "Settings dialog", bytes: png, mimeType: "image/png", checkoutId: "co-1", number: 7 }],
+    ])
+
+    const blank = await client.callTool({ name: "evidence_attach_to_pr", arguments: { caption: "" } })
+    expect(blank.isError).toBe(true)
+    expect(calls).toHaveLength(2)
+  } finally {
+    await close()
+  }
+})
+
+test("evidence_attach_to_pr reports a desktop that is not running without touching GitHub", async () => {
+  let attached = 0
+  const { client, close } = await connect({
+    attachEvidence: () =>
+      Effect.sync(() => {
+        attached++
+        return { commentUrl: "https://c/90", imageUrl: "https://i/1.png" }
+      }),
+  })
+  try {
+    const result = await client.callTool({ name: "evidence_attach_to_pr", arguments: { caption: "Evidence" } })
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result)).toContain("desktop_open")
+    expect(attached).toBe(0)
   } finally {
     await close()
   }

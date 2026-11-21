@@ -33,7 +33,7 @@ export type McpDeps = McpAuthDeps &
   WorkspaceToolDeps &
   TaskToolDeps &
   ThreadToolDeps &
-  GitHubToolDeps &
+  Omit<GitHubToolDeps, "screenshot"> &
   AutomationToolDeps &
   ToolkitToolDeps &
   GpuToolDeps & {
@@ -72,7 +72,7 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
   registerTaskTools(server, ctx, deps)
   registerThreadTools(server, ctx, deps)
   registerAutomationTools(server, ctx, deps)
-  registerGitHubTools(server, ctx, deps)
+  registerGitHubTools(server, ctx, { github: deps.github, screenshot: deps.desktop.screenshot })
   registerGpuTools(server, ctx, deps)
   return server
 }

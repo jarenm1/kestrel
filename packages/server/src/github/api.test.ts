@@ -650,6 +650,211 @@ test("gh api writes only the allowlisted endpoints, on the thread's checkouts", 
   }
 })
 
+test("putFile creates the evidence branch from the named base, then writes the image", async () => {
+  const branch = "kestrel-evidence"
+  const path = ".kestrel/evidence/task-1/7-1700000000000.png"
+  const repoPrefix = "/repos/jarenm1/kestrel"
+  const gh = fakeGitHub(({ method, path: requestPath }) => {
+    if (method === "GET" && requestPath === `${repoPrefix}/git/ref/heads/${branch}`) return { status: 404 }
+    if (method === "GET" && requestPath === `${repoPrefix}/git/ref/heads/main`) return { json: { object: { sha: "base123" } } }
+    if (method === "POST" && requestPath === `${repoPrefix}/git/refs`) return { status: 201, json: { ref: `refs/heads/${branch}`, object: { sha: "base123" } } }
+    if (method === "GET" && requestPath === `${repoPrefix}/contents/${path}?ref=kestrel-evidence`) return { status: 404 }
+    if (method === "PUT" && requestPath === `${repoPrefix}/contents/${path}`) {
+      return { status: 201, json: { content: { path, html_url: `https://github.com/jarenm1/kestrel/blob/${branch}/${path}`, sha: "blob-sha" } } }
+    }
+    return { status: 500 }
+  })
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d])
+  try {
+    const written = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) =>
+        github.putFile("token", repo, { path, branch, bytes, message: "Desktop evidence for pull request #7", createFrom: "main" }),
+      ),
+    )
+    expect(written).toEqual({
+      path,
+      branch,
+      htmlUrl: `https://github.com/jarenm1/kestrel/blob/${branch}/${path}`,
+      sha: "blob-sha",
+    })
+    expect(gh.requests).toEqual([
+      { method: "GET", path: `${repoPrefix}/git/ref/heads/${branch}`, body: undefined },
+      { method: "GET", path: `${repoPrefix}/git/ref/heads/main`, body: undefined },
+      { method: "POST", path: `${repoPrefix}/git/refs`, body: { ref: `refs/heads/${branch}`, sha: "base123" } },
+      { method: "GET", path: `${repoPrefix}/contents/${path}?ref=kestrel-evidence`, body: undefined },
+      {
+        method: "PUT",
+        path: `${repoPrefix}/contents/${path}`,
+        body: { message: "Desktop evidence for pull request #7", content: Buffer.from(bytes).toString("base64"), branch },
+      },
+    ])
+  } finally {
+    gh.stop()
+  }
+})
+
+test("putFile retries a stale Contents write with the refreshed sha", async () => {
+  const branch = "kestrel-evidence"
+  const path = ".kestrel/evidence/task-1/7-1700000000000.png"
+  const repoPrefix = "/repos/jarenm1/kestrel"
+  let reads = 0
+  let writes = 0
+  const gh = fakeGitHub(({ method, path: requestPath }) => {
+    if (method === "GET" && requestPath === `${repoPrefix}/git/ref/heads/${branch}`) {
+      return { json: { object: { sha: "base123" } } }
+    }
+    if (method === "GET" && requestPath === `${repoPrefix}/contents/${path}?ref=kestrel-evidence`) {
+      reads += 1
+      return { json: { sha: reads === 1 ? "old-sha" : "new-sha" } }
+    }
+    if (method === "PUT" && requestPath === `${repoPrefix}/contents/${path}`) {
+      writes += 1
+      if (writes === 1) return { status: 409, json: { message: "sha does not match" } }
+      return { status: 200, json: { content: { path, html_url: `https://github.com/x/${path}`, sha: "new-sha" } } }
+    }
+    return { status: 500 }
+  })
+  try {
+    const written = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) =>
+        github.putFile("token", repo, { path, branch, bytes: new Uint8Array([1]), message: "evidence", createFrom: "main" }),
+      ),
+    )
+    expect(writes).toBe(2)
+    expect(written.sha).toBe("new-sha")
+    const puts = gh.requests.filter(({ method }) => method === "PUT")
+    expect(puts[0]?.body).toMatchObject({ sha: "old-sha" })
+    expect(puts[1]?.body).toMatchObject({ sha: "new-sha" })
+  } finally {
+    gh.stop()
+  }
+})
+
+test("putFile creates the branch when the ref lookup returns a prefix-match array", async () => {
+  const branch = "kestrel-evidence"
+  const path = ".kestrel/evidence/task-1/7-1700000000000.png"
+  const repoPrefix = "/repos/jarenm1/kestrel"
+  const gh = fakeGitHub(({ method, path: requestPath }) => {
+    // GitHub answers a prefix-only lookup with a 200 array, not a 404: kestrel-evidence-old exists,
+    // kestrel-evidence does not.
+    if (method === "GET" && requestPath === `${repoPrefix}/git/ref/heads/${branch}`) {
+      return { json: [{ ref: "refs/heads/kestrel-evidence-old", object: { sha: "other" } }] }
+    }
+    if (method === "GET" && requestPath === `${repoPrefix}/git/ref/heads/main`) return { json: { object: { sha: "base123" } } }
+    if (method === "POST" && requestPath === `${repoPrefix}/git/refs`) return { status: 201, json: { ref: `refs/heads/${branch}`, object: { sha: "base123" } } }
+    if (method === "GET" && requestPath === `${repoPrefix}/contents/${path}?ref=kestrel-evidence`) return { status: 404 }
+    if (method === "PUT" && requestPath === `${repoPrefix}/contents/${path}`) {
+      return { status: 201, json: { content: { path, html_url: `https://github.com/jarenm1/kestrel/blob/${branch}/${path}`, sha: "blob-sha" } } }
+    }
+    return { status: 500 }
+  })
+  try {
+    await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) =>
+        github.putFile("token", repo, { path, branch, bytes: new Uint8Array([1, 2, 3]), message: "evidence", createFrom: "main" }),
+      ),
+    )
+    expect(gh.requests.map(({ method, path: requestPath }) => `${method} ${requestPath}`)).toEqual([
+      `GET ${repoPrefix}/git/ref/heads/${branch}`,
+      `GET ${repoPrefix}/git/ref/heads/main`,
+      `POST ${repoPrefix}/git/refs`,
+      `GET ${repoPrefix}/contents/${path}?ref=kestrel-evidence`,
+      `PUT ${repoPrefix}/contents/${path}`,
+    ])
+    expect(gh.requests.find(({ method }) => method === "POST")?.body).toEqual({ ref: `refs/heads/${branch}`, sha: "base123" })
+  } finally {
+    gh.stop()
+  }
+})
+
+test("putFile reuses an existing branch and replaces an existing file by its sha", async () => {
+  const branch = "kestrel-evidence"
+  const path = ".kestrel/evidence/task-1/7-1700000000000.png"
+  const repoPrefix = "/repos/jarenm1/kestrel"
+  const gh = fakeGitHub(({ method, path: requestPath }) => {
+    if (method === "GET" && requestPath === `${repoPrefix}/git/ref/heads/${branch}`) return { json: { object: { sha: "base123" } } }
+    if (method === "GET" && requestPath === `${repoPrefix}/contents/${path}?ref=kestrel-evidence`) return { json: { sha: "previous" } }
+    if (method === "PUT" && requestPath === `${repoPrefix}/contents/${path}`) {
+      return { status: 200, json: { content: { path, html_url: `https://github.com/jarenm1/kestrel/blob/${branch}/${path}`, sha: "blob-sha" } } }
+    }
+    return { status: 500 }
+  })
+  const bytes = new Uint8Array([1, 2, 3])
+  try {
+    await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => github.putFile("token", repo, { path, branch, bytes, message: "again", createFrom: "main" })),
+    )
+    expect(gh.requests.map(({ method, path: requestPath }) => `${method} ${requestPath}`)).toEqual([
+      `GET ${repoPrefix}/git/ref/heads/${branch}`,
+      `GET ${repoPrefix}/contents/${path}?ref=kestrel-evidence`,
+      `PUT ${repoPrefix}/contents/${path}`,
+    ])
+    expect(gh.requests.at(-1)?.body).toEqual({ message: "again", content: Buffer.from(bytes).toString("base64"), branch, sha: "previous" })
+  } finally {
+    gh.stop()
+  }
+})
+
+test("deleteFile sends the file sha to the Contents API", async () => {
+  const path = ".kestrel/evidence/task-1/7-1700000000000.png"
+  const repoPrefix = "/repos/jarenm1/kestrel"
+  const gh = fakeGitHub(({ method, path: requestPath }) => {
+    if (method === "DELETE" && requestPath === `${repoPrefix}/contents/${path}`) {
+      return { status: 200, json: { commit: { sha: "commit-sha" } } }
+    }
+    return { status: 500 }
+  })
+  try {
+    await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) =>
+        github.deleteFile("token", repo, {
+          path,
+          branch: "kestrel-evidence",
+          sha: "blob-sha",
+          message: "Remove unlinked evidence",
+        }),
+      ),
+    )
+    expect(gh.requests.at(-1)).toEqual({
+      method: "DELETE",
+      path: `${repoPrefix}/contents/${path}`,
+      body: { message: "Remove unlinked evidence", branch: "kestrel-evidence", sha: "blob-sha" },
+    })
+  } finally {
+    gh.stop()
+  }
+})
+
+test("putFile surfaces GitHub's failure and never puts the token in the error", async () => {
+  const branch = "kestrel-evidence"
+  const path = ".kestrel/evidence/task-1/7-1700000000000.png"
+  const repoPrefix = "/repos/jarenm1/kestrel"
+  const gh = fakeGitHub(({ method, path: requestPath }) => {
+    if (method === "GET" && requestPath === `${repoPrefix}/git/ref/heads/${branch}`) return { json: { object: { sha: "base123" } } }
+    if (method === "GET" && requestPath === `${repoPrefix}/contents/${path}?ref=kestrel-evidence`) return { status: 404 }
+    if (method === "PUT" && requestPath === `${repoPrefix}/contents/${path}`) return { status: 500, json: { message: "server is down" } }
+    return { status: 500 }
+  })
+  try {
+    const failure = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) =>
+        github.putFile("secret-token", repo, { path, branch, bytes: new Uint8Array([1]), message: "evidence" }),
+      ).pipe(Effect.flip),
+    )
+    expect(failure.status).toBe(500)
+    expect(failure.message).toBe("GitHub API 500: server is down")
+    expect(failure.message).not.toContain("secret-token")
+  } finally {
+    gh.stop()
+  }
+})
+
 test("commentMismatch refuses comments on another pull request or written by someone else", () => {
   const own = { pullRequest: 7, author: "jarenm1" }
   expect(commentMismatch(own, 7, "jarenm1")).toBeNull()
