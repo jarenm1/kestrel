@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { allocateSlot, missingTapAddrs, networkForSlot, slotAddress, slotCid, slotTap } from "./network"
+import { allocateSlot, checkTapAddrs, missingTapAddrs, networkForSlot, slotAddress, slotCid, slotTap, tapAddrsAddCommand, tapDownCommands } from "./network"
 
 describe("slot allocation", () => {
   test("hands out the lowest free slot, skipping reserved and used ones", () => {
@@ -57,5 +57,23 @@ describe("tap_addrs resync", () => {
 
   test("refuses a listing it cannot read rather than guessing which taps are covered", () => {
     expect(() => missingTapAddrs('{"nftables":[{"set":{"elem":[{"prefix":{}}]}}]}', live)).toThrow()
+  })
+
+  test("a failed listing means the set is absent, whatever the live taps are", () => {
+    const check = checkTapAddrs({ status: 1, stdout: "", stderr: "Error: No such file or directory\n" }, live)
+    expect(check).toEqual({ kind: "missing-set", reason: "Error: No such file or directory" })
+  })
+
+  test("a readable listing reports the live taps it lacks", () => {
+    const check = checkTapAddrs({ status: 0, stdout: listing([["kn-2", "10.77.0.2"]]), stderr: "" }, live)
+    expect(check).toEqual({ kind: "present", missing: [networkForSlot(3)] })
+  })
+})
+
+describe("tap_addrs element commands", () => {
+  test("adding and deleting an element pass the set's element as one argv entry", () => {
+    const network = networkForSlot(2)
+    expect(tapAddrsAddCommand(network)).toEqual(["nft", "add", "element", "inet", "kestrel", "tap_addrs", '{ "kn-2" . 10.77.0.2 }'])
+    expect(tapDownCommands(network)[0]).toEqual(["nft", "delete", "element", "inet", "kestrel", "tap_addrs", '{ "kn-2" . 10.77.0.2 }'])
   })
 })

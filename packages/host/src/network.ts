@@ -2,6 +2,7 @@ import type { GuestNetwork } from "@cloudagents/protocol"
 import { Schema } from "effect"
 import { HostError } from "./errors"
 import type { NestNetwork } from "./schema"
+import type { ToolResult } from "./tools"
 
 /**
  * Per-VM networking. Each VM owns one tap device `kn-<slot>` and one IPv4 /32 address, routed point-to-point:
@@ -19,55 +20,10 @@ const CID_BASE = 2
 /** Fixed NIC MAC for every VM. Taps are point-to-point, so VMs never share a segment. */
 export const GUEST_MAC = "52:54:00:4b:4e:01"
 
-/** The agent owns the guest firewall: the `inet kestrel` table, and `ip kestrel-nat` for egress. */
+/** The host NixOS module (`nix/host-module.nix`) declares the `inet kestrel` table, its chains and the `tap_addrs` set, and owns them. The agent only adds and deletes elements of `tap_addrs`. */
 export const NFT_TABLE = "kestrel"
-export const NFT_NAT_TABLE = "kestrel-nat"
 /** One `ifname . address` element per live tap: the only source a tap may send from. */
 export const TAP_ADDRS_SET = "tap_addrs"
-
-/** Ports of the host services a guest may reach on `HOST_GATEWAY`: the dependency cache, the Nix cache and DNS. */
-const GATEWAY_TCP_PORTS = [3141, 5000, 53]
-const PRIVATE_RANGES = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8"]
-
-/**
- * The whole guest firewall as one `nft -f` script. The script destroys and rebuilds both tables with the live taps'
- * elements in the same transaction, so a reload restores every running tap's anti-spoofing rule at once. It is loaded
- * before any tap is brought up, so a guest never has a tap without its anti-spoofing rule. Traffic not from a tap is
- * not touched.
- */
-export const firewallRuleset = (taps: readonly NestNetwork[]): string =>
-  [
-    `destroy table inet ${NFT_TABLE}`,
-    `table inet ${NFT_TABLE} {`,
-    `  set ${TAP_ADDRS_SET} {`,
-    "    type ifname . ipv4_addr",
-    ...(taps.length === 0 ? [] : [`    elements = { ${taps.map(tapAddrsElement).join(", ")} }`]),
-    "  }",
-    "  chain input {",
-    "    type filter hook input priority filter; policy accept;",
-    "    ct state established,related accept",
-    `    iifname "kn-*" ip daddr ${HOST_GATEWAY} tcp dport { ${GATEWAY_TCP_PORTS.join(", ")} } accept`,
-    `    iifname "kn-*" ip daddr ${HOST_GATEWAY} udp dport 53 accept`,
-    '    iifname "kn-*" drop',
-    "  }",
-    "  chain forward {",
-    "    type filter hook forward priority filter; policy accept;",
-    `    iifname "kn-*" iifname . ip saddr != @${TAP_ADDRS_SET} drop`,
-    '    iifname "kn-*" meta nfproto ipv6 drop',
-    `    iifname "kn-*" ip daddr { ${PRIVATE_RANGES.join(", ")} } drop`,
-    '    iifname "kn-*" oifname != "kn-*" accept',
-    '    iifname "kn-*" drop',
-    "  }",
-    "}",
-    `destroy table ip ${NFT_NAT_TABLE}`,
-    `table ip ${NFT_NAT_TABLE} {`,
-    "  chain postrouting {",
-    "    type nat hook postrouting priority srcnat; policy accept;",
-    `    ip saddr ${SUBNET_PREFIX}.0.0/16 oifname != "kn-*" masquerade`,
-    "  }",
-    "}",
-    "",
-  ].join("\n")
 
 export const slotAddress = (slot: number): string => `${SUBNET_PREFIX}.${Math.floor(slot / 256)}.${slot % 256}`
 
@@ -140,7 +96,7 @@ const TapAddrsListing = Schema.Struct({
   ),
 })
 
-/** Arguments to `nft` that list the elements of `tap_addrs` as JSON, for `missingTapAddrs`. */
+/** Arguments to `nft` that list the elements of `tap_addrs` as JSON, for `checkTapAddrs`. */
 export const tapAddrsListArgs: readonly string[] = ["-j", "list", "set", "inet", NFT_TABLE, TAP_ADDRS_SET]
 
 /**
@@ -157,6 +113,20 @@ export const missingTapAddrs = (listing: string, lives: readonly NestNetwork[]):
   )
   return lives.filter((network) => !present.has(`${network.tap} ${network.address}`))
 }
+
+/** What a check of `tap_addrs` finds: the set does not exist, or it exists and lacks these live taps' elements. */
+export type TapAddrsCheck =
+  | { readonly kind: "missing-set"; readonly reason: string }
+  | { readonly kind: "present"; readonly missing: readonly NestNetwork[] }
+
+/**
+ * Decides, from the result of `nft` run with `tapAddrsListArgs`, whether the set exists and which live taps need their
+ * element re-added. A failed listing means the set is absent: the agent never creates the table or the set.
+ */
+export const checkTapAddrs = (listing: ToolResult, lives: readonly NestNetwork[]): TapAddrsCheck =>
+  listing.status === 0
+    ? { kind: "present", missing: missingTapAddrs(listing.stdout, lives) }
+    : { kind: "missing-set", reason: listing.stderr.trim() }
 
 /** Creates a tap, gives it the host side of the point-to-point link, and routes the guest address to it. */
 export const tapUpCommands = (network: NestNetwork, egressMbit: number): NetCommand[] => [
