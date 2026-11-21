@@ -467,6 +467,11 @@ const handleNest = async (request: Request, env: Env, url: URL): Promise<Respons
     if (body instanceof Response) return body
     return answerBox(await boxes.createNestBox(sessionId, body), 201)
   }
+  if (path === ControlPaths.nestBoxPreview && method === "POST") {
+    const body = await decodeBody(request, CreateNestBoxBody)
+    if (body instanceof Response) return body
+    return answerBox(await boxes.previewNestBox(sessionId, body))
+  }
   const resume = NEST_BOX_RESUME_PATH.exec(path)?.[1]
   if (resume !== undefined && method === "POST") {
     return answerBox(await boxes.resumeNestBox(sessionId, decodeURIComponent(resume)))

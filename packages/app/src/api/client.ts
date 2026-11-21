@@ -41,6 +41,7 @@ import {
   Message,
   ModelCatalog,
   type ModelProvider,
+  NestBoxPreview,
   NestHostList,
   Paths,
   ProviderUsage,
@@ -742,6 +743,9 @@ export const api = {
     await run(Effect.asVoid(request(Schema.Unknown, "POST", ControlPaths.nestBoxes, body)))
     return loadBoxes()
   },
+  /** A dry run of `createNestBox`: whether it would succeed now and what the box would cost. Creates nothing. */
+  previewNestBox: (body: CreateNestBoxBody) =>
+    run(request(NestBoxPreview, "POST", ControlPaths.nestBoxPreview, body)),
   resumeNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxResume(id)),
   suspendNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxSuspend(id)),
   parkNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxPark(id)),

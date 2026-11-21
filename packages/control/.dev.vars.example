@@ -4,6 +4,11 @@ GITHUB_CLIENT_SECRET=
 BOX_TOKEN=
 # Comma-separated GitHub logins that manage the managed-box fleet (/api/fleet/boxes). Empty: no operators.
 KESTREL_OPERATORS=
+# The domain Nest boxes are served under. Unset disables Nest.
+# KESTREL_NEST_DOMAIN=
+# Optional JSON price list for Nest cost estimates. Unset uses the proposed shadow-billing defaults; invalid JSON turns
+# estimates off. Example: {"currency":"USD","vcpuHour":0.05,"memoryGiBHour":0.016,"gpuHour":1.2,"diskGiBMonth":0.1,"parkedDiskGiBMonth":0.04}
+# KESTREL_NEST_RATES=
 # Cloudflare Realtime TURN key id and API token, for POST /box/turn. Set both or neither; the token is never sent to a box.
 KESTREL_TURN_KEY_ID=
 KESTREL_TURN_API_TOKEN=

@@ -196,6 +196,8 @@ export const ControlPaths = {
   nestEnroll: "/box/nest/enroll",
   /** POST CreateNestBoxBody -> UserBox (with `nest`): places and creates a Nest box for the signed-in user. */
   nestBoxes: "/api/nest/boxes",
+  /** POST CreateNestBoxBody -> NestBoxPreview: a dry run that reserves nothing. */
+  nestBoxPreview: "/api/nest/boxes/preview",
   /** POST (no body) -> UserBox: asks the box's host to resume or suspend it. Owner only; 404 otherwise. */
   nestBoxResume: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/resume`,
   nestBoxSuspend: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/suspend`,

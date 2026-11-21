@@ -413,6 +413,19 @@ key and cache.nixos.org.
 - **Wake before work**: automation dispatch to a Nest box sends `resume` and waits for `running` (60 s) first.
 - Usage records keep flowing through `meterRecords`; the host agent emits them from cgroups.
 
+### Dry run and cost estimates
+
+`POST /api/nest/boxes/preview` runs the create checks without creating anything: it reports whether a box with the
+given name and limits would fit now (the per-user box limit and a host with room) and why not, if not. Nothing is
+inserted and no host is reserved, so a dry run never changes what the next create does.
+
+Every box status carries an optional `estimate`, and a dry run returns one too. An estimate prices a shape at its
+limits for a 730-hour month, so it is an upper bound: a box that idles below its limits costs less. CPU, memory and an
+attached GPU are priced while running; the volume is priced every month, at the running rate while the box runs or is
+suspended and at the parked rate while it is parked. The rates are the proposed shadow-billing figures by default and
+can be replaced with `KESTREL_NEST_RATES`, a JSON price list (`currency`, `vcpuHour`, `memoryGiBHour`, `gpuHour`,
+`diskGiBMonth`, `parkedDiskGiBMonth`). An invalid value turns estimates off; it never breaks the box list.
+
 ## Metering
 
 The host agent replaces `scripts/nest-meter/collector.ts`: same records (`meter.ts`), same outbox, measured from the VM

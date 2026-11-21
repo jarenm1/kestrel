@@ -26,6 +26,11 @@ export interface Env {
    */
   KESTREL_NEST_DOMAIN?: string
   /**
+   * A JSON price list for Nest box estimates, such as `{"currency":"USD","vcpuHour":0.05,...}`. Unset uses the proposed
+   * shadow-billing defaults; an invalid value leaves estimates off rather than breaking the box list.
+   */
+  KESTREL_NEST_RATES?: string
+  /**
    * Cloudflare Realtime TURN key id and provider API token, for `POST /box/turn`. Both unset: boxes get 204 and keep
    * their own TURN configuration. One without the other: the route answers 502, naming both.
    */

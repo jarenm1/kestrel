@@ -3,17 +3,22 @@
  * tokens and the status a box shows its owner. The Hub's Nest code (`nest-fleet.ts`) applies them to SQLite.
  */
 import {
+  NestRates,
   type NestBoxStatus,
+  type NestCostEstimate,
   type NestHostCapacity,
   type NestHostCommand,
   type NestLimits,
   type NestVmReport,
   toBase64,
 } from "@cloudagents/protocol"
+import { Schema } from "effect"
 import type { NestBoxRow } from "./nest-table"
 
 const GiB = 1024 * 1024 * 1024
 const MiB = 1024 * 1024
+/** A month of running, the convention the production cost model uses. */
+const HOURS_PER_MONTH = 730
 
 /**
  * The limits a box gets when its creator names none. The contract says "the standard shape" without listing it, so
@@ -29,6 +34,54 @@ export const NEST_STANDARD_LIMITS: NestLimits = {
 /** A fresh VM boots with 1 GiB plugged; a placement needs that plus the smallest headroom the resource policy keeps. */
 export const NEST_BOOT_MEMORY_BYTES = 1 * GiB
 export const NEST_PLACEMENT_HEADROOM_BYTES = 512 * MiB
+
+/**
+ * The proposed shadow-billing rates from the production design. They price a shape at its limits, not a user's actual
+ * use, so every estimate is an upper bound. An operator replaces them with `KESTREL_NEST_RATES` once real figures exist.
+ */
+export const DEFAULT_NEST_RATES: NestRates = {
+  currency: "USD",
+  vcpuHour: 0.05,
+  memoryGiBHour: 0.016,
+  gpuHour: 1.2,
+  diskGiBMonth: 0.1,
+  parkedDiskGiBMonth: 0.04,
+}
+
+/**
+ * A rate card from `KESTREL_NEST_RATES`, or the defaults when it is unset. Null when the value is not a valid card:
+ * an estimate may then be absent, but a bad price list must never break the box list.
+ */
+export const parseNestRates = (raw: string | undefined): NestRates | null => {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_NEST_RATES
+  try {
+    return Schema.decodeUnknownSync(NestRates, { onExcessProperty: "error" })(JSON.parse(raw))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * What a box of `limits` would cost at those limits. CPU and memory are priced while running, a GPU only when the
+ * shape allows one, and the volume every month. `monthlyRunning` also adds the volume at the running disk rate.
+ */
+export const estimateNestCost = (limits: NestLimits, rates: NestRates): NestCostEstimate => {
+  const volumeGiB = limits.volumeBytes / GiB
+  const hourlyRunning =
+    limits.maxVcpus * rates.vcpuHour +
+    (limits.maxMemoryBytes / GiB) * rates.memoryGiBHour +
+    (limits.gpu === "on-demand" ? rates.gpuHour : 0)
+  return {
+    currency: rates.currency,
+    hourlyRunning,
+    monthlyRunning: hourlyRunning * HOURS_PER_MONTH + volumeGiB * rates.diskGiBMonth,
+    monthlyParked: volumeGiB * rates.parkedDiskGiBMonth,
+  }
+}
+
+/** The status with its estimate, or unchanged when the operator has no rate card. */
+export const withNestEstimate = (status: NestBoxStatus, rates: NestRates | null): NestBoxStatus =>
+  rates === null ? status : { ...status, estimate: estimateNestCost(status.limits, rates) }
 
 /** How long the control plane waits for a host's `result` before it drops the in-flight marker. `evict` is not tracked. */
 const COMMAND_TIMEOUT_MS: Record<NestHostCommand["_tag"], number | null> = {

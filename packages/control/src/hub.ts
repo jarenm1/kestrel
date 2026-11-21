@@ -62,11 +62,13 @@ import {
   type MeterReport,
   type MeterReportBody,
   type CreateNestBoxBody,
+  type NestBoxPreview,
   type NestControlFrame,
   type NestEnrollBody,
   type NestEnrollResult,
   type NestHostList,
   type NestLimits,
+  type NestRates,
 } from "@cloudagents/protocol"
 import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
 import {
@@ -137,7 +139,15 @@ import { ensureWaitlistTable, storeWaitlistSignup } from "./waitlist-table"
 import { deleteBoxActivity, ensureBoxActivityTable, fleetActivity, recordBoxActivity } from "./activity-table"
 import { NestFleet, type NestOutcome } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
-import { NEST_STANDARD_LIMITS, newSecret, nestLimitsError, publicUrlFor } from "./nest-control"
+import {
+  NEST_STANDARD_LIMITS,
+  estimateNestCost,
+  newSecret,
+  nestLimitsError,
+  parseNestRates,
+  publicUrlFor,
+  withNestEstimate,
+} from "./nest-control"
 import { bumpTurnGeneration, ensureTurnGenerationsTable, turnGeneration } from "./turn-generations"
 import { findProvider } from "./providers"
 import { RefreshRefused, oauthClient, refreshDueAt, refreshGrant, refreshRetryMs, type OAuthRefresh } from "./oauth-tokens"
@@ -949,6 +959,40 @@ export class Hub extends DurableObject<Env> {
     return this.userBoxView(session.login, id)
   }
 
+  /**
+   * A dry run of `createNestBox`: checks the box limit and placement and prices the shape, but inserts no row and
+   * reserves no host. A dry run never changes what the next create does.
+   */
+  previewNestBox(sessionId: string, body: CreateNestBoxBody): BoxOutcome<NestBoxPreview> {
+    const session = this.session(sessionId)
+    if (!session) return UNAUTHENTICATED
+    if (!this.env.KESTREL_NEST_DOMAIN) return NEST_DISABLED
+    const limits = body.limits ?? NEST_STANDARD_LIMITS
+    const shape = nestLimitsError(limits)
+    if (shape !== null) return { ok: false, status: 400, tag: "BadRequest", message: shape }
+    const count =
+      this.ctx.storage.sql
+        .exec<{ count: number }>("SELECT COUNT(*) AS count FROM user_boxes WHERE login = ?", session.login)
+        .toArray()[0]?.count ?? 0
+    const reason =
+      count >= MAX_USER_BOXES
+        ? `at most ${MAX_USER_BOXES} boxes per user`
+        : this.nest.placement(null) === null
+          ? "no Nest host has room for a new box"
+          : null
+    const rates = this.nestRates()
+    return {
+      ok: true,
+      value: {
+        name: body.name,
+        limits,
+        available: reason === null,
+        reason,
+        ...(rates === null ? {} : { estimate: estimateNestCost(limits, rates) }),
+      },
+    }
+  }
+
   async resumeNestBox(sessionId: string, id: string): Promise<BoxOutcome<UserBox>> {
     return this.nestAction(sessionId, id, (login) => this.nest.resume(login, id))
   }
@@ -979,6 +1023,11 @@ export class Hub extends DurableObject<Env> {
     return { hosts: this.nest.hostList() }
   }
 
+  /** The operator's price list, or null when `KESTREL_NEST_RATES` is not a valid card (a broken card says no price). */
+  private nestRates(): NestRates | null {
+    return parseNestRates(this.env.KESTREL_NEST_RATES)
+  }
+
   nestEnroll(body: NestEnrollBody): Promise<NestEnrollResult | null> {
     return this.nest.enroll(body)
   }
@@ -1001,7 +1050,8 @@ export class Hub extends DurableObject<Env> {
     const owned = this.ownedBox(login, id)
     if (!owned) return NO_SUCH_BOX
     const nest = this.nest.statusesOf(login).get(id)
-    return { ok: true, value: nest === undefined ? owned.box : { ...owned.box, nest } }
+    if (nest === undefined) return { ok: true, value: owned.box }
+    return { ok: true, value: { ...owned.box, nest: withNestEstimate(nest, this.nestRates()) } }
   }
 
   /** The box's owner and their connection secrets for `ControlPaths.boxSelf`; null unless `secret` is the box's. */
@@ -1047,11 +1097,12 @@ export class Hub extends DurableObject<Env> {
       .exec<{ activeBoxId: string | null }>("SELECT active_box_id AS activeBoxId FROM users WHERE login = ?", login)
       .toArray()[0]
     const nests = this.nest.statusesOf(login)
+    const rates = this.nestRates()
     const managed = managedBoxFor(sql, login)
     return {
       boxes: boxes.map((box) => {
         const nest = nests.get(box.id)
-        return nest === undefined ? box : { ...box, nest }
+        return nest === undefined ? box : { ...box, nest: withNestEstimate(nest, rates) }
       }),
       activeBoxId: user?.activeBoxId ?? null,
       managedBox: managed === null ? null : { id: managed.id, url: managed.url },
